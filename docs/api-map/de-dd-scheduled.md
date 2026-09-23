@@ -226,7 +226,7 @@ All field names are the spec's exact JSON property names. "req" = listed in the 
 
 ### 2.2 HayArchivedScheduledPayment
 
-"Any previous versions of this payment schedule that has subsequently been updated" [spec]. Field-for-field identical to `HayScheduledPayment` **except it has no `previousVersions` field** (verified by jq: same 17 properties minus `previousVersions`) [spec]. Same enums for `frequency`, `status`, `type`. Only appears nested inside `HayScheduledPayment.previousVersions`; only readable via the two GETs [spec]. Archived versions are expected to carry `status: "REPLACED"` ("Payment schedule has been replaced with a newer version") [inferred from the status description].
+"Any previous versions of this payment schedule that has subsequently been updated" [spec]. Field-for-field identical to `HayScheduledPayment` **except it has no `previousVersions` field** (verified by jq: `HayScheduledPayment` has 18 properties; the archived schema has the other 17, byte-identical, without `previousVersions`) [spec]. Same enums for `frequency`, `status`, `type`. Only appears nested inside `HayScheduledPayment.previousVersions`; only readable via the two GETs [spec]. Archived versions are expected to carry `status: "REPLACED"` ("Payment schedule has been replaced with a newer version") [inferred from the status description].
 
 ### 2.3 ScheduledPaymentRecipient
 
@@ -382,3 +382,116 @@ v0 vocabulary (`DirectDebitResponse.outcome`, `DeTransactionDetails.outcome`): `
 
 - `DeTransactionDetails(.V1).type`: enum `["CREDIT", "DEBIT"]`; description lists only `DEBIT` [spec]. Not a state machine — a fixed classifier; always `DEBIT` for records created by this domain [inferred].
 - `DirectEntryEventDto.type`: `["DEBIT"]`; `DirectEntryEventDto.direction`: `["OUTBOUND"]` [spec:webhooks].
+
+## 4. Invariants and calculations
+
+### 4.1 Identifiers
+- Every id in this domain is a UUID string: `accountId`, `paymentId`/`hayId`, `customerHayId`, `transactionId`, `transactionHayId`, `idempotencyKey`, `traceId` [spec].
+- Direct Debit `transactionId` is **supplied by the client** in `CreateDirectDebitRequestBody` and echoed as the required `transactionId` of the response; it is the key for `getDirectDebitV0/V1` and `getDirectEntryStatusV1` [spec, inferred]. `idempotencyKey` is a second client-supplied UUID "used to recognise any subsequent retries" [spec].
+- Scheduled payment `hayId` is platform-generated (created via GraphQL/UI) and is what the B2B API calls `paymentId` [spec, inferred].
+
+### 4.2 Amounts and currency
+- `CurrencyAmount.amount` is a JSON number "to 2 decimal places"; `currency` is ISO 4217 [spec]. Scheduled payment samples elsewhere in the docs use `AUD`.
+- Direct Debit `amount` is a bare number ("to 2 decimal places") with no currency field; positive value = the amount pulled from the recipient and credited to the sender [spec, inferred]. No `minimum` is declared; whether 0 or negative is rejected is undocumented (section 7).
+- Webhook `TransactionEventDto.currencyAmount.amount` is signed: negative when the customer account is debited (DD sample: -457.12), positive when credited (INTERBANK_TRANSFER_IN sample: 200.00) [docs:direct-debits].
+- Balance formula visible in the webhook samples (transactions/accounts domain, quoted for the credit leg): `availableBalance = totalBalance - heldBalance` (66049.69 - 3124.11 = 62925.58 in the INTERBANK_TRANSFER_IN sample; lockedBalance and stacksBalance are 0 in every sample so their sign in the formula is not determinable from this domain's docs) [docs:direct-debits, inferred].
+
+### 4.3 Direct Debit timing
+- Status timeline: RECEIVED and ACCEPTED are synchronous with the create call; SUBMITTED occurs at the next Direct Entry batch; the platform "will monitor over 2 working days to catch if a Direct Debit is returned"; "After two working days the requested customer account is credited" (COMPLETE) [docs:direct-debits].
+- "there is a two-day period between the request and the transaction being credited to the customer's account" [docs:direct-debits]. "Working days" — Australian business days [inferred; BECS context].
+- `processingDate` (date) = "Date that the Direct Debit transfer takes effect" [spec]. Its relation to the request time (same day? next batch day?) is undocumented (section 7).
+- Background: BECS "settle their obligations through RBA Exchange Settlement Accounts (ESAs) six times each business day" [docs:direct-debits] — informational only; no API-visible batch time is documented.
+- Credit to the sender account happens at COMPLETE, **not** at ACCEPTED/SUBMITTED; nothing is held or reserved on the sender account in the meantime as far as documented [docs:direct-debits, inferred].
+
+### 4.4 Direct Debit list/date handling
+- `fromUtc`/`toUtc` are `format: date` (YYYY-MM-DD) despite descriptions saying "DateTime in UTC format" [spec]. Which timestamp of the record they filter on, and inclusivity, are undocumented.
+- `offset` and `limit` are both **required**; `limit` "value between 1 and 1000" [spec].
+
+### 4.5 Scheduled payment schedule calculations [spec field descriptions]
+- `startDate` = "First processing date for a recurring payment, or the processing date for a scheduled single payment".
+- `frequency` cadence: WEEKLY = every week from `startDate`; FORTNIGHTLY = every two weeks; MONTHLY = every month; QUARTERLY = every quarter. For MONTHLY/QUARTERLY, when the computed day does not exist ("i.e. 30th February") the payment is "triggered on next available date".
+- `endDate` = "Recurring payment processing end date"; `numberOfPayments` = "Total number of times a recurring payment will be processed"; `numberOfProcessedPayments` = "Total number of times the payment has been processed"; `lastProcessedDateTimeUtc` updated on each processing.
+- Invariants [inferred]: `numberOfProcessedPayments <= numberOfPayments`; for `type == "ONE_TIME"` the schedule has a single processing on `startDate` (and `frequency`/`endDate`/`numberOfPayments` are presumably absent or 1); `status` becomes COMPLETED when the count is reached or `endDate` passes. Whether both `endDate` and `numberOfPayments` can be set, and which wins, is undocumented (section 7).
+- `shouldCancelOnFailure`: when true, a failed payment ("insufficient funds in Account") moves the schedule to FAILED and a recipient rejection to REJECTED; when false, the schedule keeps running [spec, inferred].
+- A processed occurrence produces a transaction in the transactions domain with `originType: "SCHEDULED_PAYMENT"` (and presumably `originId` = the schedule `hayId`) and `type` `INTERBANK_TRANSFER_OUT`/`INTRABANK_TRANSFER_OUT` for `recipientType: ACCOUNT` or `BPAY_TRANSFER_OUT` for `recipientType: BPAY` [spec enums; mapping inferred]. The GraphQL create mutation response includes "the transaction outcome" [docs:scheduled-payments].
+
+### 4.6 Limits touching this domain
+- Daily limits "are calculated on a rolling 24h window ... the limit checker will get all transactions from the past 24h for that account and check if the total (including the current transaction) would go over the limit" [docs:account-limits].
+- `DIRECT_DEBIT_PER_DAY`: spec "Maximum value of outgoing direct debit transfers"; docs "The maximum total value of outgoing cash from inbound direct debit requests that can be processed from an account in a single day" [spec, docs:account-limits]. Breach outcome `REFUSED_DAILY_DIRECT_DEBIT_LIMIT_BREACHED` [docs:payment-transaction-outcome].
+- Liquidity threshold type `TOTAL_DAILY_INBOUND_DIRECT_DEBIT` (client-level, `CreateThresholdRequestBody.type` / `LiquidityThreshold.type`) with breach outcome `REFUSED_TOTAL_INBOUND_DIRECT_DEBIT_DAILY_LIMIT_BREACHED` ("Transaction declined as the total daily limit for inbound direct debits has been exceeded") [spec, docs:payment-transaction-outcome].
+- Scheduled payments to ACCOUNT recipients are subject to `PAYMENT_TO_ACCOUNT_NUMBER` ("Maximum value of individual outgoing cash transfer") and `TOTAL_SPEND_PER_YEAR`; BPAY recipients to `BPAY_DAILY_LIMIT` ("Maximum value of outgoing BPAY payments") with outcome `REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED`; `MAX_BALANCE` applies to the credit leg of a completed DD (`REFUSED_MAX_BALANCE_EXCEEDED`) [spec, docs:account-limits, docs:payment-transaction-outcome; applicability to this domain inferred].
+- Risk level HIGH "set all limits to 0, which means setting an account to a HIGH risk level will prevent all outbound and inbound transactions" — would block scheduled payment occurrences and the DD credit leg [docs:account-limits, inferred].
+
+## 5. Cross-domain dependencies
+
+Reads from / writes to other domains:
+
+- **Accounts**: `accountId` path param of the three scheduled-payment ops must be an existing Account [inferred]. A DD's sender is identified by `senderBsb` + `senderAccountNumber`, which the platform must resolve to a Shaype account (`HayAccount` BSB/account number) to credit it at COMPLETE [inferred]. Account status gating: the payment outcomes `REFUSED_ACCOUNT_BLOCKED` / `REFUSED_ACCOUNT_CLOSED` exist [docs:payment-transaction-outcome]; `HayAccount.status` enum is `["PENDING_APPROVAL", "APPROVED", "ACTIVE", "LOCKED", "DORMANT", "CLOSED", "ACTIVE_IN_ARREARS"]` [spec]. Which statuses allow a DD credit or a schedule occurrence is undocumented.
+- **Account closure**: `closeAccount` (`POST /v0/accounts/{accountId}/close`, `CloseAccountResponse`) reports `ClosureCheckerError.type` including `INFLIGHT_OUTBOUND_DIRECT_DEBITS` (alongside `ACCOUNT_BALANCE_TOTAL`, `ACCOUNT_BALANCE_STACKS`, `ACCOUNT_BALANCE_HELD`, `ACCOUNT_BALANCE_LOCKED`, `ACCOUNT_BALANCE_OVERDRAFT`, `ACCOUNT_BALANCE_TECHNICAL_OVERDRAFT`, `CHILD_ACCOUNT_STATUS`) [spec]. So the accounts domain must be able to ask this domain "does account X have outbound DDs in a non-terminal status?" [inferred]. Whether ACTIVE scheduled payments block closure is not listed [spec].
+- **Balances**: DD COMPLETE credits the sender account by `amount` and emits `TRANSACTION`/`DIRECT_DEBIT_TRANSFER` with `accountBalances` [docs:direct-debits]. Scheduled occurrences debit the account like any outbound transfer/BPAY [inferred].
+- **Transactions**: `FinancialTransaction.originType` includes `SCHEDULED_PAYMENT` ("Transaction initiated by a schedule") and `DIRECT_DEBIT` ("Transaction initiated by Direct Debit"); `FinancialTransaction.originId` = "Additional identifier applied to Transaction related to origin of the request"; `FinancialTransaction.type` includes `DIRECT_DEBIT_TRANSFER` ("Cash transfer out of Account via Direct Debit"), `INTERBANK_TRANSFER_OUT` ("Cash transfer out of Account via Direct Credit or NPP"), `BPAY_TRANSFER_OUT` [spec]. `SearchTransactionsRequestBody.originType` and `CreateTransactionRequestBody.originType` also accept `SCHEDULED_PAYMENT` / `DIRECT_DEBIT` [spec].
+- **Limits / liquidity thresholds**: `DIRECT_DEBIT_PER_DAY`, `BPAY_DAILY_LIMIT`, `PAYMENT_TO_ACCOUNT_NUMBER`, `MAX_BALANCE`, `TOTAL_SPEND_PER_YEAR` (account limits, `ExternalLimitAmounts.type`); `TOTAL_DAILY_INBOUND_DIRECT_DEBIT` (`LiquidityThreshold.type`) [spec] — see 4.6.
+- **Payments (Direct Credit)**: Direct Credit is *not* in this domain: it goes through `maketransferv1` with `transferType: ACCOUNT`; the platform routes to INTERNAL (Shaype BSB) → NPP (if enabled) → DE otherwise, and emits `INTERBANK_TRANSFER_IN` / `INTERBANK_TRANSFER_OUT` TRANSACTION webhooks [docs:direct-debits].
+- **BPAY**: scheduled payments with `recipientType: BPAY` carry `BpayDetails` (`billerCode`, `billerReference`, ...) and are executed as BPAY payments [spec]; BPAY validation outcomes (`REFUSED_BPAY_INVALID_BILLER_CODE`, `REFUSED_BPAY_INVALID_REFERENCE`, `REFUSED_BPAY_INVALID_PAYMENT`, `REFUSED_BPAY_REJECTED`) apply [docs:payment-transaction-outcome].
+- **Webhooks**: emits `DIRECT_ENTRY` (per DD status), `TRANSACTION` (`DIRECT_DEBIT_TRANSFER`; scheduled occurrences as their own transactionType with `originType: SCHEDULED_PAYMENT`), `SCHEDULED_PAYMENT` (on creation via GraphQL) [spec:webhooks, docs:direct-debits]. Delivery: retried "18 times over a period of up to 48 hours" with exponential backoff on client responses 401, 403, 429, 5XX [docs:webhook-notification].
+- **External authorisation (client-held balances)** [spec:external-balance]: `POST /transactions` (`authoriseTransaction`) is called by Shaype with `authorisationTransactionType` enum `["BPAY_TRANSFER_OUT", "DIRECT_DEBIT_TRANSFER", "GENERAL_CREDIT", "GENERAL_DEBIT", "INBOUND_PAYMENT", "OUTBOUND_PAYMENT"]`; the client may refuse with `errorCode` `["REFUSED_MAX_BALANCE_EXCEEDED", "REFUSED_NOT_ENOUGH_FUNDS", "REFUSED_SENDER_ACCOUNT_NOT_VERIFIED"]` (HTTP 470). Scheduled occurrences (`OUTBOUND_PAYMENT`/`BPAY_TRANSFER_OUT`) and DD money movement (`DIRECT_DEBIT_TRANSFER`) would pass through this callback for clients on that model [inferred].
+- **GraphQL / UI portal (not in the B2B spec)**: `createScheduledPayment` (by `accountId`) and `updateSchedulePayment` (by `paymentId`) mutations are the only create/update paths [docs:scheduled-payments]. A cleanroom server needs a test-only seeding path for schedules (section 7).
+- **PayTo mandates** (separate domain): `GetMandateActionsDetailsCreationDto.mandateType` has a `DIRECT_DEBIT` value [spec] — unrelated to BECS direct debits; do not conflate.
+
+## 6. Error catalogue
+
+No error `message`/`details` texts are shown anywhere in the spec or the three docs pages for this domain; the spec provides only status codes + `ErrorResponse` shape [spec]. Everything below is therefore "declared" (code exists on the op) or "inferred" (which condition maps to it).
+
+| condition | HTTP | body | source |
+|---|---|---|---|
+| Malformed/invalid request (bad uuid in path, missing required query param, invalid JSON, schema violation) | 400 "Bad Request" | `ErrorResponse` | declared on all 10 ops [spec]; mapping inferred |
+| Caller not permitted (account/schedule/DD not owned by the client, or auth failure) | 403 "Forbidden" | `ErrorResponse` | declared on all 10 ops [spec]; mapping inferred |
+| Semantically invalid / business-rule failure (e.g. `limit` outside 1..1000, `fromUtc > toUtc`, cancelling a non-ACTIVE schedule, unknown id) | 422 "Unprocessable Content" | `ErrorResponse` | declared on 9 ops [spec]; mapping inferred |
+| `createDirectDebitV0` invalid input | 422 "Invalid Input" | **`DirectDebitResponse`** (`outcome` presumably `REJECTED`, `details` explains) | [spec]; outcome value inferred |
+| `createDirectDebitV1` validation/authorisation failure surfaced as a business outcome | 200 | `DirectDebitResponseV1` with `outcome: "REJECTED"` ("Direct Debit request failed validation or authorization and can't be executed") and `details` | [spec] |
+| Server failure | 500 "Internal Server Error" | `ErrorResponse` | declared on all 10 ops [spec] |
+| Not implemented | 501 "Not Implemented" | `ErrorResponse` | declared on all 10 ops [spec] |
+| Resource not found | **not declared** (no 404 on any op) | — | [spec]; see section 7 |
+| Conflict / duplicate `idempotencyKey` or `transactionId` | **not declared** (no 409 on any op) | — | [spec]; see section 7 |
+
+`ErrorResponse` fields: `details`, `message`, `status` (string, "HTTP response status"), `traceId` [spec].
+
+Transaction-level outcomes relevant to this domain (these appear as `outcome` on TRANSACTION webhooks / transaction records, not as HTTP errors) [docs:payment-transaction-outcome, verbatim descriptions]:
+- `ACCEPTED`: "Transaction accepted by platform for further processing"
+- `REFUSED_NOT_ENOUGH_FUNDS`: "Transaction declined as it would exceed the account's maximum balance MIN_BALANCE limit." (sic)
+- `REFUSED_MAX_BALANCE_EXCEEDED`: "Transaction declined as it would exceed the account's maximum balance MAX_BALANCE limit."
+- `REFUSED_DAILY_DIRECT_DEBIT_LIMIT_BREACHED`: "Transaction declined as the daily direct debit DIRECT_DEBIT_PER_DAY limit has been exceeded."
+- `REFUSED_TOTAL_INBOUND_DIRECT_DEBIT_DAILY_LIMIT_BREACHED`: "Transaction declined as the total daily limit for inbound direct debits has been exceeded."
+- `REFUSED_DAILY_TRANSFERS_OUT_LIMIT_BREACHED`: "Transaction declined because the daily limit for outgoing transfers has been exceeded."
+- `REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED`: "Transaction declined because the total daily BPAY_DAILY_LIMIT limit for outbound BPAY transactions has been exceeded."
+- `REFUSED_BPAY_INVALID_BILLER_CODE` / `REFUSED_BPAY_INVALID_REFERENCE` / `REFUSED_BPAY_INVALID_PAYMENT` / `REFUSED_BPAY_REJECTED`: BPAY validation/gateway refusals.
+- `REFUSED_ACCOUNT_BLOCKED` / `REFUSED_ACCOUNT_CLOSED` / `REFUSED_RECIPIENT_ACCOUNT_BLOCKED` / `REFUSED_RECIPIENT_ACCOUNT_CLOSED`: account status refusals.
+- `REFUSED_RULES`: "violation of predefined account rules"; `REFUSED_FRAUD`; `INTERNAL_ERROR`; `REFUSED_INSUFFICIENT_DATA`.
+- Limit-breach shape shown in [docs:account-limits]: `"outcome": "LIMIT_BREACH", "detailedOutcome": "REFUSED_DAILY_ATM_WITHDRAWAL_LIMIT_BREACHED"` (the `TransactionOutcome.outcome` enum in the spec spells the generic value `REFUSED_LIMIT_BREACH`) [spec, docs:account-limits].
+- Full `TransactionEventDto.outcome` enum (41 values) is in the transactions/webhooks domain; verbatim list available via `jq '.components.schemas.TransactionEventDto.properties.outcome.enum' notification-webhooks.json`.
+
+## 7. Open questions
+
+Things the implementer must decide because neither spec nor docs define them:
+
+1. **404 vs 422 vs 403 for unknown ids.** No op declares 404. Decide what `getScheduledPaymentById`, `cancelScheduledPayment`, `getDirectDebitV0/V1`, `getDirectEntryStatusV1` return for an unknown `accountId`/`paymentId`/`transactionId`, and for a `paymentId` that exists but belongs to a different `accountId` (403? 422? empty?).
+2. **HTTP status for request validation failures.** Both 400 and 422 are declared everywhere; the split (JSON-schema failure vs business rule) is undocumented. Also whether `createDirectDebitV1` returns HTTP 4xx or `200 + outcome: "REJECTED"` for each class of failure (bad BSB, unknown sender account, limit breach, blocked account).
+3. **Idempotency of `createDirectDebitV1`/`V0`.** Behaviour on a retry with the same `idempotencyKey` (replay the original 200? 409? new record?), on the same `transactionId` with a different `idempotencyKey`, and on the same `idempotencyKey` with a different body. No 409 is declared.
+4. **Initial outcome returned by create.** Docs say RECEIVED and ACCEPTED webhooks are sent synchronously; the create response `outcome` is presumably `ACCEPTED` (or `REJECTED`), but `RECEIVED` is also a legal value. Decide.
+5. **`transactionHayId` vs `transactionId`.** Whether `DeTransactionDetails(.V1).transactionHayId` equals the client-supplied `transactionId` or is a distinct platform id.
+6. **v0 rendering of v1-only states.** How `getDirectDebitV0`/`getDirectDebitsV0` present records whose v1 status is `RECEIVED`, `COMPLETE` or `INCOMPLETE` (the v0 enum lacks them) — map COMPLETE→SUBMITTED? omit? Also the v0 list filter has no `REJECTED` value.
+7. **Which date `fromUtc`/`toUtc` filter on** (request/creation date vs `processingDate` vs last status change) and inclusivity of `toUtc`; behaviour when `limit` is outside 1..1000 or `offset` negative.
+8. **`processingDate` derivation** (request date? next batch business day?) and the exact "2 working days" clock (calendar used, cut-off time, timezone) for SUBMITTED → COMPLETE/RETURNED in a local simulator. Suggest an explicit test hook to advance DD state.
+9. **Which transaction(s) the credit leg of an outbound DD produces.** The docs' `DIRECT_DEBIT_TRANSFER` sample is a *debit* of the customer ("external bank account pull funds from customer account"), and the spec describes `DIRECT_DEBIT_TRANSFER` as "Cash transfer out of Account via Direct Debit", whereas an outbound DD *credits* the sender at COMPLETE. Decide the `transactionType`, sign of `currencyAmount`, `originType` (`DIRECT_DEBIT`?) and `originId` for the credit, and whether a separate transaction is emitted for RETURNED/INCOMPLETE.
+10. **Whether `DIRECT_DEBIT_PER_DAY` applies to this flow.** Spec ("outgoing direct debit transfers") and docs ("outgoing cash from inbound direct debit requests") disagree; decide whether outbound-DD creation is limit-checked at all, and against which account.
+11. **Sender account resolution.** Must `senderBsb` be a Shaype BSB / must `senderBsb+senderAccountNumber` resolve to an existing Shaype account in an allowed status? What if it does not (REJECTED at create, or INCOMPLETE at credit time)? Which `customerHayId` receives the `DIRECT_ENTRY` webhook (the sender account's owner, inferred)?
+12. **DD amount bounds**: is 0 or negative rejected; is there a maximum; decimal precision enforcement (>2 dp).
+13. **Cancel semantics.** `cancelScheduledPayment` on a schedule already CANCELLED/COMPLETED/DELETED/FAILED/REJECTED/REPLACED: idempotent 200, or 422? The `GenericMessage.message` text. Whether an occurrence already "in flight" on the cancel day is still executed.
+14. **Scheduled payment webhooks beyond creation.** Only `SCHEDULED_PAYMENT` ("creation notification") is defined; nothing for cancel/complete/fail. Decide whether the local server emits anything on cancel (recommend: nothing, matching the docs).
+15. **Schedule creation/update/seeding.** Not in the B2B API (GraphQL only). The local server needs a test-only route or fixture loader to create `HayScheduledPayment` records, and rules for `previousVersions` on update (old copy with `status: "REPLACED"`, inferred).
+16. **Schedule termination precedence** when both `endDate` and `numberOfPayments` are set; whether `ONE_TIME` schedules carry `frequency`/`numberOfPayments`; what `numberOfPayments` is when only `endDate` is set; whether COMPLETED is set immediately after the last occurrence or at the next evaluation.
+17. **Ordering** of the arrays returned by `getScheduledPayments` and `getDirectDebitsV0/V1` (creation time? processingDate?) — undocumented.
+18. **Account-status gating** for DD credit at COMPLETE (LOCKED / CLOSED / DORMANT → INCOMPLETE?) and for schedule occurrences (which `REFUSED_*` outcome and whether `shouldCancelOnFailure` treats a limit refusal as "failed").
+19. **Does an ACTIVE schedule block account closure?** Only `INFLIGHT_OUTBOUND_DIRECT_DEBITS` is listed in `ClosureCheckerError.type`; decide what "in flight" means (any status other than REJECTED/RETURNED/COMPLETE/INCOMPLETE, inferred).
+20. **`DeTransactionDetails.type`** — enum has `CREDIT` and `DEBIT` but description lists only `DEBIT`; decide whether the local server ever emits `CREDIT` (recommend: never).
+21. **Post-COMPLETE returns** ("a case will be raised") have no status; decide whether to model at all (recommend: not modelled).
