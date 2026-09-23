@@ -290,3 +290,80 @@ Terminal states: DEREGISTERED is terminal for `updatePayIdStatus`; the record le
 
 ### NPP eligibility (`enabled`)
 Boolean per BSB; no transitions are exposed by the API [spec].
+
+## 4. Invariants and calculations
+
+- **Uniqueness**: "A single PayID can only be linked to one account at a time, it cannot be shared between financial institutions and cannot be registered to multiple accounts" [docs:payid]. Locally: at most one non-DEREGISTERED record per (`payIdValue`, `payIdType`) [inferred].
+- **Many PayIDs per account** are allowed [spec `payIdName` description].
+- **NPP-enabled accounts only**: "PayIDs can only be registered against accounts that are NPP enabled" [docs:payid]. No account-level NPP flag exists in the spec; the transfer engine treats NPP capability as a property of the BSB [docs:payments], so locally "account's BSB is NPP-enabled" is the check [inferred].
+- **Transfers by PayID always go via NPP**: "any transfer using a PayID will only be sent via NPP" [docs:payid]; for `transferType` PAY_ID "the platform will resolve the PayID (to get the BSB and account number) and send the payment request via NPP" [docs:payments].
+- **Format rules per `payIdType`** [docs:payid]: TELEPHONE `+<cc 1–3 chars>-<1-9><digits...>`; EMAIL ≤ 256 chars, lower case, contains `@` with chars either side, no whitespace; INDIVIDUAL_AUSTRALIAN_BUSINESS 9–11 digits (ABN/ACN/ARBN/ARSN); ORGANISATION free text containing the organisation name plus description and/or location. Regexes are not given; the docs description of TELEPHONE is [inferred] equivalent to `^\+\d{1,3}-[1-9]\d*$`.
+- **Timers** [docs:payid, docs:payid-image]: PORTABLE → ACTIVE after 14 days without registration elsewhere; DEREGISTERED record removed after 90 days; ACTIVE → DISABLED after 10 years without activity.
+- **Timestamps**: all `*DateTimeUtc` fields are ISO-8601 `date-time` in UTC [spec]. `registrationDateTimeUtc` set on register; `lastUpdatedDateTimeUtc` on details/status change; `lastResolutionDateTimeUtc` on resolve [inferred from descriptions].
+- **ID / value formats** [spec]: `accountId` UUID; `branchIdentifier` and `branchNumber` 6 digits (`^\d{6}$` on the NPP op; description-only on PayIdAccountDetails); `accountNumber` 5–9 digits (description-only); `servicer` BIC11 (11-character BIC); `traceId` UUID in the example.
+- **No monetary balances, limits or counters** live in this domain [spec]. NPP liquidity totals (`NppLiquidity.inbound/outbound/total`) belong to the liquidity report; `total` is presumably `inbound + outbound` or net — **not stated** [spec].
+- **Staging `callFlags` header**: `callFlags: BSB=<value>`; determines which BSB the mock service treats as owning the PayID; absent → the client's assigned BSB; a different BSB simulates the ownership-check failure [docs:payid].
+- **Owner-name display rule**: only the PayID value and the owner name may be shown to end users; `accountDetails` is confidential [docs:payid]. Not enforceable server-side; noted for the implementer's fixtures.
+
+## 5. Cross-domain dependencies
+
+- **Accounts** (reads): `accountId` (UUID) on getPayIdsForAccount / postPayIdRegister must be an existing account; the PayID's `accountDetails.branchNumber` / `accountNumber` come from `HayAccount.bsb` / `HayAccount.accountNumber` [spec]. Which `HayAccount.status` values (`["PENDING_APPROVAL","APPROVED","ACTIVE","LOCKED","DORMANT","CLOSED","ACTIVE_IN_ARREARS"]` [spec]) permit registration is **not documented**.
+- **Customers** (reads, implicit): `ownerName` "must be reflective of the account holder name" [docs:payid]; no spec-level link to `HayCustomer`.
+- **Transfers** (reads PayID): makeTransferV0/makeTransferV1 with `transferType: "PAY_ID"` and `payIdTransfer: PayIdTransfer` resolve the PayID and pay via NPP [docs:payments]; outcome enum on `TransactionOutcome` includes `REFUSED_INVALID_PAY_ID` [spec]. `transferType: "ACCOUNT"` uses the BSB's NPP eligibility (the same signal as verifyBranchIdentifier) to choose NPP vs DE, after first converting Shaype-BSB recipients to INTERNAL [docs:payments]. Docs recommend, and the UX rules require, `resolvePayId` before every PAY_ID transfer [docs:payid].
+- **Transactions / webhooks** (writes indirectly): NPP payments surface as `FinancialTransaction.type` `INTERBANK_TRANSFER_IN` / `INTERBANK_TRANSFER_OUT` ("Cash transfer into/out of Account via Direct Credit or NPP") with `transactionChannel` `CUSCAL_NPP_TRANSFER_IN` / `CUSCAL_NPP_TRANSFER_OUT` / `NPP_RETURN_IN` [spec], and as `TRANSACTION` webhooks with `transactionType` `INTERBANK_TRANSFER_IN` / `INTERBANK_TRANSFER_OUT` [docs:payments, webhooks]. `reference` is "only applicable to NPP transactions, maximum 35 alphanumeric characters" [spec FinancialTransaction].
+- **Utilities** (staging): generateInboundNppTransaction / generateInboundNppTransactionV2 create mock inbound NPP transactions by BSB + account number, not by PayID [spec].
+- **Liquidity**: `NonSchemeLiquidity.npp: NppLiquidity` [spec].
+- **Multi-BSB routing** [docs:multi-bsb-routing]: applies to inbound **DE** payments only (brand BSBs 636383/636385 → account BSB 636380 on staging); no PayID/NPP behaviour is described.
+- **External authorisation** (`external-balance.yaml`): contains no PayID or NPP content [spec grep].
+- **Payment outcomes**: `docs/payment-transaction-outcome` lists transaction outcomes; none is PayID-specific. `REFUSED_INVALID_PAY_ID` appears only in the spec's `TransactionOutcome` enum and is not described in that page [spec, docs:payment-transaction-outcome].
+
+## 6. Error catalogue
+
+Documented verbatim:
+
+| op | status | condition | message / details | source |
+|---|---|---|---|---|
+| verifyBranchIdentifier | 422 | `branchIdentifier` does not match `^\d{6}$` | message `branchIdentifier format is not correct.`; details `Please refer to the API documentation or contact Shaype for more info with the traceId.`; status `"422"`; traceId UUID | [spec example] |
+
+Declared on every op with no documented condition or message [spec]: 400 "Bad Request", 403 "Forbidden", 422 "Unprocessable Content", 500 "Internal Server Error", 501 "Not Implemented". No op declares 404 or 409.
+
+Conditions the docs/spec establish but whose status code and message are **not documented** (proposed mapping is [inferred] and must be decided — see section 7):
+
+| condition | ops | proposed |
+|---|---|---|
+| Missing required query `payIdType` | getPayId | 400 |
+| Malformed / missing body, missing required body field (`payIdType`; `payIdStatus`; `ownerName`/`payIdName`), enum value not in list, minLength 1 violated | updatePayIdDetails, updatePayIdStatus, postPayIdRegister | 400 |
+| `accountId` not a UUID | getPayIdsForAccount, postPayIdRegister | 400 |
+| PayID value violates the format for its `payIdType` | postPayIdRegister (and possibly the lookups) | 422 |
+| PayID not registered under the caller's BSB (ownership check) | getPayId, updatePayIdDetails, updatePayIdStatus (and possibly getPayIdDeregisterHistory) | 403 or 422 |
+| PayID does not exist | getPayId, updatePayIdDetails, updatePayIdStatus, resolvePayId | 422 (no 404 declared) |
+| PayID exists but is DISABLED / DEREGISTERED | resolvePayId | 422 |
+| PayID value already ACTIVE/DISABLED at this or another FI | postPayIdRegister | 422 (no 409 declared) |
+| Target account not NPP enabled / account not found / account belongs to another client | postPayIdRegister, getPayIdsForAccount | 422 / 422 / 403 |
+| Status update on a DEREGISTERED PayID ("cannot have its status updated") | updatePayIdStatus | 422 |
+| Transition not in the state model (e.g. DISABLED → PORTABLE) | updatePayIdStatus | 422 |
+
+Related outcome outside this domain: makeTransfer with `transferType: "PAY_ID"` returns 200 `TransactionOutcome.outcome = "REFUSED_INVALID_PAY_ID"` when the PayID cannot be used [spec enum; behaviour text not documented].
+
+## 7. Open questions
+
+1. **Ownership-check failure code**: 403 vs 422 for getPayId / updatePayIdDetails / updatePayIdStatus when the PayID is registered under another BSB. Docs only say "will only return a response if the PayID belongs to an account under your BSB" [docs:payid].
+2. **Not-found code**: no 404 is declared anywhere in the domain; decide between 422 and 400 for unknown PayID / unknown account.
+3. **Registration conflict code**: no 409 declared; decide 422 (declared) vs 409 (conventional) when the value is already linked elsewhere.
+4. **`getPayIdDeregisterHistory` has no `payIdType`**: how a value shared across types (e.g. the same digits as TELEPHONE and INDIVIDUAL_AUSTRALIAN_BUSINESS) is disambiguated, and whether results are merged across types.
+5. **Optional `payIdType` on availability/resolve**: when omitted, is the type inferred from the value's shape, or are all types searched? Not documented.
+6. **`resolvePayId` on DISABLED / DEREGISTERED / PORTABLE**: error vs 200; docs imply PORTABLE still resolves and DISABLED/DEREGISTERED do not, but the response is not specified. Also whether resolve covers PayIDs registered locally but not yet at the NPP (all-local implementation can ignore).
+7. **`payIdOwnerCommonName`** is named in the docs but absent from the spec; the spec's field is `accountDetails.ownerName`. Implement the spec; note the docs discrepancy.
+8. **`getPayIdsForAccount` inclusion of DEREGISTERED records** (and of the record after a PORTABLE PayID has been ported away).
+9. **PORTABLE → ACTIVE via `updatePayIdStatus`**: the NPP diagram shows only the 14-day timer path; whether Shaype accepts an explicit re-activation is unknown.
+10. **Same-status update** (ACTIVE → ACTIVE) and **repeat registration of an already-ACTIVE value to the same account**: 200 no-op vs error.
+11. **`updatePayIdDetails` null semantics**: whether `null`/omitted `ownerName`/`payIdName` clears the field or leaves it unchanged; whether details can be updated while DISABLED/PORTABLE.
+12. **Whether the platform validates `ownerName` against the account holder's name** at registration, or merely relies on the client ("must be reflective of the account holder name").
+13. **Server-side enforcement of the per-type format rules** and the exact regex for each; EMAIL lower-casing (reject vs normalise).
+14. **Account preconditions for registration**: which `HayAccount.status` values allow it; how "NPP enabled" is represented (spec has no account/product flag; only BSB eligibility exists).
+15. **`availability` derivation** for PORTABLE, DEREGISTERED-but-not-purged, and never-seen values, and what the other availability fields hold when there is no record.
+16. **Timers in a local implementation**: whether to simulate the 14-day PORTABLE revert, 90-day purge and 10-year disable (probably as manual/clock-advance hooks).
+17. **`GenericMessage.message` text** for the three mutating ops — no documented values.
+18. **verifyBranchIdentifier data source**: which BSBs are NPP-enabled locally (seed table); whether the client's own Shaype BSB returns `enabled: true`; relation to staging brand BSBs 636383/636385/636380.
+19. **Reason/status pairing**: any restriction on which `reason` codes are valid for which `payIdStatus` (none documented).
+20. **Webhooks**: the webhook spec defines no PayID event type (`NotificationDto.type` has no PAYID value) [webhooks]; decide whether the local implementation emits nothing for PayID changes (recommended, to match the spec).
