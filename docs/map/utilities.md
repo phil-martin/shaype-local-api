@@ -367,3 +367,450 @@ Conventions shared by every operation in this domain [spec]:
   1. Initial hold: `transactionType: CARD_TRANSACTION`, `isPending: true`, `transactionHayId == holdHayId`.
   2. Hold update: increase → `transactionType: CARD_TRANSACTION`, `isPending: true`, "The webhook reports the updated total hold amount (original + increase). Both events share the same `transactionHayId`." Decrease → `transactionType: CARD_TRANSACTION_REFUND`, `isPending: true`, same `transactionHayId`; `currencyAmount` is the positive released amount [docs:card-transactions §3 sample].
   3. Settlement: `transactionType: CARD_TRANSACTION_SETTLED`, `isPending: false`, "carries its own `transactionHayId` and references the original hold via `holdHayId`."
+
+## 2. Entities and fields
+
+Legend: R = required, O = optional, N = `nullable: true` in schema. Ops: C = created/written by, R = read by. Field names are the spec's exact JSON property names.
+
+### 2.1 Response envelopes [spec]
+
+**GenericMessage** ("Message response") — returned 200 by all ops except createStub (which declares no body but returns the same shape per docs).
+| field | type | req | notes |
+|---|---|---|---|
+| `message` | string | O | "Message indicating operation result". Known values [docs:payto-staging-testing-suite]: `"Receive A Payment Instruction generated."` (RAPAIN), `"Receive A Payment generated."` (NPP inbound v2), `"Mandate Notification for Initiator generated."`, `"Stub mapping for search payment instruction request created."` |
+
+**ErrorResponse** ("An error response.") — 400/403/422/500/501 on every op.
+| field | type | req | notes |
+|---|---|---|---|
+| `details` | string | O | "Error details". Docs sample: `"Please refer to the API documentation or contact Shaype for more info with the traceId."` |
+| `message` | string | O | "Error description". Docs sample: `"NOT_FOUND: CUS.API.100522 - Creditor account details incorrect (M900 - No matching record found)"` |
+| `status` | string | O | "HTTP response status". Docs sample: `"422"` (a string) |
+| `traceId` | string | O | "TraceID that can be used by HAY for troubleshooting the request". Docs sample: `"9b8fa212-d655-487e-bf91-4406957bb584"` |
+
+### 2.2 Card-mock request bodies [spec]
+
+Four schemas share a field set; ✓ = present in that schema. Ops: `GenerateCardTransactionRequestBody` → generateAtmTransaction, generateRefundTransaction; `GenerateCardHoldTransactionRequestBody` → generateAuthHold; `GenerateCardHoldAndSettleTransactionRequestBody` → generateCardTransaction; `GenerateUpdateHoldTransactionRequestBody` → generateHoldAndUpdateHoldTransactions.
+
+| field | type / constraints | req | N | CardTx | Hold | Hold+Settle | Hold+Update |
+|---|---|---|---|---|---|---|---|
+| `amount` | number, `maximum 0`, `exclusiveMaximum true` (< 0) | R | – | ✓ | ✓ | ✓ | ✓ |
+| `cardToken` | string ("Public card token to use.") | R | – | ✓ | ✓ | ✓ | ✓ |
+| `currency` | string, enum Currency (§2.3); "Defaults to AUD if not provided." | O | N | ✓ | ✓ | ✓ | ✓ |
+| `merchantDetails` | object `MerchantDetails` | O | – | ✓ | ✓ | ✓ | ✓ |
+| `cardUsage` | string enum `MAGNETIC_STRIPE`, `CONTACTLESS`, `CARD_PRESENT` | O | N | – | ✓ | ✓ | ✓ |
+| `declineReason` | string enum `CARD_EXPIRED`, `WRONG_CVV`, `CVV_BLOCKED`, `INCORRECT_PIN`, `ALLOWED_PIN_RETRIES_EXCEEDED`, `INVALID_MERCHANT`, `CARD_IS_NOT_ACTIVE`, `RESTRICTED_CARD` | O | N | – | ✓ | ✓ | ✓ |
+| `settlementDelayInSeconds` | integer int32, min 5, max 300 | O | – | – | – | ✓ | ✓ |
+| `updateHoldAmount` | number (positive = decrease/reversal, negative = increase) | R | – | – | – | – | ✓ |
+| `updateHoldDelayInSeconds` | integer int32, min 5, max 300 | O | – | – | – | – | ✓ |
+
+**MerchantDetails** ("Details of the merchant") — all optional, all nullable:
+| field | type | constraints |
+|---|---|---|
+| `merchantCategoryCode` | string | pattern `^\d{4}$`; "Merchant Category Code (MCC) as four digit code as per ISO 18245" |
+| `merchantId` | string | "Merchant ID, alphanumeric / special characters maximum 15 characters in length" (no schema maxLength) |
+| `merchantName` | string | "Merchant name" |
+
+**ChangeCardExpiryDateRequestBody** — `expiryDate` string, format `date`, R, example `"2027-09-30"`. Op: changeCardExpiryDate.
+
+### 2.3 Currency enum [spec]
+
+Identical 162-value list on every `currency` property in this domain and on `HayAccount.currency` (verified by jq). Verbatim:
+
+`AED, AFN, ALL, AMD, ANG, AOA, ARS, AUD, AWG, AZN, BAM, BBD, BDT, BGN, BHD, BIF, BMD, BND, BOB, BOV, BRL, BSD, BTN, BWP, BYN, BZD, CAD, CDF, CHF, CLP, CNH, CNY, COP, CRC, CUC, CUP, CVE, CZK, DJF, DKK, DOP, DZD, EGP, ERN, ETB, EUR, FJD, FKP, GBP, GEL, GHS, GIP, GMD, GNF, GTQ, GYD, HKD, HNL, HRK, HTG, HUF, IDR, ILS, INR, IQD, IRR, ISK, JMD, JOD, JPY, KES, KGS, KHR, KMF, KPW, KRW, KWD, KYD, KZT, LAK, LBP, LKR, LRD, LSL, LYD, MAD, MDL, MGA, MKD, MMK, MNT, MOP, MRU, MUR, MVR, MWK, MXN, MYR, MZN, NAD, NGN, NIO, NOK, NPR, NZD, OMR, PAB, PEN, PGK, PHP, PKR, PLN, PYG, QAR, RON, RSD, RUB, RWF, SAR, SBD, SCR, SDG, SEK, SGD, SHP, SLE, SLL, SOS, SRD, SSP, STN, SVC, SYP, SZL, THB, TJS, TMT, TND, TOP, TRY, TTD, TWD, TZS, UAH, UGX, USD, UYU, UZS, VES, VND, VUV, WST, XAF, XCD, XCG, XOF, XPF, YER, ZAR, ZMW, ZWG, ZWL`
+
+### 2.4 DE / NPP mock request bodies [spec]
+
+**GenerateInboundDeRequestBody** — op generateInboundDeTransaction. (Full descriptions and the four spec examples are in §1.)
+| field | type / constraints | req | example |
+|---|---|---|---|
+| `amount` | number, > 0 (`minimum 0`, `exclusiveMinimum true`) | R | `147.23` |
+| `description` | string | O | `"Invoice 123456"` |
+| `idempotencyKey` | string uuid | O | `"79ac5cce-3349-42ed-aa67-9764c8a35d31"` |
+| `recipientAccountNumber` | string, pattern `\d{5,9}` | R | `"522843"` (swapped with BSB in spec) |
+| `recipientBsb` | string, pattern `\d{6}` | R | `"35022223"` (violates pattern — swapped) |
+| `recipientName` | string | O | `"Han Solo"` |
+| `recordType` | enum `DIRECT`, `RETURN`, `REFUSAL` | R | |
+| `refusalReason` | enum `RETURN_RECEIVED_OUT_OF_TIME`, `INSUFFICIENT_INFORMATION_TO_APPLY`, `REVERSAL_OF_DUPLICATED_ITEM`, `NO_ARRANGEMENT`, `TECHNICALLY_INVALID` | O ("Required for record type REFUSAL") | |
+| `returnReason` | enum `INVALID_BSB_NUMBER`, `PAYMENT_STOPPED`, `ACCOUNT_CLOSED`, `CUSTOMER_DECEASED`, `NO_ACCOUNT_OR_INCORRECT_ACCOUNT_NUMBER`, `REFER_TO_CUSTOMER`, `INVALID_USER_ID`, `TECHNICAL_INVALID` | O ("Required for record type RETURN") | |
+| `senderAccountNumber` | string, pattern `\d{5,9}` | R | `"112836327"` |
+| `senderBsb` | string, pattern `\d{6}` | R | `"302227"` |
+| `senderName` | string | O | `"Darth Vader"` |
+| `transactionType` | enum `CREDIT`, `DEBIT` | R | |
+
+**GenerateInboundNppTransactionRequestBody** — op generateInboundNppTransaction.
+| field | type / constraints | req |
+|---|---|---|
+| `amount` | number, > 0 | R |
+| `description` | string, minLength 1 | R |
+| `idempotencyKey` | string uuid | R |
+| `receiverAccountNumber` | string, pattern `[0-9]{8}` | R |
+| `receiverBsb` | string, pattern `[0-9]{6}` | R |
+| `receiverName` | string, minLength 1 | R |
+| `reference` | string | O |
+| `senderAccountNumber` | string, pattern `[0-9]{6,9}` | R |
+| `senderBsb` | string, pattern `[0-9]{6}` | R |
+| `senderName` | string, minLength 1 | R |
+
+**GenerateRapRequestBody** — op generateInboundNppTransactionV2. Required: `creditorInformation`, `debtorInformation`, `initgPtyIdOrgId`, `paymentId`, `paymentInformation`.
+| field | type / constraints | req |
+|---|---|---|
+| `creditorInformation` | `GenerateRapCreditorInformation` | R |
+| `debtorInformation` | `GenerateRapDebtorInformation` | R |
+| `initgPtyIdOrgId` | string, pattern `^[A-Z0-9]{4}[A-Z]{2}[A-Z0-9]{2}[A-Z0-9]{3}$` (BIC11) | R |
+| `mandateInformation` | `GenerateRapMandateInformation` | O |
+| `paymentId` | string, pattern `^[A-Z0-9]{4}[A-Z]{2}[A-Z0-9]{2}[A-Z0-9]{3}[0-9]{23}$` | R |
+| `paymentInformation` | `GenerateRapPaymentInformation` | R |
+| `paymentReturnInformation` | `GenerateRapPaymentReturnInformation` | O |
+
+| sub-schema | field | type / constraints | req |
+|---|---|---|---|
+| GenerateRapCreditorInformation | `accountIdentification` | string 0..34 | R |
+| | `accountIdentificationTypeCode` | string len 4 (docs: `"BBAN"`) | R |
+| | `ultimatePartyName` | string 0..140 | O |
+| GenerateRapDebtorInformation | `accountIdentification` | string 0..34 | R |
+| | `accountIdentificationTypeCode` | string len 4 | R |
+| | `partyName` | string 0..140 | R |
+| GenerateRapMandateInformation | `initiatingPartyName` | string, pattern `^[ -~]{1,140}$` | O ("Must be populated for mandate payments") |
+| | `instructionIdentification` | string, pattern `^[A-Z0-9]{4}[A-Z]{2}[A-Z0-9]{2}[A-Z0-9]{3}I[0-9]{8}00[0-9]{12}[01]$` | O ("Must be populated for mandate payments") |
+| | `mandateIdentification` | string, pattern `^[a-f0-9]{12}1[a-f0-9]{3}[89ab][a-f0-9]{15}$` | R |
+| GenerateRapPaymentInformation | `categoryPurposeCode` | string len 4 (examples `EPAY`, `SALA`, `SUPP`, `PENS`, `TAXS`; not an enum) | O |
+| | `endToEndIdentification` | string 0..35 | R |
+| | `instructedAmount` | string, pattern `^(?=.{1,19}$)[0-9]{0,18}(?:\.[0-9]{0,2})?$` | R |
+| | `originalMessageIdentification` | string len 34 | R |
+| | `remittanceInformationUnstructured` | string 0..280 | O |
+| | `transactionIdentification` | string, pattern `^[A-Z0-9]{4}[A-Z]{2}[A-Z0-9]{2}[A-Z0-9]{3}N[0-9]{8}00[0-9]{12}[01]$`, example `"BANKNTSTXXXN20180501000000000000010"` | R |
+| | `uniqueSuperannuationCode` | string | O |
+| GenerateRapPaymentReturnInformation | `originalTransactionIdentification` | string len 35, example `"BANKNTSTXXXN20180511CT0000458203590"` | O |
+| | `returnAmount` | string decimal pattern, example `"100.0"` | O |
+| | `returnReasonCode` | string len 4 ("If this field is populated, then this is a inbound payment return") | O |
+
+**GenerateRapainRequestBody** — op generateReceiveAPaymentInstruction. All five objects required.
+| sub-schema | field | type / constraints | req |
+|---|---|---|---|
+| GenerateRapainCreditorInformation | `accountIdentification` | string, pattern `^[ -~]{1,34}$` | R |
+| | `partyName` | string, pattern `^[ -~]{1,140}$` | R |
+| GenerateRapainDebtorInformation | `accountIdentification` | string, pattern `^[ -~]{1,34}$` | R |
+| | `partyName` | string, pattern `^[ -~]{1,140}$` | R |
+| GenerateRapainMandateInformation | `initiatingPartyName` | string, pattern `^[ -~]{1,140}$` | R |
+| | `mandateIdentification` | string, pattern `^[a-f0-9]{12}1[a-f0-9]{3}[89ab][a-f0-9]{15}$` | R |
+| GenerateRapainPaymentInformation | `instructedAmount` | string decimal pattern | R |
+| | `instructionIdentification` | string, pattern `^[A-Z0-9]{4}[A-Z]{2}[A-Z0-9]{2}[A-Z0-9]{3}I[0-9]{8}00[0-9]{12}[01]$` | R |
+| | `remittanceInformationUnstructured` | string 1..280 | O |
+| GenerateRapainTransactionStatusInformation | `transactionStatus` | string; spec enum literal `["ACCP,RJCT"]` (malformed) → intended `ACCP` Accepted, `RJCT` Rejected | R |
+
+### 2.5 PayTo mandate-notification / stub bodies [spec]
+
+**GenerateInitiatorMandateNotificationRequestBody** / **GeneratePayerMandateNotificationRequestBody** — identical except `trigger`. Required: `actionDetails`, `mandateDetails`, `trigger`.
+| field | type / constraints | req |
+|---|---|---|
+| `actionDetails` | `GenerateMandateNotificationActionDetailsDto` → `actionId` string, pattern `^[0-9a-fA-F]{32}$`, R | R |
+| `mandateDetails` | `GenerateMandateNotificationMandateDetailsDto` (below) | R |
+| `trigger` | string minLength 4 maxLength 4. Initiator spec enum literal `["MCRC,MCRD,MCRX,MAMC,MAMD,MAMN,MAMX,MPOF,MPOT,MPOX,MSCH"]`; Payer spec enum literal `["MCRX,MCRT,MCRP,MAMN,MAMP,MAMR,MAMX,MSCH"]` (both malformed single-string enums; intended as comma-separated lists). Docs also send `PCRD` to the Initiator endpoint. | R |
+
+**GenerateMandateNotificationMandateDetailsDto** ("Mandate details") — required: `debtorInformation`, `mandateId`, `paymentInformation`, `validityStartDate`.
+| field | type / constraints | req |
+|---|---|---|
+| `creditorInformation` | `GenerateMandateNotificationCreditorInformationDto` → `accountIdentification` string 7..34 ("BBAN format"), R | O |
+| `debtorInformation` | `GenerateMandateNotificationDebtorInformationDto` → `accountIdentification` string 7..34 ("BBAN format"), R | R |
+| `description` | string 1..140 | O |
+| `mandateId` | string, pattern `^[0-9a-fA-F]{32}$` | R |
+| `paymentInformation` | `GenerateMandateNotificationPaymentInformationDto` (below) | R |
+| `shortDescription` | string 1..35 | O |
+| `validityEndDate` | string, YYYY-MM-DD pattern; valid until 23:59:59.999 Australia/Sydney | O |
+| `validityStartDate` | string, YYYY-MM-DD pattern; valid from 00:00:00.000 Australia/Sydney | R |
+
+**GenerateMandateNotificationPaymentInformationDto** — required: `paymentFrequency`.
+| field | type / constraints | req |
+|---|---|---|
+| `amount` | string, pattern `^(?=.{1,19}$)[0-9]{0,18}(?:\.[0-9]{0,2})?$` | O |
+| `countPerPeriod` | string, pattern `^(?=.{1,19}$)[0-9]{0,19}(?:\.[0-9]{0,18})?$` | O |
+| `firstPaymentAmount` | string decimal pattern | O |
+| `firstPaymentDate` | string YYYY-MM-DD pattern | O |
+| `lastPaymentAmount` | string decimal pattern | O |
+| `lastPaymentDate` | string YYYY-MM-DD pattern | O |
+| `maximumAmount` | string decimal pattern | O |
+| `paymentAmountType` | string, **no enum**; documented values `BALN`, `FIXE`, `USGB`, `VARI` | O |
+| `paymentFrequency` | string, **no enum**; documented values `ADHO`, `DAIL`, `FRTN`, `INDA`, `MIAN`, `MNTH`, `QURT`, `WEEK`, `YEAR` | R |
+| `pointInTime` | string, pattern `^[0-9]{2}$` | O |
+
+**CreateStubForMandateSearchPaymentInstructionsRequestBody** — op createStubForMandateSearchPaymentInstructions.
+| field | type / constraints | req |
+|---|---|---|
+| `mandateIdentification` | string, pattern `^[0-9a-fA-F]{32}$` | R |
+| `paymentInstructionSummaries` | array of `PaymentInstructionSummary`, minItems 1 | R |
+
+**PaymentInstructionSummary** ("Payment instruction list")
+| field | type / constraints | req |
+|---|---|---|
+| `creationDateTime` | string, UTC `YYYY-MM-DDThh:mm:ss[.sss]Z` pattern | R |
+| `instructedAmount` | number | R |
+| `instructionIdentification` | string, pattern `^[A-Z0-9]{4}[A-Z]{2}[A-Z0-9]{2}[A-Z0-9]{3}I[0-9]{8}00[0-9]{12}[0-9a-zA-Z]$` | R |
+| `transactionStatus` | enum `RECV`, `UNDV`, `SENT`, `SAFD`, `ACCP`, `ACSP`, `ACSC`, `RJCT` | R |
+| `transactionStatusReasonCode` | string 1..4 (e.g. `AB01`) | O |
+
+### 2.6 Platform entities touched (other domains) [spec]
+
+**HayCard** ("Details of a card") — R by all card mocks (lookup by `cardToken`); `expiryDate` written by changeCardExpiryDate.
+| field | type | N | notes |
+|---|---|---|---|
+| `accountHayId` | string uuid | – | account the card is linked to (the account whose balances the mocks move) |
+| `blockedBy` | enum `CLIENT`, `PLATFORM` | – | |
+| `cardHayId` | string uuid | – | = `cardId` path param; appears as `cardHayId` in `TransactionEventDto` |
+| `cardStatus` | enum `ACTIVE`, `AWAITING_ACTIVATION`, `BLOCKED`, `INACTIVE`, `EXPIRED` | – | docs require an "active card" for the mocks |
+| `cardToken` | string | – | "Public token of the Card, maximum 9 digits in length" — the `cardToken` used by the mocks |
+| `cardType` | enum `PHYSICAL`, `VIRTUAL` | – | |
+| `customerHayId` | string uuid | – | |
+| `deliveryMethod` | enum `STANDARD`, `REGISTERED`, `COURIER`, `EXPRESS` | – | |
+| `expiryDate` | string date | – | "date of the last day of the expiry month and year" |
+| `issuedDateTimeUtc` | string date-time | – | |
+| `lastFourDigits` | string | – | |
+| `nameOnCard`, `nameOnCardLine2` | string | – | |
+| `renewedIntoCardId` | string uuid | N | |
+| `voidDateTimeUtc` | string date-time | N | |
+
+**HayAccount** — balances read/written by every money-moving mock; matched by `bsb` + `accountNumber` for DE/NPP/RAP/RAPAIN mocks [inferred].
+| field | type | notes |
+|---|---|---|
+| `accountHayId` | string uuid | |
+| `accountHolderId` | string uuid | |
+| `accountHolderType` | enum `CUSTOMER`, `GROUP` | |
+| `accountNumber` | string | "Account number, 5-9 digits in length" |
+| `bsb` | string | "BSB (Bank State Branch) of Account, 6 digits in length" |
+| `currency` | enum Currency (§2.3) | |
+| `status` | enum `PENDING_APPROVAL`, `APPROVED`, `ACTIVE`, `LOCKED`, `DORMANT`, `CLOSED`, `ACTIVE_IN_ARREARS` | |
+| `blockedBy` | enum `CLIENT`, `PLATFORM` | |
+| `availableBalance` | number | "Total balance available for use on Account. Funds that are held, locked and allocated to a Stack will not be available. Value to 2 decimal places." |
+| `heldBalance` | number | "Total value of all authorised but not yet cleared transactions for all Cards on Account. Positive value to 2 decimal places." |
+| `lockedBalance` | number | "The value that has been locked and unavailable for use, typically as a result of an operations team action. Positive value" |
+| `stacksBalance` | number | "Total value current held against any Stack(s) on the Account. Positive value" |
+| `overdraftBalance` | number | "Total value of overdraft used where an overdraft limit exists on the Account. Positive value" |
+| `overdraftLimit` | number | "Total value of the overdraft limit applied to Account. Positive value" |
+| `technicalOverdraftBalance` | number | "Total value that is in a negative position beyond the total deposits / overdraft limit on the Account." |
+| `totalBalance` | number | "Total value of all funds on the Account (this amount will also include unused overdraft limit and Stacks, held and locked value). Value to 2 decimal places." |
+| `customData` | object (required, nullable) | |
+| `parentAccountId` | string uuid, nullable | |
+| `productId` | string uuid | |
+| `creationDateTimeUtc`, `closedDateTimeUtc` | string date-time | |
+| `homeCurrencyBalanceEquivalent` | ref `HomeCurrencyBalanceEquivalent` | |
+
+### 2.7 Webhook entities produced (Notification Webhooks spec) [spec:webhooks]
+
+**NotificationDto** — required `customerHayId` (uuid), `idempotencyKey` (uuid), `type`. `type` enum verbatim: `ACCOUNT_STATUS_CHANGE`, `CUSTOMER_STATUS_UPDATED`, `CARD_ADDED_TO_WALLET`, `CARD_STATUS_CHANGE`, `CUSTOMER_DETAILS_CHANGE`, `ONBOARDING_PASSED`, `ONBOARDING_FAILED`, `REMINDER`, `SCHEDULED_PAYMENT`, `TRANSACTION`, `DIRECT_ENTRY`, `MANDATE`, `MANDATE_DUE_PAYMENT`, `MANDATE_PAYMENT`, `APPLE_PAY_REWARD_FOR_CUSTOMER`, `MANDATE_ACTION_EXPIRATION`, `DELEGATED_OTP_NOTIFICATION`. Other fields: `firebaseDeviceToken` string, `actionOwner` enum `CLIENT`, `PLATFORM`, `cardHayId` uuid N, `productId` uuid, and one event object per type: `transactionEvent`, `directEntryEvent`, `mandateEventDto`, `mandatePaymentEventDto`, `mandateDuePaymentEventDto`, `mandateActionExpirationEvent`, `accountStatusChangeEvent`, `customerStatusUpdatedEvent`, `cardStatusChangeEvent`, `customerDetailsChangeEvent`, `cardAdditionToWalletEvent`, `scheduledPaymentEvent`, `onboardingFailedEvent`, `applePayRewardForCustomerEvent`, `cardExpiryReminderEvent`, `delegatedOtpNotificationEvent`, `reminderType`. **Note**: the spec property names are `mandateEventDto` / `mandatePaymentEventDto` / `mandateDuePaymentEventDto`, whereas the docs' JSON samples use `mandateEvent` / `mandatePaymentEvent` / `mandateDuePaymentEvent` [docs:card-transactions samples] — discrepancy to resolve when emitting.
+
+**TransactionEventDto** ("provided when the type is `TRANSACTION`") — the payload every card/DE/NPP mock ultimately produces.
+| field | type | notes |
+|---|---|---|
+| `transactionHayId` | uuid | |
+| `holdHayId` | uuid | "Unique identifier (UUID) of the Hold associated with the event (only applicable to card transactions). This is also referred to as `relatedHoldHayId` when `isPending` flag is `false`." |
+| `accountHayId` | uuid | |
+| `currencyAmount` | `CurrencyAmount {currency, amount}` | negative = debit, positive = credit (samples) |
+| `originalCurrencyAmount` | `CurrencyAmount` | FX original |
+| `updatedBalance` | `CurrencyAmount` | equals `accountBalances.availableBalance` in the consistent samples |
+| `isPending` | boolean | true for holds/hold updates, false for settled/ATM/refund/inbound |
+| `counterpartName` | string | merchant name in card samples |
+| `outcome` | enum (below) | |
+| `transactionTimeUtc` | date-time | |
+| `cardPreferenceOutcome` | enum `CARD_FROZEN`, `CARD_NOT_PRESENT_DISABLED`, `CASH_WITHDRAWAL_DISABLED`, `CONTACTLESS_DISABLED`, `OVERSEAS_SPENDING_DISABLED`, `MAGNETIC_STRIPE_PAYMENT_DISABLED`, `MOBILE_WALLET_PAYMENT_DISABLED`, `OK`, `CARD_BLOCKED` | |
+| `cardProcessorResponse` | enum (below) | candidate carrier of `declineReason` |
+| `merchantName` | string | |
+| `isAtmTransaction` | boolean, **deprecated** | still emitted (`true` for ATM mock per docs) |
+| `transactionType` | enum `CARD_TRANSACTION`, `CARD_TRANSACTION_REFUND`, `CARD_TRANSACTION_SETTLED`, `INTRABANK_TRANSFER_IN`, `INTRABANK_TRANSFER_OUT`, `INTERBANK_TRANSFER_IN`, `INTERBANK_TRANSFER_OUT`, `DIRECT_DEBIT_TRANSFER`, `HAY_TOP_UP`, `INTERBANK_TRANSFER_OUT_REVERSAL`, `REWARD`, `GENERAL_CREDIT`, `GENERAL_DEBIT`, `ORIGINAL_CREDIT`, `BPAY_TRANSFER_OUT`, `CONVERSION_IN`, `CONVERSION_OUT` | `INTERBANK_TRANSFER_OUT_REVERSAL` "(NOT CURRENTLY IN USE)" |
+| `cardUsageDetails` | `CardUsageDetails {isMagneticStripePayment, isContactless, isCardPresent, isMobileWalletPayment, isAtmWithdrawal}` (all boolean) | |
+| `accountBalances` | `AccountBalancesDto {totalBalance, heldBalance, lockedBalance, stacksBalance, availableBalance}` (each `CurrencyAmount`) | |
+| `cardHayId`, `customerHayId` | uuid | |
+| `ruleDetails` | `RuleDetails` | |
+| `counterpartDetails` | `CounterpartDetails {accountId, customerId, name, bpayDetails, basicAccountNumber {accountNumber, branchNumber}}` | |
+| `originId` | uuid | |
+| `originType` | enum `CUSTOMER`, `SCHEDULED_PAYMENT`, `HAAS_OPERATIONS`, `OPERATIONS`, `MANDATE_PAYMENT`, `DIRECT_DEBIT`, `TRANSACTION` | |
+| `category` | string | `"BANK_TRANSFER"` in DE/NPP samples |
+| `merchantId` | string | "maximum 15 characters" |
+| `description`, `reference` | string | |
+| `mandatePaymentDetails` | `MandatePaymentDetails {mandateId uuid, instructionId, initiatingPartyName}` | set for PayTo payments |
+| `returnReason` | `ReturnReason {code, message}` (both required); `code` enum `ACCOUNT_BLOCKED`, `ACCOUNT_CLOSED`, `ACCOUNT_INVALID`, `AMOUNT_INVALID`, `CANCELLED`, `CURRENCY_INVALID`, `CUSTOMER_REQUEST`, `DUPLICATE`, `FRAUD`, `OTHER` | set on reversals/returns |
+| `externalIdentifiers` | array `ExternalIdentifierDto` | "e.g. VISA trace lifecycle" |
+
+`TransactionEventDto.outcome` enum verbatim:
+`ACCEPTED, REFUSED_CARD_PREFERENCE, REFUSED_ACCOUNT_PREFERENCE, REFUSED_FRAUD, REFUSED_AML, REFUSED_MAX_BALANCE_EXCEEDED, REFUSED_NOT_ENOUGH_FUNDS, REFUSED_DAILY_LIMIT_EXCEEDED, INTERNAL_ERROR, REFUSED_ACCOUNT_NOT_FOUND_FOR_CARD_TOKEN, REFUSED_UNDETERMINED_BALANCE_FOR_ACCOUNT, REFUSED_ACCOUNT_NOT_FOUND_FOR_CURRENCY, REFUSED_UNDETERMINED_SPENDING_FOR_ACCOUNT, REFUSED_UNDETERMINED_TOP_UPS_FOR_ACCOUNT, REFUSED_UNDETERMINED_ATM_WITHDRAWALS_FOR_ACCOUNT, REFUSED_ANNUAL_SPENDING_LIMIT_BREACHED, REFUSED_DAILY_ATM_WITHDRAWAL_LIMIT_BREACHED, REFUSED_DAILY_TOP_UP_LIMIT_BREACHED, REFUSED_ACCOUNT_BLOCKED, REFUSED_ACCOUNT_CLOSED, REFUSED_RECIPIENT_ACCOUNT_BLOCKED, REFUSED_RECIPIENT_ACCOUNT_CLOSED, REFUSED_DAILY_DIRECT_DEBIT_LIMIT_BREACHED, REFUSED_DAILY_TRANSFERS_OUT_LIMIT_BREACHED, REFUSED_RULES, REFUSED_TOTAL_INBOUND_DIRECT_DEBIT_DAILY_LIMIT_BREACHED, REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED, REFUSED_TOTAL_NET_VISA_DAILY_LIMIT_BREACHED, REFUSED_TOTAL_NON_SCHEME_DAILY_LIMIT_BREACHED, REFUSED_BPAY_INVALID_BILLER_CODE, REFUSED_BPAY_INVALID_REFERENCE, REFUSED_BPAY_INVALID_PAYMENT, REFUSED_BPAY_REJECTED, REFUSED_DAILY_CARD_TRANSACTIONS_LIMIT_BREACHED, REFUSED_SINGLE_CARD_TRANSACTION_LIMIT_BREACHED, REFUSED_SANCTIONS, REFUSED_UNABLE_TO_VALIDATE, REFUSED_INSUFFICIENT_DATA, REFUSED_SENDER_ACCOUNT_NOT_VERIFIED, REFUSED_CAPABILITY_NOT_ENABLED, REFUSED_QUOTE_EXPIRED`
+
+`TransactionEventDto.cardProcessorResponse` enum verbatim:
+`INCORRECT_PIN, REFUSED_CARD_BLOCKED, RESTRICTED_CARD, ALL_GOOD, REFER_TO_ISSUER, INVALID_MERCHANT, CAPTURE_CARD, DO_NOT_HONOR, UNSPECIFIED_ERROR, HONOR_WITH_IDENTIFICATION, PARTIAL_APPROVAL, INVALID_TRANSACTION, INVALID_AMOUNT, INVALID_CARD_NUMBER, CARD_SCHEME_NETWORK_CANNOT_CONNECT_TO_THREDD, CUSTOMER_CANCELLATION, FATAL_ERROR, PARTIAL_REVERSAL, EXPIRED_CARD_CAP, SUSPECTED_FRAUD, LOST_CARD_CAP, STOLEN_CARD_CAP, CLOSED_ACCOUNT, INSUFFICIENT_FUNDS, EXPIRED_CARD, TRANSACTION_NOT_PERMITTED_TO_HOLDER, TRANSACTION_NOT_PERMITTED_TO_TERMINAL, EXCEEDED_WITHDRAW_AMOUNT_LIMIT, SECURITY_VIOLATION, EXCEEDED_WITHDRAWAL_FREQUENCY_LIMIT, RESPONSE_RECEIVED_TOO_LATE, HOLDER_TO_CONTACT_ISSUER, ALLOWED_PIN_RETRIES_EXCEEDED, ALLOWED_NUMBER_OF_PIN_TRIES_EXCEEDED, ISSUER_DOES_NOT_PARTICIPATE_IN_THE_SERVICE, CARD_IS_NOT_ACTIVE, UNACCEPTABLE_PIN, DOMESTIC_DEBIT_TRANSACTION_NOT_ALLOWED, TIMEOUT_AT_IEM, APPROVED_NON_FINANCIAL_OR_HOLD, PIN_VALIDATION_NOT_POSSIBLE, PURCHASE_AMOUNT_ONLY_NO_CASHBACK_ALLOWED, CRYPTOGRAPHIC_FAILURE, AUTHENTICATION_FAILURE, ISSUER_INOPERATIVE, CANT_ROUTE, VIOLATION_OF_LAW, DUPLICATE_TRANSMISSION, SYSTEM_MALFUNCTION, CVV_FAIL, FORCE_STIP, APPROVE_LOAD, VERIFICATION_DATA_FAILED, STRONG_CUSTOMER_AUTHENTICATION, SCA_REQUIRED, CVV2_FAILURE, UNKNOWN_REASON`
+
+**MandateEventDto** ("provided when the type is `MANDATE`") — `mandateId` uuid, `actionId` uuid, `description` string, `trigger` enum verbatim:
+`MAMN, MAMP, MAMR, MAMX, MCRP, MCRR, MCRT, MCRX, MPOF, MPOT, MPOX, MSCH, CSCH, PAMC, PAMD, PAMN, PCRC, PCRD, PPOT, PSCH, PPOI, PPOR, MCRC, MCRD, MAMC, MAMD, CCRR, IAMN, ISCH, IAMP, IAMR, ICRR`
+
+Trigger meanings [spec:webhooks]: CCRR Cuscal mandate create recalled; CSCH Cuscal mandate status changed; IAMN Initiator mandate amended; IAMP Initiator mandate amend proposed; IAMR Initiator mandate amend recalled; ICRR Initiator mandate create recalled; ISCH Initiator mandate status changed; MAMC Mandate amend confirmed; MAMD Mandate amend declined; MAMN Mandate amended; MAMP Mandate amend proposed; MAMR Mandate amend recalled; MAMX Mandate amend expired; MCRC Mandate create confirmed; MCRD Mandate create declined; MCRP Mandate create proposed; MCRR Mandate create recalled; MCRT Mandate created; MCRX Mandate create expired; MPOF Mandate port finalised; MPOT Mandate ported; MPOX Mandate port expired; MSCH Mandate status changed; PAMC Payer mandate amend confirmed; PAMD Payer mandate amend declined; PAMN Payer mandate amended; PCRC Payer mandate create confirmed; PCRD Payer mandate create declined; PPOI Payer mandate port initiated; PPOR Payer mandate port recalled; PPOT Payer mandate ported; PSCH Payer mandate status changed.
+
+**MandatePaymentEventDto** ("provided when the type is `MANDATE_PAYMENT`") — `instructionId` string, `mandateId` uuid, `paymentStatus` enum `MANDATE_PAYMENT_ACCEPTED`, `MANDATE_PAYMENT_ACCEPTED_FOR_CLEARANCE`, `MANDATE_PAYMENT_PENDING`, `MANDATE_PAYMENT_RECEIVED`, `MANDATE_PAYMENT_REJECTED`, `MANDATE_PAYMENT_SENT`, `MANDATE_PAYMENT_SETTLEMENT_ABORTED`, `MANDATE_PAYMENT_STORE_AND_FORWARD`, `MANDATE_PAYMENT_UNDELIVERED`; `reasonCode` string (NPP codes, e.g. `AB01` "Clearing process aborted due to timeout"); `transactionHayId` uuid ("When payment status is rejected, transaction identifier is null"); `isFinal` boolean; `originId` uuid; `originType` enum as above.
+
+**DirectEntryEventDto** ("provided when the type is `DIRECT_ENTRY`") — `transactionId` uuid; `type` enum `DEBIT` ("Currently only the `DEBIT` type is supported."); `direction` enum `OUTBOUND` ("Currently only the `OUTBOUND` direction is supported."); `status` enum `RECEIVED`, `ACCEPTED`, `REJECTED`, `SUBMITTED`, `RETURNED`, `COMPLETE`, `INCOMPLETE`.
+
+### 2.8 External Authorisation entities (Shaype → client) [spec:external-balance]
+
+Relevant only when the client holds balances externally. Headers on every callback: `Shaype-Version` (e.g. `2023-01-30`), `Shaype-Trace-Id`, `Shaype-Idempotency-Key`, `Shaype-Timestamp` (RFC-3339), `Shaype-Signature` ("Signature hash of the request body with the shared secret"), `Shaype-Key-Id`.
+- `POST /holds` (authoriseHold) body **Hold**: `holdId` uuid R, `accountId` uuid R, `cardId` uuid R, `customerId` uuid, `amount` `CurrencyAmount {amount string, currency string}` R ("Positive when crediting customer account and negative when debiting"), `merchantDetails` **Merchant** `{merchantId 1..15, name ≤40, merchantCategoryCode 1..4, terminalId 1..8, cardAcceptorLocation 1..101, address {street ≤80, city ≤40, state ≤3, postcode ≤20, country len 3}}`, `rawExternalProcessorRequest` string.
+- `PATCH /holds/{holdId}` (updateHoldAmount) body: `amount` `CurrencyAmount`, `customerId` uuid, `rawExternalProcessorRequest`. "May be equal to the total hold amount in which case reverses the whole transaction."
+- `POST /transactions` (authoriseTransaction) body **Transaction**: `transactionId` uuid R, `authorisationTransactionType` enum `BPAY_TRANSFER_OUT`, `DIRECT_DEBIT_TRANSFER`, `GENERAL_CREDIT`, `GENERAL_DEBIT`, `INBOUND_PAYMENT`, `OUTBOUND_PAYMENT` R, `accountId` uuid R, `amount` R, `counterpartDetails {name, basicAccountNumber {accountNumber, branchNumber}}`, `description`, `reference`, `account {id, balance, holder {id, type CUSTOMER|GROUP}, statistics {txn_count_last_10m, txn_sum_last_24h}}`, `customer {id, details {dateOfBirth, firstName, lastName, middleName}, address {...}, tenure_days}`, `transactionTimeUtc`.
+- Responses: `200` OK; `470` **Response** `{errorCode enum REFUSED_MAX_BALANCE_EXCEEDED, REFUSED_NOT_ENOUGH_FUNDS, REFUSED_SENDER_ACCOUNT_NOT_VERIFIED; reason string}`; `500`.
+
+## 3. State machines
+
+### 3.1 Mock card transaction lifecycle (per hold / transaction) [docs:simulates-card-transaction-on-staging; docs:card-transactions]
+
+States are my labels for the observable webhook sequence [inferred]; the platform exposes them only through `transactionType` + `isPending`.
+
+| from | to | via | webhook emitted |
+|---|---|---|---|
+| (none) | HELD (`CARD_TRANSACTION`, `isPending true`) | generateAuthHold; step 1 of generateCardTransaction; step 1 of generateHoldAndUpdateHoldTransactions | `TRANSACTION` / `CARD_TRANSACTION`, `transactionHayId == holdHayId` |
+| (none) | DECLINED | any hold mock with `declineReason`, or platform refusal (`outcome` ≠ `ACCEPTED`) | `TRANSACTION` with refused `outcome` and/or `cardProcessorResponse` [mapping open] |
+| HELD | HELD (increased) | generateHoldAndUpdateHoldTransactions, `updateHoldAmount` < 0, after `updateHoldDelayInSeconds` | `CARD_TRANSACTION`, `isPending true`, same `transactionHayId`, amount = original + increase |
+| HELD | HELD (decreased) / REVERSED (full) | generateHoldAndUpdateHoldTransactions, `updateHoldAmount` > 0 | `CARD_TRANSACTION_REFUND`, `isPending true`, same `transactionHayId`, positive amount |
+| HELD (any) | SETTLED (`CARD_TRANSACTION_SETTLED`, `isPending false`) — **terminal** | generateCardTransaction after `settlementDelayInSeconds`; generateHoldAndUpdateHoldTransactions after update + `settlementDelayInSeconds` | new `transactionHayId`, `holdHayId` = original hold |
+| (none) | SETTLED (ATM stand-in) — terminal | generateAtmTransaction | `CARD_TRANSACTION`, `isPending false`, `isAtmTransaction true` |
+| (none) | REFUNDED (`CARD_TRANSACTION_REFUND`, `isPending false`) — terminal | generateRefundTransaction | own `transactionHayId`, no link to prior purchase |
+
+Terminal: SETTLED, REFUNDED, DECLINED. A bare HELD from generateAuthHold has no documented exit on staging [open].
+
+### 3.2 HayCard.cardStatus [spec enum; transitions from docs are out of this domain]
+
+Values: `ACTIVE`, `AWAITING_ACTIVATION`, `BLOCKED`, `INACTIVE`, `EXPIRED`. Only interaction with this domain: mocks require `ACTIVE` [docs]; `changeCardExpiryDate` sets `expiryDate` but no transition to `EXPIRED` is documented [open].
+
+| from | to | via |
+|---|---|---|
+| ACTIVE | EXPIRED? | changeCardExpiryDate with a past date — **not documented** [open] |
+
+### 3.3 PayTo payment-instruction status (`PaymentInstructionSummary.transactionStatus`) [spec + docs:payto-staging-testing-suite]
+
+Values: `RECV`, `UNDV`, `SENT`, `SAFD`, `ACCP`, `ACSP`, `ACSC`, `RJCT`. Long forms used by `makeAdhocPayment` / `getMandatePaymentStatus` / search responses [docs]: `RECV`→`RECEIVED`, `SENT`→`SENT`, `SAFD`→`STORE_AND_FORWARD`, `UNDV`→`UNDELIVERED`, `RJCT`→`REJECTED`; `statusIsFinal` false for RECEIVED/SENT/STORE_AND_FORWARD, true for REJECTED. Webhook equivalents: `MANDATE_PAYMENT_RECEIVED`, `_UNDELIVERED`, `_SENT`, `_STORE_AND_FORWARD`, `_ACCEPTED_FOR_CLEARANCE` (ACCP), `_SETTLEMENT_ABORTED` (ACSP), `_ACCEPTED` (ACSC), `_REJECTED`, `_PENDING` [spec:webhooks].
+
+On staging the trajectory is fixed by the **mandate description** at `createMandate`, not by any utilities op [docs]:
+| from (initial, returned by makeAdhocPayment) | to (returned by getMandatePaymentStatus) | via (mandate `description`) |
+|---|---|---|
+| SENT | (success path) | `paymentstatus:safd` ("To test a scenario when payment is successful") |
+| RJCT (after 15 s timeout, `transactionStatusReasonCode AB01`) | REJECTED, final | `paymentstatus:timeout_rjct` |
+| SENT | UNDELIVERED | `paymentstatus:sent&undv` |
+| STORE_AND_FORWARD | UNDELIVERED | `paymentstatus:safd&undv` |
+| RECEIVED | REJECTED | `paymentstatus:recv&rjct` |
+| (no description) | "Settlement aborted" (ACSP) | default: "If no description is provided … default status 'Settlement aborted' is returned at the moment." |
+
+`createStubForMandateSearchPaymentInstructions` does not transition anything; it sets the status values that `searchPaymentsInstructions` will report. Final states per `MandatePaymentEventDto` semantics: `ACSC`/ACCEPTED ("Settlement completed"), `RJCT`, `UNDV` ("Client should retry initiation") [spec:webhooks].
+
+### 3.4 Mock mandate status [docs:payto-staging-testing-suite]
+
+Values (mock): `CREATED`, `ACTIVE`, `SUSPENDED`, `CANCELLED` — set by `description` = `status:created` / `status:active` / `status:suspended` / `status:cancelled` at `createMandate`; default `ACTIVE` ("On production, mandates initially are in status `CREATED`, but for mock solution they're always set as `ACTIVE` unless specified"). "Due to the fact mocks are static, trying to change a mandate status will not actually change it - mocks identify their data based on a pattern in the mandate ID."
+
+| from | to | via (production) | how simulated on staging |
+|---|---|---|---|
+| CREATED | ACTIVE | Payer accepts → Initiator gets `MCRC`; scheduled payment created | generateMandateNotificationForInitiator `trigger: MCRC` (creates the scheduled payment; status unchanged) |
+| CREATED | (rejected) | Payer declines → `MCRD` / `PCRD` | generateMandateNotificationForInitiator `trigger: MCRD` (or `PCRD`) after `resolveMandateByPayer` |
+| CREATED | CANCELED (by MMS after 6 days) | expiry → `MCRX` | generateMandateNotificationForInitiator `trigger: MCRX` |
+| ACTIVE | SUSPENDED | suspendMandateByInitiator / suspendMandateByPayer ("Only mandates that are in `ACTIVE` status can be successfully suspended") | PayTo op validates; status does not actually change; `MSCH` via either notification mock |
+| SUSPENDED | ACTIVE | releaseMandateByInitiator / releaseMandateByPayer ("mandates can be released only when suspended") | as above |
+| any (except CREATED by Initiator) | CANCELLED | cancelMandateByInitiator / cancelMandateByPayer | as above; "To fail cancelation of a mandate, simply provide an ID of a mandate that doesn't exist." |
+| ACTIVE (terms) | ACTIVE (amended terms; scheduled payment replaced) | amendMandatePaymentTerms → `MAMC` | generateMandateNotificationForInitiator `trigger: MAMC` |
+
+Terminal: CANCELLED / CANCELED.
+
+### 3.5 Direct Entry request status (`DirectEntryEventDto.status`) [spec:webhooks; docs:direct-debits]
+
+Values: `RECEIVED`, `ACCEPTED`, `REJECTED`, `SUBMITTED`, `RETURNED`, `COMPLETE`, `INCOMPLETE`. Production (outbound DD): RECEIVED and ACCEPTED "sent synchronously", SUBMITTED and COMPLETE "arrive later"; a return within 2 working days → RETURNED [docs:direct-debits]. Utilities relevance: `generateInboundDeTransaction` with `recordType: RETURN` is the only mock that could drive SUBMITTED→RETURNED [inferred]; no docs confirm.
+
+| from | to | via |
+|---|---|---|
+| SUBMITTED | RETURNED | generateInboundDeTransaction `recordType RETURN` (presumed) [inferred] |
+| SUBMITTED | COMPLETE | time (2 working days) — not a utilities op |
+
+## 4. Invariants and calculations
+
+- **Sign conventions** [spec]: card mocks (`amount`) must be **< 0** (`exclusiveMaximum 0`), including the refund mock; DE/NPP inbound (`amount`) must be **> 0** (`exclusiveMinimum 0`); RAP/RAPAIN `instructedAmount` and mandate amounts are **decimal strings** (`^(?=.{1,19}$)[0-9]{0,18}(?:\.[0-9]{0,2})?$`, max 2 dp); `updateHoldAmount` positive = decrease/reversal, negative = increase. Webhook `currencyAmount.amount` is negative for debits/holds and positive for credits/refunds/reversals [docs samples].
+- **Balance identity** (from consistent webhook samples) [docs:card-transactions; inferred formula]: `totalBalance = availableBalance + heldBalance + lockedBalance + stacksBalance` (e.g. 11.13 = 2.73 + 8.4 + 0 + 0; 10.87 = 1.37 + 9.5). The official statement uses signed balances [docs:account-balances]: "Available Balance = Account Balance + (Overdraft Limit + Overdraft Balance) + Technical Overdraft Balance + Held Balance + Stacks balance" with Held/Overdraft/Technical-Overdraft "$0 or Negative"; and "Total Balance = Total Available Balance + (Overdraft Limit + Overdraft Balance) + Technical Overdraft Balance + Stacks Balance". In the B2B API and webhooks, `heldBalance` is reported as a **positive** number [spec HayAccount; samples].
+- **Balance deltas per mock** (|a| = |amount|) [docs:simulates-card-transaction-on-staging; docs:card-transactions "Balance Update"; arithmetic inferred]:
+  | event | totalBalance | heldBalance | availableBalance |
+  |---|---|---|---|
+  | hold (auth) | 0 | +|a| | −|a| |
+  | hold increase (`updateHoldAmount` u<0) | 0 | +|u| | −|u| |
+  | hold decrease/reversal (u>0) | 0 | −u | +u |
+  | settlement of hold h | −h | −h | 0 |
+  | ATM stand-in | −|a| | 0 | −|a| |
+  | refund | +|a| | 0 | +|a| |
+  | inbound credit (DE CREDIT, NPP v1/v2, RAP) | +amount | 0 | +amount |
+  | inbound DE DEBIT / RAPAIN debit | −amount | 0 | −amount |
+- **Settlement amount** = current (updated) hold amount at settlement time: original hold + increases − decreases [docs samples: −9 → −19 → settle −19; −5 → +0.50 → settle −4.50].
+- **Hold update reporting**: the increase webhook's `currencyAmount` is the **cumulative** hold (original + increase), not the delta [docs]; the decrease webhook's `currencyAmount` is the **positive delta** released [docs sample 0.5000].
+- **`updatedBalance`** in the transaction webhook equals `accountBalances.availableBalance` after the event in the consistent samples [docs:card-transactions §1, §3] (the §2 sample's 5066/5065/5075 values are inconsistent — ignore).
+- **ID relationships** [docs]: hold: `transactionHayId == holdHayId`; hold update: same `transactionHayId` as the hold; settlement: new `transactionHayId`, `holdHayId` = hold; ATM/refund: own `transactionHayId`, no `holdHayId`.
+- **Delays**: `settlementDelayInSeconds`, `updateHoldDelayInSeconds` ∈ [5, 300] seconds when supplied [spec]; defaults unknown [open].
+- **Currency**: default `AUD` when `currency` omitted/null [spec]. Non-AUD → `originalCurrencyAmount` in the webhook [spec:webhooks; inferred].
+- **Limits/rules/fraud** are evaluated on every mock exactly as in production ("same internal balance, limit, rule, and fraud checks") [docs]; refusals surface as `outcome` values (§2.7), e.g. `REFUSED_NOT_ENOUGH_FUNDS` when `availableBalance < |amount|` [docs:payment-transaction-outcome].
+- **Account matching for DE/NPP mocks**: `HayAccount.bsb` (6 digits) + `HayAccount.accountNumber` (5–9 digits) [spec]; NPP v1 mock requires exactly 8-digit `receiverAccountNumber` [spec]; RAP/RAPAIN `accountIdentification` = BSB and account concatenated (`"63610027487941"` = `636100` + `27487941`) with `accountIdentificationTypeCode "BBAN"` [docs sample]; mandate-notification `accountIdentification` "in BBAN format", 7..34 chars [spec].
+- **ID formats** [spec]:
+  - Mandate id in utilities bodies: UUID v1 **without hyphens** — loose `^[0-9a-fA-F]{32}$` (notifications, stub) or strict v1 `^[a-f0-9]{12}1[a-f0-9]{3}[89ab][a-f0-9]{15}$` (RAP/RAPAIN). Docs: `1212c23a-255c-11ee-9a8e-5d3239591cd9` ↔ `1212c23a255c11ee9a8e5d3239591cd9`. Mock mandate ids start `1212…` in every docs sample [docs; "mocks identify their data based on a pattern in the mandate ID"].
+  - `instructionIdentification`: BIC11 + `I` + `YYYYMMDD` + `00` + 12-digit sequence + retry digit (`[01]`; stub allows `[0-9a-zA-Z]`), e.g. `ANNCAU22XXXI20230718000000000077240`.
+  - `transactionIdentification`: BIC11 + `N` + `YYYYMMDD` + `00` + 12-digit sequence + retry `[01]`.
+  - `paymentId`: BIC11 + 23 digits; `originalMessageIdentification`: exactly 34 chars; `originalTransactionIdentification`: exactly 35 chars; `initgPtyIdOrgId`: BIC11 (`^[A-Z0-9]{4}[A-Z]{2}[A-Z0-9]{2}[A-Z0-9]{3}$`), docs `NPBOAU21XXX` / `ANNCAU22XXX`.
+  - `actionId`: 32 hex. `cardToken`: ≤ 9 digits. `cardId`/`transactionHayId`/`holdHayId`: UUID.
+- **Dates** [spec]: `expiryDate` ISO `YYYY-MM-DD` (card expiry = last day of month); mandate `validityStartDate`/`validityEndDate`, `firstPaymentDate`/`lastPaymentDate` `YYYY-MM-DD` interpreted in Australia/Sydney; `creationDateTime` UTC `YYYY-MM-DDThh:mm:ss[.sss]Z`; webhook `transactionTimeUtc` ISO date-time UTC.
+- **PayTo staging ad-hoc flow ordering** [docs:payto-staging-testing-suite]: createMandate (ACTIVE) → makeAdhocPayment (returns `instructionId`, `transactionStatus`) → generateReceiveAPaymentInstruction (`ACCP`; debits debtor by `instructedAmount`) → generateInboundNppTransactionV2 (credits creditor). Fixed-frequency: createMandate → generateMandateNotificationForInitiator `MCRC` (schedules payment) → same two utilities. "Current mock solution is supported for mandates with 'ad-hoc' frequency."
+- **Search stub join**: `searchPaymentsInstructions` response `endToEndId` comes from `makeAdhocPayment.endToEndId` (default `'Not provided'` when omitted), not from the stub [docs].
+
+## 5. Cross-domain dependencies
+
+| this domain | reads | writes / side effects | other-domain ops involved |
+|---|---|---|---|
+| card mocks (ATM, hold, hold+settle, hold+update, refund) | `HayCard` by `cardToken` (must be `ACTIVE` [docs]); `HayCard.accountHayId` → `HayAccount` balances, limits, rules, card preferences; `HayAccount.status` | creates card transactions (visible via `searchTransactions` / `getTransactionById` [inferred]); moves `heldBalance`/`availableBalance`/`totalBalance`; consumes daily card/ATM limits [inferred from outcome enum] | `createHayCard`, `getCard` (token); `activateCard`; `createCreditTransactionV0/V1` (top-up: "To top up a staging account, use Create Credit Transaction for Account" [docs]); `updatePaymentPreferences` (card preference outcomes) |
+| changeCardExpiryDate | `HayCard` by `cardId` | `HayCard.expiryDate` | Cards API `getCard` to observe |
+| generateInboundDeTransaction | `HayAccount` by `bsb`+`accountNumber` [inferred]; outbound DDs from `createDirectDebitV1` for `RETURN`/`REFUSAL` [inferred] | credits/debits account; DE request status (`DirectEntryEventDto`) [inferred] | Direct Debits API (`createDirectDebitV1`, `getDirectDebitV1`), Direct Entry API (`getDirectEntryStatusV1`), Transactions API |
+| generateInboundNppTransaction / V2 | `HayAccount` by BSB+account [inferred]; mandate by `mandateIdentification` (V2) | credits account; transaction with `mandatePaymentDetails` (V2 mandate case) | NPP API (`verifyBranchIdentifier`), PayTo API (`createMandate`, `makeAdhocPayment`), Transactions API |
+| generateReceiveAPaymentInstruction | mandate (`mandateIdentification`), debtor `HayAccount` | debits debtor by `instructedAmount` [docs] | PayTo API (`createMandate`, `makeAdhocPayment`, `getMandatePaymentStatus`) |
+| generateMandateNotificationForInitiator / ForPayer | mandate by `mandateId` (static mock; status by id pattern) | `MCRC`: creates scheduled payment initiation request; `MAMC`: replaces uninitiated scheduled payment [docs]; emits `MANDATE` webhook [inferred] | PayTo API (`createMandate`, `amendMandatePaymentTerms`, `setScheduledPaymentInitiationRequestAmount`, `resolveMandateByPayer`, `getMandateActionsByInitiator`) |
+| createStubForMandateSearchPaymentInstructions | — | stub consumed by `searchPaymentsInstructions` | PayTo API `searchPaymentsInstructions`, `makeAdhocPayment` (`endToEndId`) |
+| all money-moving mocks | client External Authorisation endpoint, if configured | Shaype → client `POST /holds`, `PATCH /holds/{holdId}`, `POST /transactions`; client `470` refuses [spec:external-balance; linkage inferred] | External authorisation API |
+| all mocks | — | webhooks: `TRANSACTION`, `MANDATE`, possibly `MANDATE_PAYMENT`, `DIRECT_ENTRY`, `MANDATE_ACTION_EXPIRATION` [docs/inferred] | Communications API (webhook consumer) — "A working webhook consumer, since the mock endpoints exercise the standard webhook delivery pipeline" [docs] |
+
+Preconditions stated in docs: staging credentials; test customer with active card; linked account with sufficient balance; working webhook consumer [docs:simulates-card-transaction-on-staging]; for PayTo: debtor and creditor accounts "created in the platform, they have been activated and they should contain money"; "Cuscal configuration must be set up on staging to use `external-services-mock`" [docs:payto-staging-testing-suite].
+
+## 6. Error catalogue
+
+| condition | status | message / notes | source |
+|---|---|---|---|
+| Generic, every op | 400 | "Bad Request" — `ErrorResponse` | [spec] |
+| Generic, every op | 403 | "Forbidden" — `ErrorResponse` | [spec] |
+| Generic, every op | 422 | "Unprocessable Content" — `ErrorResponse` | [spec] |
+| Generic, every op | 500 | "Internal Server Error" | [spec] |
+| Generic, every op | 501 | "Not Implemented" | [spec] |
+| Calling any utility in production | (unspecified) | "Any attempt to call them in production will fail." | [docs:simulates-card-transaction-on-staging] |
+| Schema violations: `amount` ≥ 0 on card mocks; `amount` ≤ 0 on DE/NPP; delay outside 5..300; bad pattern/length/enum; missing required field | 400 | not documented; standard bean-validation → 400 | [inferred] |
+| `recordType RETURN` without `returnReason`; `REFUSAL` without `refusalReason` | 400 or 422 | "Required for record type …" (spec description only) | [spec] / [inferred] |
+| Unknown `cardToken` / `cardId` / account (BSB+number) / mandate | 422 (no 404 declared) | docs' only 422 sample (from the mandate mock): `{"message":"NOT_FOUND: CUS.API.100522 - Creditor account details incorrect (M900 - No matching record found)","details":"Please refer to the API documentation or contact Shaype for more info with the traceId.","status":"422","traceId":"…"}` | [docs:payto-staging-testing-suite] / [inferred] |
+| Insufficient balance / limit / rule / fraud / card-preference refusal on a card mock | 200 + webhook `outcome` ≠ `ACCEPTED` (e.g. `REFUSED_NOT_ENOUGH_FUNDS`, `REFUSED_DAILY_ATM_WITHDRAWAL_LIMIT_BREACHED`, `REFUSED_SINGLE_CARD_TRANSACTION_LIMIT_BREACHED`, `REFUSED_CARD_PREFERENCE` + `cardPreferenceOutcome`, `REFUSED_RULES`, `REFUSED_FRAUD`, `REFUSED_ACCOUNT_BLOCKED`, `REFUSED_ACCOUNT_CLOSED`) | "the platform will decline the simulated authorisation, exactly as it would in production" | [docs] / [spec:webhooks] / HTTP code [inferred] |
+| `declineReason` supplied on a hold mock | 200 + declined transaction | "automatically declined by the payment processor with the given reason" | [docs] |
+| External-authorisation client refusal | client returns 470 `{errorCode, reason}` → transaction refused | `REFUSED_MAX_BALANCE_EXCEEDED` / `REFUSED_NOT_ENOUGH_FUNDS` / `REFUSED_SENDER_ACCOUNT_NOT_VERIFIED` | [spec:external-balance] |
+| Duplicate `idempotencyKey` (DE optional, NPP v1 required) | unknown | "prevent duplication" | [spec] / [open] |
+| PayTo ops exercised alongside these mocks (other domain, shown here because the docs give the exact text): suspend non-ACTIVE mandate | error | "Validation of the request for suspension mandate with id: {mandate_id}: To suspend a mandate it must be in active status." | [docs:payto-staging-testing-suite] |
+| release non-SUSPENDED mandate | error | "Validation of the request for releasing mandate with id: {mandate_id} failed. To release a mandate it must be in suspended status." | [docs:payto-staging-testing-suite] |
+| `makeAdhocPayment` on `paymentstatus:timeout_rjct` mandate | 200 after 15 s | `transactionStatus "REJECTED"`, `statusIsFinal true`, mock log `transactionStatus: RJCT, transactionStatusReasonCode: AB01` | [docs:payto-staging-testing-suite] |
+| `checkBsbIsSupportedByPayTo` with BSB `000000` | 200 `{"supported": false}` | | [docs:payto-staging-testing-suite] |
+
+## 7. Open questions
+
+1. **HTTP status for platform declines** on card mocks (insufficient funds, limits, `declineReason`): 200 with the decline only in the webhook, or 4xx? Docs imply 200 + webhook; not stated.
+2. **`declineReason` → webhook mapping**: which field (`cardProcessorResponse`? `outcome`?) and which values (request has `CARD_EXPIRED`/`WRONG_CVV`/`CVV_BLOCKED`; webhook enum has `EXPIRED_CARD`/`CVV_FAIL`/`CVV2_FAILURE`/`ALLOWED_PIN_RETRIES_EXCEEDED`…). Docs also list `PIN_BLOCKED`, absent from the spec enum — accept it or reject with 400?
+3. **Default delays** when `settlementDelayInSeconds` / `updateHoldDelayInSeconds` are omitted (immediate? 5 s?). And is `settlementDelayInSeconds` measured from the update or from the initial hold?
+4. **Refund amount sign**: spec requires `amount < 0` for `generateRefundTransaction`, webhook shows a positive credit. Implement as credit of |amount|.
+5. **Success `message` text** for changeCardExpiryDate, ATM, hold, hold+settle, hold+update, refund, DE inbound, NPP inbound v1, payer notification — undocumented.
+6. **404 vs 422 vs 400** for unknown card/account/mandate — spec declares no 404 anywhere.
+7. **changeCardExpiryDate**: month-end normalisation? transition to `cardStatus EXPIRED` when date is past? `CARD_STATUS_CHANGE` webhook?
+8. **Bare holds** (generateAuthHold): do they ever auto-expire/release on staging?
+9. **Full reversal** (`updateHoldAmount == |amount|`): is a `CARD_TRANSACTION_SETTLED` of 0 still emitted? `updateHoldAmount == 0` or decrease > hold: error or clamp?
+10. **Hold+update webhook count**: docs say "Two webhooks" then list three (hold, update, settlement) — implement three.
+11. **Can the incremental authorisation be declined independently** of the initial hold (limits re-checked "for the incremental amount")? Outcome reporting for that case.
+12. **Sample inconsistency**: incremental-auth sample shows `totalBalance` changing on a hold increase (232.64 → 241.64) contrary to "total unchanged" elsewhere — implement total-unchanged.
+13. **generateInboundDeTransaction** semantics: no docs. Which webhooks (`INTERBANK_TRANSFER_IN` for CREDIT? `DIRECT_DEBIT_TRANSFER` for DEBIT? `DIRECT_ENTRY` status for RETURN/REFUSAL?), how RETURN/REFUSAL are matched to a prior outbound DD, mapping of `returnReason` → `ReturnReason.code`, effect of `REFUSAL`, behaviour when no account matches, `idempotencyKey` duplicate response. Also the spec's swapped BSB/account examples.
+14. **generateInboundNppTransaction (v1)** semantics: undocumented; presumed `INTERBANK_TRANSFER_IN` credit. Duplicate `idempotencyKey` → 200 replay or error? Why exactly 8-digit `receiverAccountNumber`?
+15. **generateInboundNppTransactionV2**: `originalMessageIdentification` — with or without `N` (docs note vs sample disagree)? Is `MANDATE_PAYMENT` also emitted? What is emitted when `paymentReturnInformation.returnReasonCode` is set (reversal of which outbound transaction)? Are `paymentId`/`transactionIdentification` deduplicated? Is `initgPtyIdOrgId` validated against the client's configured BIC?
+16. **generateReceiveAPaymentInstruction**: `transactionType` of the debtor-side debit; behaviour for `transactionStatus: RJCT`; insufficient debtor funds (HTTP error vs refused outcome); does it emit `MANDATE_PAYMENT`; must `instructionIdentification` match a prior `makeAdhocPayment`?
+17. **Mandate notification mocks**: exact accepted trigger set (spec enums are malformed single strings; docs use `PCRD` on the Initiator endpoint); does the mock validate that `mandateId` exists; is `mandateDetails` persisted (e.g. `MAMN` updating stored terms); is `MANDATE_ACTION_EXPIRATION` emitted for `MCRX`/`MAMX`; response text for the Payer variant.
+18. **createStub**: does a second stub for the same mandate replace or append? Must the mandate exist? Is the stub scoped per client?
+19. **Idempotency** in general: none of the card mocks, RAP, RAPAIN, notifications or stub carry a key — treat every call as a new event.
+20. **Webhook property naming**: spec `mandateEventDto`/`mandatePaymentEventDto` vs docs samples `mandateEvent`/`mandatePaymentEvent` — pick one (docs samples reflect real payloads).
+21. **`HayAccount.status` gating**: which account statuses allow mocks (docs say accounts must be "activated"); is `LOCKED`/`DORMANT` refused with `REFUSED_ACCOUNT_BLOCKED`?
+22. **Authentication** for `/v0/utils/*` — spec declares no security scheme; docs require staging credentials.
