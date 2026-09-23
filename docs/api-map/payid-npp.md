@@ -189,3 +189,104 @@ Shared shapes used by every operation below [spec]:
   - The answer is a property of the BSB (target FI branch) — the same signal the transfer engine uses: for `transferType` ACCOUNT, "the platform verifies whether the recipient account is enabled for NPP. If it is, the payment will be executed via NPP; otherwise, it will be executed via DE" [docs:payments]. A local implementation needs a BSB → NPP-enabled lookup table [inferred].
   - Read-only; idempotent [inferred]. No documented relation to the staging multi-BSB brand BSBs (636383/636385 → 636380, DE only) [docs:multi-bsb-routing].
 - Webhooks: none documented.
+
+## 2. Entities and fields
+
+The spec has no `example` values on any PayID/NPP schema or property [spec]; examples below come from the docs pages or the spec's response examples where noted. The spec models the PayID as a set of response views over one underlying record; the fields are consolidated first, then each schema is listed verbatim.
+
+### PayID (underlying record; not a named spec schema)
+
+Identity is the pair (`payIdValue`, `payIdType`) [inferred from the parameter shapes]. Created by `postPayIdRegister`; read by `getPayId`, `getPayIdsForAccount`, `getPayIdAvailability`, `resolvePayId`, `getPayIdDeregisterHistory`; updated by `updatePayIdDetails` (ownerName, payIdName), `updatePayIdStatus` (status, reason) and, per the docs, by timers (14-day PORTABLE revert, 90-day DEREGISTERED purge, 10-year inactivity disable) [docs:payid, docs:payid-image].
+
+| field | type | nullable | notes | source |
+|---|---|---|---|---|
+| `payIdValue` | string | — | the alias itself; path param `payId`; docs examples `+61-423765879`, `test@email.com`, `601428737` | [spec], [docs:payid] |
+| `payIdType` | string enum `["EMAIL","TELEPHONE","INDIVIDUAL_AUSTRALIAN_BUSINESS","ORGANISATION"]` | — | | [spec] |
+| `status` | string enum `["ACTIVE","DEREGISTERED","DISABLED","PORTABLE"]` | — | see section 3 | [spec] |
+| `reason` | string enum `["FROD","CUST","DECD","LEGL","PART"]` | nullable on write | reason for current status | [spec] |
+| `payIdName` | string | nullable on update; minLength 1 on register | nickname/alias for the registration | [spec] |
+| `ownerName` | string | nullable on update; minLength 1 on register | account-holder name; surfaced as `accountDetails.ownerName` | [spec] |
+| `accountDetails.accountNumber` | string | — | 5–9 digits; from the linked account | [spec] |
+| `accountDetails.branchNumber` | string | — | 6-digit BSB of the linked account | [spec] |
+| linked account id | uuid | — | the `accountId` used on register; not returned by any PayID response | [spec], [inferred] |
+| `servicer` | string | — | BIC11 of the FI where the PayID is registered (availability view only) | [spec] |
+| `registrationDateTimeUtc` | string(date-time) | — | when registered | [spec] |
+| `lastUpdatedDateTimeUtc` | string(date-time) | — | when last updated | [spec] |
+| `lastResolutionDateTimeUtc` | string(date-time) | — | when last resolved | [spec] |
+
+Note: `HayAccount` (accounts domain) carries `bsb` and `accountNumber` [spec]; `PayIdAccountDetails` calls the BSB `branchNumber` [spec] — same value, different property name.
+
+### PayIdResponse [spec] — "Details of the PayID"
+`{ accountDetails: PayIdAccountDetails, payIdDetails: PayIdDetailsResponse }`. Read by getPayId.
+
+### PayIdDetailsResponse [spec] — "Details of the PayID"
+`lastResolutionDateTimeUtc` date-time; `lastUpdatedDateTimeUtc` date-time; `payIdName` string; `payIdType` enum; `payIdValue` string; `reason` enum; `registrationDateTimeUtc` date-time; `status` enum. Nothing required. Returned by getPayId (nested) and getPayIdsForAccount (array).
+
+### PayIdAccountDetails [spec] — "Details of Account registered to PayID"
+`accountNumber` string ("Account number, 5-9 digits in length"); `branchNumber` string ("BSB (Bank State Branch) of Account, 6 digits in length"); `ownerName` string. Nothing required. Returned by getPayId and resolvePayId. Confidential on client UIs [docs:payid].
+
+### PayIdResolveResponse [spec] — "Response for the PayID lookup request"
+`accountDetails` PayIdAccountDetails; `payIdName` string; `payIdType` enum; `payIdValue` string. Returned by resolvePayId. Does **not** include `status` or `reason` [spec].
+
+### PayIdAvailabilityDetailsResponse [spec] — "Response for the PayID availability inquiry"
+`availability` boolean; `lastResolutionDateTimeUtc` date-time; `lastUpdatedDateTimeUtc` date-time; `reason` enum; `registrationDateTimeUtc` date-time; `servicer` string (BIC11). Returned by getPayIdAvailability. Does **not** include `status` [spec].
+
+### PayIdDeregisterDetailsResponse [spec] — "Response for the PayID de-registration request"
+`lastUpdatedDateTimeUtc` date-time; `payIdName` string; `reason` enum; `registrationDateTimeUtc` date-time. One per historical deregistration; returned as an array by getPayIdDeregisterHistory. Created implicitly when a PayID becomes DEREGISTERED [inferred].
+
+### PayIdRegisterRequestBody [spec] — "Request body for PayID registration"
+required `["ownerName","payIdName","payIdType"]`; `ownerName` string minLength 1; `payIdName` string minLength 1; `payIdType` enum. Consumed by postPayIdRegister.
+
+### UpdatePayIdDetailsRequestBody [spec] — "Request body for PayID details update"
+required `["payIdType"]`; `ownerName` string nullable; `payIdName` string nullable; `payIdType` enum. Consumed by updatePayIdDetails.
+
+### UpdatePayIdStatusRequestBody [spec] — "Request body for PayID status update"
+required `["payIdStatus","payIdType"]`; `payIdStatus` enum `["ACTIVE","DEREGISTERED","DISABLED","PORTABLE"]`; `payIdType` enum; `reason` enum nullable. Consumed by updatePayIdStatus.
+
+### NppEligibilityCheckResponse [spec] — "Response Body of a NPP (New Payments Platform) eligibility check"
+`enabled` boolean. Examples `{"enabled": true}` / `{"enabled": false}` [spec]. Returned by verifyBranchIdentifier. Underlying entity: a BSB → NPP-enabled flag (not a spec schema) [inferred].
+
+### GenericMessage [spec] — "Message response"
+`message` string. Returned by updatePayIdDetails, updatePayIdStatus, postPayIdRegister.
+
+### ErrorResponse [spec] — "An error response."
+`details` string; `message` string; `status` string; `traceId` string. Example (verifyBranchIdentifier 422) in section 6.
+
+### Cross-domain shapes that reference PayID (owned by the transfers domain, listed for completeness)
+- `PayIdTransfer` [spec] — "Details of a transfer to Account using PayID": required `["payId","recipientName"]`; `payId` string minLength 1 ("PayID of Account receiving the transfer"); `recipientName` string 1–140; `reference` string 0–35 **deprecated**; `senderName` string 0–140. Referenced only by `TransferOutRequestBody.payIdTransfer` (used by makeTransferV0 `POST /v0/accounts/{accountId}/transfer` and makeTransferV1 `POST /v1/accounts/{accountId}/transfer`) with `transferType: "PAY_ID"` ("requires payIdTransfer object to be provided") [spec]. Note it carries no `payIdType` [spec].
+- `NppLiquidity` [spec]: required `["inbound","outbound","total"]`, all `number`; referenced only by `NonSchemeLiquidity.npp` (liquidity/reporting domain).
+- `GenerateInboundNppTransactionRequestBody` [spec] (Utilities API `POST /v0/utils/generate-npp-inbound`, generateInboundNppTransaction): required amount (>0), description (minLength 1), idempotencyKey (uuid), receiverAccountNumber `[0-9]{8}`, receiverBsb `[0-9]{6}`, receiverName, senderAccountNumber `[0-9]{6,9}`, senderBsb `[0-9]{6}`, senderName; optional `reference`. v2 (`/v0/utils/generate-inbound-npp-transaction-v2`, generateInboundNppTransactionV2) takes `GenerateRapRequestBody`. Both return `GenericMessage`. Neither addresses by PayID [spec].
+
+## 3. State machines
+
+### PayID `status`
+Values (verbatim, spec order): `ACTIVE`, `DEREGISTERED`, `DISABLED`, `PORTABLE` [spec]. The NPP diagram labels them ACTV/DISA/PORT/DERG and adds two pseudo-states, "Initial" and "Archived", which the API never returns [docs:payid-image].
+
+| from | to | via | source |
+|---|---|---|---|
+| (none / Initial) | ACTIVE | `postPayIdRegister` ("AliasRegistration") | [docs:payid-image], [docs:payid] |
+| DEREGISTERED (record still present, < 90 days) or Archived | ACTIVE | `postPayIdRegister` — "can be re-registered again with the same or different account at any point" | [docs:payid] |
+| ACTIVE | DISABLED | `updatePayIdStatus` payIdStatus=DISABLED ("AliasDisabling") | [docs:payid-image], [spec] |
+| ACTIVE | DISABLED | timer: "10 years no activity" (NPP-side, not an API call) | [docs:payid-image] |
+| DISABLED | ACTIVE | `updatePayIdStatus` payIdStatus=ACTIVE ("AliasEnabling") | [docs:payid-image], [spec] |
+| ACTIVE | PORTABLE | `updatePayIdStatus` payIdStatus=PORTABLE ("AliasPorting") | [docs:payid-image], [spec] |
+| PORTABLE | ACTIVE | timer: "14 days no registration" — "If the PayID isn't registered with this period it will automatically return to an Active state" | [docs:payid-image], [docs:payid] |
+| PORTABLE | DISABLED | `updatePayIdStatus` payIdStatus=DISABLED ("AliasDisabling") | [docs:payid-image] |
+| PORTABLE | (registered at another FI) | the other FI's registration within 14 days; from this platform's view the value is no longer linked here | [docs:payid] |
+| ACTIVE | DEREGISTERED | `updatePayIdStatus` payIdStatus=DEREGISTERED ("AliasDeregistration") | [docs:payid-image], [spec] |
+| DISABLED | DEREGISTERED | `updatePayIdStatus` payIdStatus=DEREGISTERED | [docs:payid-image] |
+| PORTABLE | DEREGISTERED | `updatePayIdStatus` payIdStatus=DEREGISTERED | [docs:payid-image] |
+| DEREGISTERED | Archived (record removed) | timer: "90 days" — "The NPP Addressing Service will automatically remove a PayID record after the record has been in deregistered state for 90 days" | [docs:payid-image], [docs:payid] |
+
+Transitions **not** in the diagram (treat as rejected): PORTABLE → ACTIVE via API ("AliasEnabling" is drawn only from DISABLED); DISABLED → PORTABLE; DEREGISTERED → anything via `updatePayIdStatus` ("A PayID in a DEREGISTERED state cannot have its status updated") [docs:payid-image], [docs:payid]. Whether PORTABLE → ACTIVE via `updatePayIdStatus` is accepted by Shaype is **not documented** — see open questions.
+
+Terminal states: DEREGISTERED is terminal for `updatePayIdStatus`; the record leaves DEREGISTERED only by `postPayIdRegister` (new registration) or by the 90-day purge [docs:payid].
+
+### PayID `reason`
+`["FROD","CUST","DECD","LEGL","PART"]` [spec]. Not a state machine; a label written by `updatePayIdStatus.reason` (nullable) and echoed on PayIdDetailsResponse, PayIdAvailabilityDetailsResponse and PayIdDeregisterDetailsResponse. No documented restriction on which reason goes with which status.
+
+### `availability` (derived boolean, not a stored status)
+`true` when the value can be registered to an account; `false` when "held against another account" [docs:payid]. Derivation from status is [inferred]: no record → true; DEREGISTERED → true; PORTABLE → true (portability exists precisely to let another account register it, within 14 days); ACTIVE or DISABLED → false.
+
+### NPP eligibility (`enabled`)
+Boolean per BSB; no transitions are exposed by the API [spec].
