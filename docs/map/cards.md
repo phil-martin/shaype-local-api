@@ -272,6 +272,232 @@ Spec example for `Address`: `{"administrativeRegion":"SA","countryCodeIso":"AUS"
 
 ---
 
+### GET /v0/cards/{cardId}/payment-preferences (getPaymentPreferences)
+
+**Purpose:** "Get preferences by Card ID" [spec]. Not deprecated.
+
+**Params:** `cardId` (path, uuid, required).
+
+**Request body:** none.
+
+**Response:** `200` → `CardPaymentPreferences` — "Card payment preferences." [spec]:
+
+| field | type | default [spec description] | description [spec] |
+|---|---|---|---|
+| `cardEnabled` | boolean | `true` | "Physical card enablement status: true: enabled (unfrozen), allows physical card usage (default); false: disabled (frozen), prevents all physical card usage" |
+| `cardNotPresentEnabled` | boolean | `false` | "Online card not present payment enablement status" |
+| `cashWithdrawalEnabled` | boolean | `false` | "ATM cash withdrawal enablement status" |
+| `contactlessEnabled` | boolean | `false` | "Physical card contactless payment enablement status" |
+| `magneticStripeEnabled` | boolean | `false` | "Physical card magnetic stripe payment enablement status" |
+| `mobileWalletPaymentsEnabled` | boolean | `true` | "Mobile wallet card payment enablement status" |
+
+`400/403/422/500/501` → `ErrorResponse`.
+
+**Behaviour:** Read-only. Docs glosses [docs:card-operations]: cardEnabled — "The physical card is enabled. Disabling the card prevents transactions from being processed using it, while the account remains active."; cardNotPresentEnabled — "customer can use card details to make online payments"; cashWithdrawalEnabled — "When disabled it will stops the card being used to withdraw cash from ATM"; contactlessEnabled — "payments to be made through contactless devices"; magneticStripeEnabled — "whether the card will be accepted when swiped through POS machine"; mobileWalletPaymentsEnabled — "payments using the digital wallet such as Apple Pay on IOS and Google Pay on Android devices". Lifecycle diagram shows `cardEnabled: false` for Physical `AWAITING_ACTIVATION`, `BLOCKED`, `INACTIVE` (cancelled/replaced), `EXPIRED`, and `true` for the renewed-then-inactive old card [docs:card-lifecycle-stauts] — so the value returned here may be status-derived in non-ACTIVE states (§7).
+
+**Webhooks:** none.
+
+---
+
+### PATCH /v0/cards/{cardId}/payment-preferences (updatePaymentPreferences)
+
+**Purpose:** "Update Card preferences" — "Endpoint providing the capability to update card payment preferences. This will not allow for the blocking/unblocking of Cards or PIN (blocking a card and unblocking a PIN is possible through other endpoints)." [spec]. Not deprecated.
+
+**Params:** `cardId` (path, uuid, required).
+
+**Request body:** `UpdatePaymentPreferencesRequestBody` (**required**) — "Payment preferences to be applied to the card. Only provided, non-null values will be modified." [spec]. Fields: the same six optional booleans as `CardPaymentPreferences` (`cardEnabled`, `cardNotPresentEnabled`, `cashWithdrawalEnabled`, `contactlessEnabled`, `magneticStripeEnabled`, `mobileWalletPaymentsEnabled`), none required, no other fields [spec].
+
+**Response:** `200` → `CardPaymentPreferences` (the resulting full preference set [inferred]). `400/403/422/500/501` → `ErrorResponse`.
+
+**Behaviour:**
+- Partial update: "Only provided, non-null values will be modified" [spec]. An empty `{}` body is therefore a no-op returning current preferences [inferred].
+- Precondition: "Card preferences can only be updated if the card is `ACTIVE`" [docs:card-operations]. Error code for other statuses: undocumented.
+- Does **not** change `cardStatus`; cannot block/unblock card or PIN [spec].
+- `cardEnabled=false` is the "freeze" transition in the lifecycle diagram (Activated `ACTIVE/cardEnabled:true` --freeze--> Frozen `ACTIVE/cardEnabled:false`; --unfreeze--> back) — status stays `ACTIVE` [docs:card-lifecycle-stauts].
+- Override rule: "**cardEnabled** flag will override all other flags except **mobileWalletPaymentsEnabled** flag" [docs:card-operations] — i.e. with `cardEnabled=false` all physical/online usage is refused regardless of the other flags, but wallet payments still follow `mobileWalletPaymentsEnabled` [inferred reading].
+- Allowed-by-card-type table, verbatim from [docs:card-operations] (columns: Virtual card "Allowed from point of creation" / Physical "Allowed before activation" / Physical "Allowed after activation"):
+
+| preference | Virtual (from creation) | Physical (before activation) | Physical (after activation) |
+|---|---|---|---|
+| `cardEnabled` | YES | NO | YES |
+| `mobileWalletPaymentsEnabled` | YES | YES | YES |
+| `cardNotPresentEnabled` | YES | NO | YES |
+| `contactlessEnabled` | NA | NO | NO |
+| `cashWithdrawalEnabled` | NA | NO | YES |
+| `magneticStripeEnabled` | NA | NO | NO |
+
+  Note the table says `contactlessEnabled` and `magneticStripeEnabled` are "NO" even after activation, which conflicts with the six-flag update body; the docs give no explanation (§7). Only `mobileWalletPaymentsEnabled` is "YES" before activation, which is also the only flag apparently changeable while a physical card is `AWAITING_ACTIVATION` — this in turn conflicts with "can only be updated if the card is ACTIVE" (§7).
+- Effect on transactions (other domain): a refused authorisation carries `outcome = REFUSED_CARD_PREFERENCE` ("Transaction declined due to any of card preference config not match" [docs:payment-transaction-outcome]) and `cardPreferenceOutcome` ∈ `CARD_FROZEN | CARD_NOT_PRESENT_DISABLED | CASH_WITHDRAWAL_DISABLED | CONTACTLESS_DISABLED | OVERSEAS_SPENDING_DISABLED | MAGNETIC_STRIPE_PAYMENT_DISABLED | MOBILE_WALLET_PAYMENT_DISABLED | OK | CARD_BLOCKED` [webhook-spec]. `OVERSEAS_SPENDING_DISABLED` has no corresponding card preference flag in this API (it is presumably an account-level preference [inferred]).
+
+**Webhooks:** none documented for preference changes.
+
+---
+
+### PUT /v0/cards/{cardId}/pin (changeCardPin)
+
+**Purpose:** "Change Card PIN" — "Action providing the capability to change a card PIN. To use this endpoint please contact your CSM, this functionality requires agreement to be used." [spec]. Not deprecated.
+
+**Params:** `cardId` (path, uuid, required).
+
+**Request body:** `ChangeCardPinRequestBody` (**required**) — "Body of a request to change a card's pin for a customer". Fields: `newPin` (string, **required**, `pattern: \d{4}`, "New card PIN, consists of 4 digits") [spec]. Note the create-card `pin` allows 4–12 digits but `newPin` here is fixed at 4 (§7).
+
+**Response:** `200` → `GenericMessage`. `400/403/422/500/501` → `ErrorResponse`.
+
+**Behaviour:**
+- "Card PIN change requires an API token with specific privilege. To use this feature please contact CSM to get the approval." [docs:card-operations] → clients without the privilege get an error; `403 Forbidden` is the declared code that fits [inferred].
+- "Only the user should have visibility of the new PIN chosen. We request that clients implement appropriate checks on their end" [docs:card-operations].
+- Validation: `newPin` must match `\d{4}` (pattern is unanchored in the schema; treat as exactly 4 digits [inferred from the description]). Failure → 400 or 422 (undocumented which).
+- No documented precondition on `cardStatus`.
+- Does not change `cardStatus` or the PIN-blocked flag (PIN unblock is a separate endpoint [spec]) [inferred].
+
+**Webhooks:** An email-channel event `CARD_PIN_CHANGE` exists: `EmailDto.type` enum includes `CARD_PIN_CHANGE` with `EmailDto.cardPinChangeEvent` = `CardPinChangeEventDto { cardHayId: uuid, cardLastFourDigits: string }` — "Details of the Card PIN Change event; provided when the type is `CARD_PIN_CHANGE`" [webhook-spec]. It is **not** in the main `NotificationDto.type` enum, so it arrives on the `/api/hay/v0/communications/email` webhook, not the notification webhook [webhook-spec].
+
+---
+
+### GET /v0/cards/{cardId}/pin/status (getCardPinStatus)
+
+**Purpose:** "Get Card PIN status" — "Action providing the capability to view Card PIN status." [spec]. Not deprecated.
+
+**Params:** `cardId` (path, uuid, required).
+
+**Request body:** none.
+
+**Response:** `200` → `CardPinStatus` — "Status of the Card PIN" = `{ enabled: boolean — "False indicates the Card PIN is blocked" }` [spec]. `400/403/422/500/501` → `ErrorResponse`.
+
+**Behaviour:** Read-only. "view the Card PIN status, whether enabled or disabled" [docs:card-operations]. The PIN becomes blocked (`enabled=false`) "after the cardholder has incorrectly entered their card PIN **3 times**" [spec][docs:card-operations] — this happens at the processor during transactions (`cardProcessorResponse` values `INCORRECT_PIN`, `ALLOWED_PIN_RETRIES_EXCEEDED`, `ALLOWED_NUMBER_OF_PIN_TRIES_EXCEEDED` [webhook-spec]); no B2B API blocks a PIN, so the local implementation needs a test hook (§7). Unlike CVV, there is no remaining-tries counter exposed for PIN [spec].
+
+**Webhooks:** none.
+
+---
+
+### POST /v0/cards/{cardId}/pin/unblock (unblockCardPin)
+
+**Purpose:** "Unblock Card PIN" — "Action providing the capability to unblock a card PIN so that the cardholder is able to attempt to enter their PIN again. Blocking of a card's PIN occurs after the cardholder has incorrectly entered their card PIN 3 times." [spec]. Not deprecated.
+
+**Params:** `cardId` (path, uuid, required).
+
+**Request body:** none.
+
+**Response:** `200` → `GenericMessage`. `400/403/422/500/501` → `ErrorResponse`.
+
+**Behaviour:** Sets PIN status `enabled = true` [inferred from `CardPinStatus` semantics]. Back-office equivalent "UNBLOCK CARD PIN" [page:card-unblock-pin]. Whether calling on an already-enabled PIN is an error or no-op: undocumented. Does not change `cardStatus` [spec: "blocking a card and unblocking a PIN is possible through other endpoints" — they are independent].
+
+**Webhooks:** none documented.
+
+---
+
+### POST /v0/cards/{cardId}/re-issue (reissueHayCard)
+
+**Purpose:** "Replace Card" — replace a lost / stolen / damaged card [spec schema description][docs:card-operations "Replace Card - Lost | Stolen"]. Not deprecated.
+
+**Params:** `cardId` (path, uuid, required) — the **old** card.
+
+**Request body:** `ReissueHayCardRequestBody` (**required**) — "Body of a request to re-issue a lost, stolen or damaged card for a customer. The card will be issued with the same configuration as the previous one - name on card, delivery address, phone number, design, and PIN." [spec].
+
+| field | type | required | enum / constraints | notes [spec] |
+|---|---|---|---|---|
+| `idempotencyKey` | string (uuid) | **yes** | | "Unique value (UUID) used to identify this request and used to recognise any subsequent retries" |
+| `cardType` | string enum | no | `PHYSICAL`, `VIRTUAL` | "PHYSICAL: Physical card has been issued; VIRTUAL: Card is virtual only. No physical card will be issued. If card type is not specified, it is set to PHYSICAL by default." |
+| `deliveryAddress` | `Address` | no | see createHayCard | |
+| `deliveryMethod` | string enum | no | `STANDARD` (default), `REGISTERED`, `COURIER`, `EXPRESS` | |
+
+**Response:** `200` → `HayCard` — the **new** card [inferred; docs say "issues a new one"]. `400/403/422/500/501` → `ErrorResponse`.
+
+**Behaviour:**
+- "It marks the old card as inactive and issues a new one." [docs:card-operations] → old card `cardStatus = INACTIVE` (terminal), `voidDateTimeUtc` set [inferred from field description]; diagram: Activated --replaceLostOrStolen--> Replaced (`INACTIVE`, `cardEnabled: false`), then "create new card (done internally)" back to Created [docs:card-lifecycle-stauts].
+- "This process generates a new PAN (Primary Account Number), CVV and expiry date." [docs:card-operations] → new `cardHayId`, new `lastFourDigits`, new `expiryDate`; a new `cardToken` is implied (token is the PAN's public token; contrast with renew where the diagram says "same token") [inferred].
+- "All digital wallets (apple pay, google pay) will be disabled when the old card is cancelled and will need to be created on the new card" [docs:card-operations].
+- New card status: "If the new card created is PHYSICAL, it will be issued AWAITING_ACTIVATION while it transit, and can then be activated once received. Virtual cards are automatically created and activated." [docs:card-operations].
+- Configuration copied from the old card: "name on card, delivery address, phone number, design, and PIN" [spec]. Yet the body accepts `deliveryAddress`/`deliveryMethod`/`cardType` — presumably overrides [inferred]. The card-creation doc says "When cards are replaced or renewed, the delivery address used is the cardholder address stored in our system against the customer" [docs:card-creation], which contradicts both the schema description ("same ... delivery address") and the presence of a `deliveryAddress` body field (§7).
+- `cardType` default PHYSICAL even when the old card was VIRTUAL [spec: "If card type is not specified, it is set to PHYSICAL by default"].
+- Preconditions on the old card's status: undocumented (diagram draws it only from Activated/`ACTIVE`). Whether an `INACTIVE`/`EXPIRED` card can be re-issued: undocumented (§7).
+- `idempotencyKey`: retry semantics undocumented (§7).
+- The old card's `renewedIntoCardId` is **not** described as being set on re-issue (its description says "if this card has been renewed"); there is no "replacedByCardId" field [spec].
+
+**Webhooks:** `CARD_STATUS_CHANGE` `INACTIVE` for the old card, and (plausibly) `AWAITING_ACTIVATION`/`ACTIVE` for the new one [inferred from webhook-spec enum; docs do not list].
+
+---
+
+### POST /v0/cards/{cardId}/renew (renewCard)
+
+**Purpose:** "Renew Card" — "Action providing the capability to renew a card" [spec]; "Renew Card - on Expiry" [docs:card-operations]. Not deprecated.
+
+**Params:** `cardId` (path, uuid, required) — the expiring card.
+
+**Request body:** `RenewCardRequestBody` (**required**, though every field is optional) — "Body of a request to renew a card for a customer" [spec].
+
+| field | type | required | enum / constraints | notes [spec] |
+|---|---|---|---|---|
+| `cardType` | string enum | no | `PHYSICAL` (default), `VIRTUAL` | "Type of card to renew into. Can convert virtual to physical card at a later time" |
+| `deliveryAddress` | `Address` | no | see createHayCard | |
+| `deliveryMethod` | string enum | no | `STANDARD` (default), `REGISTERED`, `COURIER`, `EXPRESS` | |
+
+No `idempotencyKey` on this body (unlike create/re-issue) [spec].
+
+**Response:** `200` → `HayCard` — the **new** card [inferred; "creates a new card"]. `400/403/422/500/501` → `ErrorResponse`.
+
+**Behaviour:**
+- "Renew card operation will renew the existing card into a new card with a later expiry date. This process creates a new card with a fresh expiry date, while keeping your existing PAN (Primary Account Number) the same." [docs:card-operations]. Diagram: "new card created with same token" [docs:card-lifecycle-stauts] → new `cardHayId`, same `cardToken`, same `lastFourDigits`, new `expiryDate`.
+- Old card gets `renewedIntoCardId = <new cardHayId>` ("Unique ID of the new card, if this card has been renewed") [spec].
+- "Digital wallets will be automatically updated with the new card information for seamless use." [docs:card-operations].
+- "The old card will stay active while the new card is in transit. Once the new card is received and activated, the old card is disabled" [docs:card-operations]. Diagram: Activated --renew--> Renewed: "old card after activation of new card" = `INACTIVE`, `cardEnabled: true` [docs:card-lifecycle-stauts]. So renew itself does **not** change the old card's `cardStatus`; `activateCard` on the new card does.
+- Precondition: "Renew can only be called within 2 months of the expiry date of the card" [docs:card-operations]. Error code otherwise: undocumented. Whether the card must be `ACTIVE` (vs `EXPIRED`/`BLOCKED`): undocumented (§7).
+- New card status: PHYSICAL → `AWAITING_ACTIVATION`, VIRTUAL → `ACTIVE` [inferred by analogy with create/re-issue; docs say "in transit"]. If renewed into VIRTUAL there is no activation step, so when the old card is disabled is undocumented (§7).
+- Delivery address: docs say the customer's stored cardholder address is used for renewals [docs:card-creation], but the body accepts `deliveryAddress` (§7).
+- Staging: "For card operations such as expiration, reminders, and renewal testing on Staging, please contact Shaype to manually update a card data" [docs:card-operations]; the Utilities API also has `PATCH /v0/utils/cards/{cardId}/expiry-date` to move an expiry date [spec] (§5).
+
+**Webhooks:** Expiry reminders precede renewal: `type = REMINDER`, `reminderType ∈ CARD_EXPIRY_MONTH_REMINDER | CARD_EXPIRY_2_WEEK_REMINDER | CARD_EXPIRY_DAY_REMINDER`, with `cardExpiryReminderEvent = CardExpiryReminderEventDto { cardId: uuid, expirationMonth: int32, expirationYear: int32 }` [webhook-spec]. On activation of the renewed card: `CARD_STATUS_CHANGE` `ACTIVE` (new) and `INACTIVE` (old) [inferred]. Expiry itself: `CARD_STATUS_CHANGE` with `cardStatus = EXPIRED` ("Card has been expired") [webhook-spec].
+
+---
+
+### POST /v0/cards/{cardId}/rewards (rewards)
+
+**Purpose:** "Enrol card to rewards" — "Eligible card transactions will automatically count toward rewards provided by rewards platform" [spec]. Not deprecated.
+
+**Params:** `cardId` (path, uuid, required).
+
+**Request body:** `CardRewardsStatusBody` (**required**) — "Card rewards status body". Fields: `status` (string enum, **only value `ACTIVE`** — "Card is enrolled to rewards"; not in a `required` array) [spec]. Sample payload `{"status": "ACTIVE"}` [docs:rewards].
+
+**Response** [spec]:
+- `201` "Card successfully enrolled." → `CardRewardsStatusBody` (`{"status":"ACTIVE"}`).
+- `200` "Card was already enrolled." → `CardRewardsStatusBody`.
+- `429` "Too many requests" → **`CardRewardsStatusBody`** (not `ErrorResponse` — as declared).
+- `400/403/422/500/501` → `ErrorResponse`.
+
+Docs table [docs:rewards]: `200` = "The card is ACTIVE in PokitPal but the card was previously added"; `201` = "The card is now ACTIVE in PokitPal".
+
+**Behaviour:**
+- Enrols the card with the partner **PokitPal**: "You will be able to provide your customers CardId and we will manage sending the sensitive card information securely to PokitPal" [docs:rewards]. Requires CSM to enable the feature [docs:rewards] → presumably `403` otherwise [inferred].
+- Idempotent by design: repeat enrolment returns `200` instead of `201` [spec][docs:rewards].
+- No un-enrol endpoint exists in the Cards API [spec]. Rewards status is not exposed on `HayCard` [spec].
+- No documented precondition on `cardStatus`.
+- Related notification types exist for Apple Pay rewards (`APPLE_PAY_REWARD_FOR_CUSTOMER`, reminder types `APPLE_PAY_ADDITION_REWARD`, `APPLE_PAY_SPEND_REWARD`) [webhook-spec] — these concern Apple Pay usage rewards, not PokitPal, and are outside this endpoint [inferred].
+
+**Webhooks:** none documented for PokitPal enrolment.
+
+---
+
+### POST /v0/cards/{cardId}/unblock (unblockCard)
+
+**Purpose:** "Unblock Card" [spec]. Not deprecated.
+
+**Params:** `cardId` (path, uuid, required).
+
+**Request body:** `UnblockCardRequestBody` (**required**) — "Body of a request to unblock a card." Fields: `note` (string, **required**, minLength 1, "Note or explanation for reason unblock is applied") [spec]. (Asymmetric with block, where the body and `note` are optional.)
+
+**Response:** `200` → `GenericMessage`. `400/403/422/500/501` → `ErrorResponse`.
+
+**Behaviour:**
+- "Unblock card is a reverse operation of Block Card. Upon unblocking the card, the card status would be ACTIVE" [docs:card-operations]. Diagram: Blocked --unblock--> Activated (`ACTIVE`, `cardEnabled: true`) [docs:card-lifecycle-stauts].
+- Precondition: `cardStatus == BLOCKED` [inferred from "reverse operation"; diagram]. Error code otherwise: undocumented.
+- `blockedBy` presumably cleared (null) after unblock [inferred].
+- Whether a client may unblock a card with `blockedBy = PLATFORM`: undocumented (§7).
+- Validation: missing/empty `note` → 400 or 422 (undocumented which).
+
+**Webhooks:** `CARD_STATUS_CHANGE` with `cardStatus = ACTIVE` [inferred from webhook-spec enum; "Card has been activated" is the only ACTIVE gloss].
+
+---
+
 ## 2. Entities and fields
 ## 3. State machines
 ## 4. Invariants and calculations
