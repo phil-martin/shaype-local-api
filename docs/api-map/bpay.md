@@ -208,3 +208,229 @@ No field is required [spec].
 - Values outside `ACTIVE`/`DISMISSED` → 400 or 422 [inferred].
 
 **Webhooks:** none.
+
+## 2. Entities and fields
+
+There are no spec examples for any BPAY schema; the only example values anywhere are in the `BPAY_TRANSFER_OUT` webhook sample and the Staging fixtures in [docs:bpay], quoted where relevant.
+
+### SavedBiller — `BPayBillerResponse` ("BPAY biller Response body") [spec]
+
+The per-account saved-biller record ("Just like contacts" [docs:bpay]). Created by `createBPayBiller`; read by `retrieveBillers` and `retrieveBpayBiller`; updated by `updateBpayBiller`. No delete operation.
+
+| field | type | required | nullable | description (verbatim) | set by |
+|---|---|---|---|---|---|
+| `hayId` | string (uuid) | no | not stated | "Unique identifier (UUID) of the Biller." | platform on create; is the `billerId` path param [inferred] |
+| `accountHayId` | string (uuid) | no | not stated | "Unique identifier (UUID) of the Account" | `accountId` path param on create |
+| `name` | string | no | not stated | "Nick name of the Bpay biller" | request `name`; `PATCH name` |
+| `image` | string | no | not stated | "Biller image" | Look Who's Charging enrichment [docs:bpay]; `PATCH image` |
+| `billerDetails` | `BPayBillerDetails` | no | not stated | — | directory lookup + request `reference` |
+
+Fields that exist on the record but are **not** in this response schema: `status` (`ACTIVE`/`DISMISSED`, writable via PATCH only) [spec]. The webhook-side `billerImage` example value is `"https://images.lookwhoscharging.com/8d9595b6-812e-4e32-8a58-fedbe856b2f2/iinet-ci-image.png"` [docs:bpay] — a URL, so `image` is most plausibly a URL too [inferred].
+
+### `BPayBillerDetails` ("BPAY biller details") [spec]
+
+Returned standalone by `validateBpay`, and embedded as `BPayBillerResponse.billerDetails`.
+
+| field | type | constraints (from description) | description (verbatim) |
+|---|---|---|---|
+| `billerCode` | string | 3–10 digits (no `minLength`/`maxLength` in this schema) | "The Biller Code for the biller that will receivethe payment. It must be of length 3 to 10 digits." |
+| `industryAnzsicCode` | string | four-digit | "ANZSIC codes are four-digit numbers. This is a code that identifies the classification of the industry in which the organisation operates in." |
+| `longName` | string | max 50 chars, no commas | "The long description for the Biller or Service. Max 50 characters. Commas are not allowed in this field." |
+| `referenceNumber` | string | 2–20 digits | "BPAY biller reference. It must be of length 2 to 20 digits" |
+| `shortName` | string | max 20 chars, no commas | "The short description for the Biller or Service. Max 20 characters. Commas are not allowed in this field." |
+
+Nothing required. Example values from the Staging fixtures [docs:bpay]: `billerCode` `"7773"`, `longName` `"APIBCD SERVICES AV1"`, `industryAnzsicCode` `"1113"` ("1113 - Cured Meat and Smallgoods Manufacturing"). Note fixture `93880` lists industry code `94540` (five digits), contradicting "four-digit".
+
+### Request bodies (not persisted entities) [spec]
+
+- `BPayBillerAddRequestBody` — required `billerCode`(3–10), `name`, `reference`(no constraint). Description: "BPAY biller request body".
+- `BPayBillerRequestBody` — required `billerCode`(3–10), `reference`(2–20). Description: "BPAY Biller request body".
+- `BPayBillerUpdateRequestBody` — optional `image`(1..2147483647), `name`(1..2147483647), `reference`(2–20), `status`(string; ACTIVE/DISMISSED by description only). Description: "BPAY biller reques Request body".
+- `BPayPaymentRequestBody` — see §1 makeBpayPayment. No description.
+
+### Payment result — `BpayPaymentResponseBody` ("Transaction outcome details") [spec]
+
+| field | type | enum |
+|---|---|---|
+| `outcome` | string | `ACCEPTED`, `INVALID_PAYMENT`, `REFUSED_INSUFFICIENT_FUNDS`, `INTERNAL_ERROR`, `REFUSED_DAILY_BPAY_LIMIT_BREACHED`, `REFUSED_BPAY_INVALID_BILLER_CODE`, `REFUSED_BPAY_INVALID_REFERENCE`, `REFUSED_BPAY_INVALID_PAYMENT`, `REFUSED_BPAY_REJECTED`, `REFUSED_ACCOUNT_BLOCKED`, `REFUSED_RECIPIENT_ACCOUNT_BLOCKED`, `REFUSED_ACCOUNT_CLOSED`, `REFUSED_RECIPIENT_ACCOUNT_CLOSED`, `REFUSED_CAPABILITY_NOT_ENABLED` |
+| `transactionId` | string (uuid) | "Unique identifier (UUID) of the Transaction" |
+
+Nothing required. Created by `makeBpayPayment` only. This schema is BPAY-specific; the other payment endpoints use `TransactionOutcome` whose enum differs (it has `REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED`, `REFUSED_LIMIT_BREACH`, `UNKNOWN`, … and lacks all `REFUSED_BPAY_*`) [spec].
+
+### BPAY transaction (cross-domain: Transactions) — `FinancialTransaction` [spec]
+
+`makeBpayPayment` with `ACCEPTED` produces a transaction retrievable via `getTransactionById` (`GET /v1/transactions/{transactionHayId}`) and `searchTransactions` (`POST /v0/transactions/search`, filters: `accountId`, `fromDateTimeUtc`, `toDateTimeUtc`, `originChannel`, `originId`, `originType`) [spec]. Relevant enum members [spec]:
+
+- `FinancialTransaction.type`: `BPAY_TRANSFER_OUT` = "BPAY payment made out of Account"; `BPAY_TRANSFER_IN` = "(not currently in use)".
+- `FinancialTransaction.transactionChannel`: `CUSCAL_BPAY_TRANSFER_OUT` and `BPAY_IN_REJECT` (both under "Transaction channels applicable to Shaype operated functions"); `CUSCAL_BPAY_TRANSFER_IN` (under "Transaction channels not in use").
+- `FinancialTransaction.originType`: `CUSTOMER` ("Transaction initiated by a customer") for API-initiated payments, `SCHEDULED_PAYMENT` for schedule-initiated ones [inferred from the enum descriptions].
+- `FinancialTransaction.counterpartDetails` is `ExternalCounterpartDetails` {`accountId`, `basicAccountNumber`, `customerId`, `merchantDetails`, `name`} — **no `bpayDetails`** field, unlike the webhook's `CounterpartDetails` [spec]. Where the biller code/CRN surface on the stored transaction is undocumented → §7.
+- `FinancialTransaction.reference` description: "Reference on the transaction (only applicable to NPP transactions), maximum 35 alphanumeric characters" — so the BPAY CRN may not be in `reference` [spec].
+
+`AuthorisationHold.type` also lists `BPAY_TRANSFER_OUT` and `BPAY_TRANSFER_IN`, and `AuthorisationHold.transactionChannel` lists `CUSCAL_BPAY_TRANSFER_IN`, `CUSCAL_BPAY_TRANSFER_OUT`, `BPAY_IN_REJECT` [spec]; no doc describes BPAY holds.
+
+### `BpayDetails` ("Details of the BPAY Biller") [spec] / ("BPAY transaction counterpart details.") [webhook-spec]
+
+Main-spec version (used by `ScheduledPaymentRecipient.bpayDetails`):
+
+| field | type | description (verbatim) |
+|---|---|---|
+| `billerCode` | string | "BPAY Biller Code, 3 to 10 digits in length" |
+| `billerImage` | string | "URL to external image representing Biller's logo (if available)" |
+| `billerName` | string | "Name of the BPAY Biller, 1 to 50 characters in length" |
+| `billerReference` | string | "BPAY Customer Reference Number (CRN), 2 to 20 digits in length" |
+| `category` | string | "Category assigned on the transaction" |
+
+Webhook version (`CounterpartDetails.bpayDetails`): `billerCode` ("Biller code."), `billerReference` ("Customer reference number (CRN)."), `billerName` ("Biller name."), `billerImage` ("Biller image.") — **no `category`** [webhook-spec]. Example [docs:bpay]: `{"billerCode": "93880", "billerReference": "271682361223", "billerName": "iiNet", "billerImage": "https://images.lookwhoscharging.com/8d9595b6-812e-4e32-8a58-fedbe856b2f2/iinet-ci-image.png"}`.
+
+### Webhook payload — `NotificationDto` with `type: "TRANSACTION"` [webhook-spec]
+
+`NotificationDto` required: `customerHayId`, `idempotencyKey`, `type`. `TransactionEventDto` fields present in the BPAY example [docs:bpay]: `transactionHayId`, `accountHayId`, `currencyAmount` {`currency`, `amount`}, `updatedBalance`, `isPending`, `counterpartName`, `outcome`, `transactionTimeUtc`, `isAtmTransaction` (deprecated), `transactionType`, `accountBalances` {`totalBalance`, `heldBalance`, `lockedBalance`, `stacksBalance`, `availableBalance`}, `customerHayId`, `counterpartDetails` {`name`, `bpayDetails`}, `category`, `description`. Other `TransactionEventDto` fields (not in the example): `holdHayId`, `originalCurrencyAmount`, `cardPreferenceOutcome`, `cardProcessorResponse`, `merchantName`, `cardUsageDetails`, `cardHayId`, `ruleDetails`, `originId`, `originType`, `merchantId`, `mandatePaymentDetails`, `returnReason`, `reference`, `externalIdentifiers` [webhook-spec].
+
+Verbatim example [docs:bpay]:
+
+```json
+{
+  "customerHayId": "63d24ae0-d497-485e-800a-ad141542d23r",
+  "idempotencyKey": "f2f7076f-6fb1-46e1-9730-369a86f3234e",
+  "type": "TRANSACTION",
+  "productId": "8aa68646-77a4-8411-0177-a4dabc5d03d1",
+  "transactionEvent": {
+    "transactionHayId": "d3daec8e-6044-4c60-b233-ad141542d23r",
+    "accountHayId": "150960b2-d042-4b63-abaa-ad141542d23r",
+    "currencyAmount": { "currency": "AUD", "amount": -20.00 },
+    "updatedBalance": { "currency": "AUD", "amount": 151087.66 },
+    "isPending": false,
+    "counterpartName": "TestGQL",
+    "outcome": "ACCEPTED",
+    "transactionTimeUtc": "2024-06-21T03:03:16.354179Z",
+    "isAtmTransaction": false,
+    "transactionType": "BPAY_TRANSFER_OUT",
+    "accountBalances": {
+      "totalBalance": { "currency": "AUD", "amount": 151087.66 },
+      "heldBalance": { "currency": "AUD", "amount": 0 },
+      "lockedBalance": { "currency": "AUD", "amount": 0 },
+      "stacksBalance": { "currency": "AUD", "amount": 0 },
+      "availableBalance": { "currency": "AUD", "amount": 151087.66 }
+    },
+    "customerHayId": "63d24ae0-d497-485e-800a-ad141542d23r",
+    "counterpartDetails": {
+      "name": "TestGQL",
+      "bpayDetails": {
+        "billerCode": "93880",
+        "billerReference": "271682361223",
+        "billerName": "iiNet",
+        "billerImage": "https://images.lookwhoscharging.com/8d9595b6-812e-4e32-8a58-fedbe856b2f2/iinet-ci-image.png"
+      }
+    },
+    "category": "Category",
+    "description": "test BPAY TRANSFER BA AU PAYEE"
+  }
+}
+```
+
+(The example ids end in `d23r`, which is not valid hex — they are illustrative, not real UUIDs.) `counterpartDetails.name`/`counterpartName` = `"TestGQL"` while `bpayDetails.billerName` = `"iiNet"`: the counterpart name is the payer-supplied nickname (`name` on the payment request), not the biller's registered name [inferred].
+
+`TransactionEventDto.outcome` enum (full, verbatim) [webhook-spec]: `ACCEPTED`, `REFUSED_CARD_PREFERENCE`, `REFUSED_ACCOUNT_PREFERENCE`, `REFUSED_FRAUD`, `REFUSED_AML`, `REFUSED_MAX_BALANCE_EXCEEDED`, `REFUSED_NOT_ENOUGH_FUNDS`, `REFUSED_DAILY_LIMIT_EXCEEDED`, `INTERNAL_ERROR`, `REFUSED_ACCOUNT_NOT_FOUND_FOR_CARD_TOKEN`, `REFUSED_UNDETERMINED_BALANCE_FOR_ACCOUNT`, `REFUSED_ACCOUNT_NOT_FOUND_FOR_CURRENCY`, `REFUSED_UNDETERMINED_SPENDING_FOR_ACCOUNT`, `REFUSED_UNDETERMINED_TOP_UPS_FOR_ACCOUNT`, `REFUSED_UNDETERMINED_ATM_WITHDRAWALS_FOR_ACCOUNT`, `REFUSED_ANNUAL_SPENDING_LIMIT_BREACHED`, `REFUSED_DAILY_ATM_WITHDRAWAL_LIMIT_BREACHED`, `REFUSED_DAILY_TOP_UP_LIMIT_BREACHED`, `REFUSED_ACCOUNT_BLOCKED`, `REFUSED_ACCOUNT_CLOSED`, `REFUSED_RECIPIENT_ACCOUNT_BLOCKED`, `REFUSED_RECIPIENT_ACCOUNT_CLOSED`, `REFUSED_DAILY_DIRECT_DEBIT_LIMIT_BREACHED`, `REFUSED_DAILY_TRANSFERS_OUT_LIMIT_BREACHED`, `REFUSED_RULES`, `REFUSED_TOTAL_INBOUND_DIRECT_DEBIT_DAILY_LIMIT_BREACHED`, `REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED`, `REFUSED_TOTAL_NET_VISA_DAILY_LIMIT_BREACHED`, `REFUSED_TOTAL_NON_SCHEME_DAILY_LIMIT_BREACHED`, `REFUSED_BPAY_INVALID_BILLER_CODE`, `REFUSED_BPAY_INVALID_REFERENCE`, `REFUSED_BPAY_INVALID_PAYMENT`, `REFUSED_BPAY_REJECTED`, `REFUSED_DAILY_CARD_TRANSACTIONS_LIMIT_BREACHED`, `REFUSED_SINGLE_CARD_TRANSACTION_LIMIT_BREACHED`, `REFUSED_SANCTIONS`, `REFUSED_UNABLE_TO_VALIDATE`, `REFUSED_INSUFFICIENT_DATA`, `REFUSED_SENDER_ACCOUNT_NOT_VERIFIED`, `REFUSED_CAPABILITY_NOT_ENABLED`, `REFUSED_QUOTE_EXPIRED`. Note it contains neither `REFUSED_DAILY_BPAY_LIMIT_BREACHED` nor `REFUSED_INSUFFICIENT_FUNDS` nor `INVALID_PAYMENT` — three of the sync `BpayPaymentResponseBody` values have no webhook counterpart [spec][webhook-spec].
+
+`TransactionEventDto.transactionType` enum (verbatim) [webhook-spec]: `CARD_TRANSACTION`, `CARD_TRANSACTION_REFUND`, `CARD_TRANSACTION_SETTLED`, `INTRABANK_TRANSFER_IN`, `INTRABANK_TRANSFER_OUT`, `INTERBANK_TRANSFER_IN`, `INTERBANK_TRANSFER_OUT`, `DIRECT_DEBIT_TRANSFER`, `HAY_TOP_UP`, `INTERBANK_TRANSFER_OUT_REVERSAL`, `REWARD`, `GENERAL_CREDIT`, `GENERAL_DEBIT`, `ORIGINAL_CREDIT`, `BPAY_TRANSFER_OUT`, `CONVERSION_IN`, `CONVERSION_OUT`. (`BPAY_TRANSFER_OUT` = "Outgoing BPAY transfer".)
+
+### `BPayLiquidity` (cross-domain: Liquidity) [spec]
+
+`ClientLiquidity.nonScheme.bpay` in `GET /v1/liquidity` (`getClientLiquidity`, optional `date` query). Required: `inbound`, `outbound`, `total` — all `number`, no descriptions. Presumably day-aggregated sums of BPAY movements [inferred].
+
+### Account limit `BPAY_DAILY_LIMIT` (cross-domain: Accounts) [spec]
+
+`ExternalLimitAmounts` {`type`, `accountLimit`, `effectiveLimit`, `productLimit`} from `getAccountLimits`; `setAccountLimit` (`PUT /v1/accounts/{accountId}/limits/BPAY_DAILY_LIMIT`, body `ExternalSetAccountLimitRequestBody` {`limitAmount` number > 0, required}); `deleteAccountLimit`. `BPAY_DAILY_LIMIT` = "Maximum value of outgoing BPAY payments" [spec] / "The maximum amount of money that can be transferred using BPAY within a single day" [docs:account-limits]. `BPAY_TOP_UP_PER_DAY` = "Not currently used" [spec][docs:account-limits] and is absent from the `setAccountLimit` `limitType` path enum [spec].
+
+### Staging biller fixtures [docs:bpay]
+
+These are the only concrete biller records anywhere; a local implementation should seed them. "The data used in the mock is for testing purposes only."
+
+| billerCode | Industry Code | Long Name | Valid CRN Lengths | Variable CRN | Valid CRNs | Check digit rule | Payment Methods | Lower | Upper / Amount | active |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `7773` | 1113 - Cured Meat and Smallgoods Manufacturing | APIBCD SERVICES AV1 | 8 | N | 74177361 / 23915754 / 48165831 / 12914552 / 14525281 | MOD10V01 | Debit | $20.00 | $50,000.00 | yes |
+| `93849` | 6931 - Legal Services | APIBCD SERVICES AV8 | 7, 9, 10 | N | 7231016 | MOD11V09 | Debit | $10.00 | $20,000.00 | yes |
+| `93880` | 94540 - Religious Services | APIBCD SERVICES AV12 | 12 | N | 271682361214 / 781133471230 / 351118227898 / 859167654564 / 637933921214 | MOD10V01 | Debit | $10.00 | $4,000.00 | yes |
+| `600015` | 3501 - Car Wholesaling | API2 SERVICES ICRN AMT | 4–20 (every length 4..20) | Y | 0808812345678260 | ICRNAMT | Debit | — | Exact only - $104.00 | yes |
+| `1016` | 3501 - Car Wholesaling | BILLER LONG NAME 505529 | 10 | N | 42741454 | MOD10V01 | NONE (Inactive Biller) | N/A | N/A | **no** (Deactivated) |
+
+Note: the webhook example uses `billerCode 93880` with `billerReference 271682361223`, which is *not* in that biller's Valid CRNs list (`…214`), and `billerName "iiNet"`, not the fixture long name — the example and the fixtures are not mutually consistent. Fixture `1016` lists a Valid CRN of 8 digits against a Valid CRN Length of 10.
+
+## 3. State machines
+
+### SavedBiller `status` [spec: `BPayBillerUpdateRequestBody.status` description]
+
+Values (verbatim): `ACTIVE` ("Biller is active."), `DISMISSED` ("Biller is dimissed"). Not exposed on any response schema [spec].
+
+| from | to | via |
+|---|---|---|
+| (none) | `ACTIVE` | `createBPayBiller` — initial status not stated; `ACTIVE` [inferred] |
+| `ACTIVE` | `DISMISSED` | `updateBpayBiller` with `status: "DISMISSED"` [spec] |
+| `DISMISSED` | `ACTIVE` | `updateBpayBiller` with `status: "ACTIVE"` — not stated whether allowed [inferred: open] |
+
+Terminal: none documented. No transitions are documented as forbidden.
+
+### Directory biller active flag [docs:bpay]
+
+External data, not a state the API mutates: a biller in the BPAY directory is either active or "Deactivated"/"Inactive Biller" (fixture `1016`). `createBPayBiller` "Throw[s] error if active biller is not found for that biller code" and `makeBpayPayment` returns `REFUSED_BPAY_INVALID_BILLER_CODE` [inferred mapping]. No transition is driven by this API.
+
+### BPAY payment lifecycle [inferred synthesis; no status enum exists on the payment itself]
+
+The payment has no status field; its lifecycle is expressed by (a) the synchronous `outcome`, (b) the `FinancialTransaction` record, (c) the async Cuscal result.
+
+| from | to | via |
+|---|---|---|
+| (request) | sync `outcome` ≠ `ACCEPTED` | `makeBpayPayment` refused by platform validation (§1, rules 1–7). No balance change [inferred]. |
+| (request) | sync `outcome = ACCEPTED`, transaction `BPAY_TRANSFER_OUT` created, balance debited, `TRANSACTION` webhook with `isPending: false` | `makeBpayPayment` [docs:bpay example] |
+| accepted | submitted to Cuscal | platform batch at 1 PM / 5 PM AEST/AEDT business days [docs:bpay] |
+| submitted | settled / rejected (result file ~2:45pm / ~6:15pm AEST/AEDT; error codes 100–199 = transaction issue) | Cuscal result file [docs:bpay]. Surfacing mechanism undocumented; `BPAY_IN_REJECT` transaction channel exists [spec] → §7. |
+
+Terminal: refused (sync), settled, rejected-after-acceptance (mechanism unknown).
+
+### Scheduled payment with `recipientType: BPAY` (cross-domain, for reference) [spec: `HayScheduledPayment.status`]
+
+`ACTIVE`, `CANCELLED`, `DELETED`, `FAILED`, `REJECTED`, `COMPLETED`, `REPLACED`. Owned by the scheduled-payments domain; not driven by any BPAY operation. Scheduled payments cannot be created through the B2B API ("The Create and Update Scheduled Payment features are available through the UI portal" [docs:scheduled-payments]).
+
+## 4. Invariants and calculations
+
+### Field formats [spec unless noted]
+
+- `billerCode`: string, length 3–10, digits; "can have leading zeros" [docs:bpay] → **keep as string, never parse to a number, compare byte-wise**. `BpayDetails.billerCode`: "3 to 10 digits in length".
+- `reference` / `referenceNumber` / `billerReference` (CRN): string, length 2–20, digits. On `BPayBillerAddRequestBody` the 2–20 bound is description-only (no `minLength`/`maxLength`); on `BPayBillerRequestBody`, `BPayBillerUpdateRequestBody`, `BPayPaymentRequestBody` it is enforced by schema.
+- `name` (nickname): free string, required on create; on update `minLength 1`. Not constrained on `BPayPaymentRequestBody`.
+- `longName` ≤ 50 chars, `shortName` ≤ 20 chars, both "Commas are not allowed"; `billerName` (webhook/BpayDetails) 1–50 chars. `industryAnzsicCode` "four-digit numbers".
+- `amount`: number > 0 (`minimum: 0, exclusiveMinimum: true`); "cannot be zero" [docs:bpay]. Decimal, two places in examples (`-20.00`, `151087.66`). Currency is implicit (`AUD` in every example).
+- `category`: string, `minLength 1`, required on payment; echoed on the webhook `transactionEvent.category` [docs:bpay example] and on `BpayDetails.category` "Category assigned on the transaction".
+- `description`: 1–255 chars, optional; echoed as `transactionEvent.description`.
+- `idempotencyKey`: uuid, optional.
+- All ids (`accountId`, `billerId`/`hayId`, `senderCustomerHayId`, `transactionId`) are UUID strings.
+- `limit`/`offset` on `retrieveBillers`: int32, both required, semantics not described (assume offset-based paging [inferred]).
+
+### Uniqueness [docs:bpay]
+
+Within the saved billers of an account [scope inferred]:
+- `billerCode` may repeat ("You can provide the same Biller code more than once").
+- `reference` must be unique ("cannot assign the same reference … as other saved billers").
+- `name` must be unique ("`name` must not match an existing record with same nickname").
+Whether `DISMISSED` billers count toward uniqueness is not stated.
+
+### Payment validation formulas
+
+- Amount vs balance: `amount <= availableBalance` [docs:bpay: "must not exceed the available balance in the account"]. Balance definitions [docs:account-balances]: "Available Balance = Account Balance + (Overdraft Limit + Overdraft Balance) + Technical Overdraft Balance + Held Balance + Stacks balance" and "Total Balance = Total Available Balance + (Overdraft Limit + Overdraft Balance) + Technical Overdraft Balance + Stacks Balance" (quoted as written; the doc's sign conventions are not self-consistent — the webhook example with held=locked=stacks=0 shows `availableBalance == totalBalance == updatedBalance`, which is the invariant to preserve in the simple case).
+- Daily limit: let `L = effectiveLimit(BPAY_DAILY_LIMIT)` where `effectiveLimit = accountLimit if set else productLimit` [docs:account-limits: "If an account level limit is set this will be the effective limit, otherwise the default Product level limit will be used"]. Refuse if `sum(amount of accepted BPAY_TRANSFER_OUT for this account in the trailing 24 h) + amount > L` [docs:account-limits: "rolling 24h window … check if the total (including the current transaction) would go over the limit"]. Worked example: "if the BPAY limit is $100 and the user attempts to send a BPAY transaction of $101, the platform will reject the transaction" [docs:bpay]. Account limit cannot exceed product limit [docs:account-limits]. Risk level `HIGH` "set all limits to 0, which means … will prevent all outbound and inbound transactions" [docs:account-limits].
+- Amount vs biller rules [docs:bpay fixtures]: `Lower Limit <= amount <= Upper Limit` for billers that declare them; for `ICRNAMT` billers the amount must equal the amount encoded in the CRN ("Exact only - $104.00"; "the amount must exactly match the expected amount due").
+- CRN vs biller rules [docs:bpay fixtures]: `len(reference) ∈ Valid CRN Lengths`; check-digit rule (`MOD10V01`, `MOD11V09`, `ICRNAMT`) must pass — the algorithms are named but not specified anywhere in these sources; in Staging only the listed "Valid CRNs" are accepted.
+- Post-acceptance balance effect: `updatedBalance = previousBalance + currencyAmount.amount` where `currencyAmount.amount` is negative for the debit (`-20.00`) [docs:bpay example].
+
+### Time handling
+
+- `transactionTimeUtc`: ISO-8601 UTC with microseconds in the example (`2024-06-21T03:03:16.354179Z`) [docs:bpay].
+- Rolling-24h limit window is wall-clock based [docs:account-limits]; the account-limits doc's ATM example says "until the next calendar day", which contradicts "rolling 24h window" — treat rolling as authoritative for BPAY since the BPAY doc cross-links to it [inferred].
+- Cuscal batching uses AEST/AEDT business days (1 PM, 5 PM submit; ~2:45 PM, ~6:15 PM results) [docs:bpay]. Nothing in the API surface depends on these times; a local implementation can ignore them unless simulating late rejections.
+
+### Liquidity threshold `TOTAL_DAILY_OUTBOUND_BPAY` (client-level) [docs:liquidity-monitoring-and-alerting-1]
+
+- Amount mode: alert "If amount ($) + Total Outbound BPAY Running Balance <= 0".
+- Percent mode: alert "If BPAY_DAILY_LIMIT * percentage (%) + Total Outbound BPAY Running Balance <= 0"; the percentage base for this type is `BPAY_DAILY_LIMIT`.
+- Alerts are emails, not webhooks, and do not refuse transactions. `LiquidityThreshold`: `percent` 1–100 int32 nullable, `amount` ≥ 1 nullable, `active`, `percental`, `external`, `clientReference`, `id` [spec].
