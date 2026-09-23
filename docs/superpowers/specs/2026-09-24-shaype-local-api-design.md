@@ -2,7 +2,7 @@
 
 A cleanroom local re-implementation of the Shaype B2B Operations API for end-to-end testing of code that integrates with Shaype. Runs on a developer machine, keeps state in SQLite, behaves like the real platform for the in-scope domains, and pushes webhook notifications to the system under test.
 
-This document is the ground truth for implementers. Per-domain field lists, enums, transitions and source citations live in `docs/map/<domain>.md` (verified against the spec); this document fixes the architecture, cross-cutting conventions and every decision the spec leaves open. Tags: `[spec]` from the OpenAPI file, `[docs]` from developer.shaype.com, `[decision]` chosen here.
+This document is the ground truth for implementers. Per-domain field lists, enums, transitions and source citations live in `docs/map/<domain>.md` (verified against the spec), and the cross-domain reconciliations in `docs/map/00-*.md` (balance model, transaction model, status enums, webhook trigger matrix, open questions with recommended defaults); this document fixes the architecture, cross-cutting conventions and every decision the spec leaves open. Where this document and a map or critic note disagree, this document wins. Tags: `[spec]` from the OpenAPI file, `[docs]` from developer.shaype.com, `[decision]` chosen here.
 
 ## 1. Goals and non-goals
 
@@ -102,6 +102,9 @@ Domains register singletons in `ctx.services` (typed via module augmentation of 
 | Account numbers | BSB `636220` for every local account; account numbers 8 digits from a sequence (`10000001`, …) unless the client supplies one. Uniqueness enforced (422 `DUPLICATE_ACCOUNT_NUMBER`). |
 | Deprecated ops | Served exactly like their replacements (v0 create credit/debit collapses detailed limit outcomes into `REFUSED_LIMIT_BREACH`). |
 | 501 | Never returned. |
+| Contract fidelity | Responses follow the declared schema literally. Deviate only where the literal contract cannot carry the documented flow (e.g. `retrieveBillers` declares one `BPayBillerResponse` but is a paged list → return the array), and record each deviation in the domain's `index.ts` header comment. |
+| Enum values | An out-of-enum value is a schema violation → 400 (the critics' notes suggest 422; the spec decision is 400 because Fastify validation produces it uniformly). |
+| Outcome enums | Each surface uses its own enum verbatim: REST `TransactionOutcome.outcome` has `REFUSED_INSUFFICIENT_FUNDS`, the webhook `TransactionEventDto.outcome` has `REFUSED_NOT_ENOUGH_FUNDS`; BPAY REST uses `REFUSED_DAILY_BPAY_LIMIT_BREACHED`, webhook `REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED`. |
 
 ## 5. Domain model
 
@@ -119,13 +122,14 @@ Domains register singletons in `ctx.services` (typed via module augmentation of 
 
 - Product: one seeded product `LOCAL_PRODUCT_ID = "a1b2c3d4-0000-4000-8000-000000000001"` ("Local Everyday Account", AUD) with product-level limits (below). `getAllProducts` lists it. Unknown `productId` on create → 422 `PRODUCT_NOT_FOUND`.
 - `createAccount` (v1) / `createHayAccount` (v0) / `createHayAccountForGroup`: holder must exist and be `ACTIVE` (group: all members `ACTIVE`) → 422 `PERMISSION_DENIED: ...` with the documented messages; status `APPROVED`; risk level per `config.defaultRiskLevel` (default `HIGH`, faithful to docs; set `LOW` via `PATCH /v0/accounts/{id}/riskLevel` or `--default-risk-level LOW`); balances 0; emits `ACCOUNT_STATUS_CHANGE` (`APPROVED`, `PLATFORM`).
-- Balance fields (cents on the row: `ledger`, `held`, `locked`, `stacks`, `overdraft_limit`):
-  - `totalBalance = ledger`
+- Balance fields (cents on the row: `ledger` = net settled postings including money in stacks, `held`, `locked`, `stacks`, `overdraft_limit`; see `docs/map/00-balance.md` §1.2 for the full derivation):
+  - `totalBalance = ledger + overdraftLimit` (spec: total "will also include unused overdraft limit")
   - `overdraftBalance = max(0, min(-ledger, overdraftLimit))`
   - `technicalOverdraftBalance = max(0, -ledger - overdraftLimit)`
-  - `availableBalance = ledger + overdraftLimit - held - locked - stacks`
+  - `availableBalance = totalBalance - held - locked - stacks`
   - `heldBalance`, `lockedBalance`, `stacksBalance`, `overdraftLimit` reported positive.
-  These reproduce every documented sample (hold: total unchanged, held +a, available −a; settlement: total −s, held −h; refund/credit: total and available +x).
+  - Funds check for any debit or hold: `amount <= availableBalance`. `MAX_BALANCE` compares `ledger + amount`. Closure check `ACCOUNT_BALANCE_TOTAL` tests `ledger == 0` (not `totalBalance`).
+  With `overdraftLimit = 0` these reproduce every documented sample (hold: total unchanged, held +a, available −a; settlement: total −s, held −h; refund/credit: total and available +x).
 - Status machine: `APPROVED → ACTIVE` on the first posting (any settled transaction) `[docs]`; `ACTIVE ↔ ACTIVE_IN_ARREARS` when `technicalOverdraftBalance > 0`; `blockAccount` → `LOCKED` (`blockedBy: CLIENT`; also blocks the owning customer unless `accountBlockStyle: ACCOUNT_ONLY`; idempotent); `unblockAccount` → `ACTIVE`; `closeAccount` → 202 then async `CLOSED` when `ledger == held == locked == stacks == 0` (else 422 `CloseAccountResponse` with `ClosureCheckerError`s), cancels linked cards (`INACTIVE`, `CARD_STATUS_CHANGE`), sets the customer `INACTIVE` if it was the last open account. Every status change emits `ACCOUNT_STATUS_CHANGE` with `LOCKED` rendered as `BLOCKED` in the webhook enum.
 - Movements on a `LOCKED`/`CLOSED` account are refused (`REFUSED_ACCOUNT_BLOCKED` / `REFUSED_ACCOUNT_CLOSED`).
 - Limits: effective = account-level if set else product-level; account-level may not exceed product-level (422). Risk level `HIGH` ⇒ every limit is 0 ⇒ all movements refused `[docs]`. Daily limits use a rolling 24 h window over posted transactions of the matching kind; `MAX_BALANCE` compares `ledger + amount`; `TOTAL_SPEND_PER_YEAR` rolling 365 days. Product defaults `[decision]`: `MAX_BALANCE` 1,000,000; `CARD_PAYMENTS_DAILY` 50,000; `SINGLE_CARD_TRANSACTION` 20,000; `ATM_WITHDRAWAL_PER_DAY` 5,000; `TOP_UP_PER_DAY` and `BANK_TRANSFER_TOP_UP_PER_DAY` 100,000; `BPAY_DAILY_LIMIT`, `DIRECT_DEBIT_PER_DAY`, `PAYMENT_TO_ACCOUNT_NUMBER` 50,000; `TOTAL_SPEND_PER_YEAR` 10,000,000. Outcome mapping per `docs/map/transactions-holds.md` §4.4.
