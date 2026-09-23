@@ -210,3 +210,150 @@ Context: two layers — Currency Cloud is the underlying FX provider ("prices on
 - Response: `200 Success` → `LiquidityDetailedRatesResponse` (description "The account a rate was quoted for, and the rate itself") = `{ rate: LiquidityDetailedRate, target: enum ("The account the rate was quoted for") }` [spec]. `LiquidityDetailedRate` ("A Currency Cloud detailed rate, returned as-is"), all optional: `buyAmount` number ("Amount that would be bought"); `clientBuyCurrency` `<ISO-162>` ("Currency that would be bought"); `clientRate` number ("The rate that would be applied to a conversion"); `clientSellCurrency` `<ISO-162>` ("Currency that would be sold"); `coreRate` number ("The market rate"); `currencyPair` string (example `"AUDUSD"`, "Concatenated pair of currencies quoted"); `depositAmount` number ("The deposit amount that would be required"); `depositCurrency` `<ISO-162>` ("Currency the deposit is shown in"); `depositRequired` boolean ("Whether a deposit would be required"); `fixedSide` enum `["BUY","SELL"]` ("Which side of the trade is fixed in value"); `midMarketRate` number ("The mid point between the buy and sell rates"); `partnerRate` number ("The market rate plus Currency Cloud's commission, where applicable"); `sellAmount` number ("Amount that would be sold"); `settlementCutOffTime` string date-time ("When funds must be available for a trade at this rate to settle") [spec]. Common error responses.
 - Behaviour: read-only, indicative, no locking (Currency Cloud "returns a quote and it books a conversion based on market conditions at the time of request") [docs:margins-and-quote-locking]; per-target tenant difference [spec].
 - Webhooks: none.
+
+### Liquidity API
+
+Context [docs:liquidity-monitoring-and-alerting-1]: "Shaype provides Liquidity Monitoring & Alerting, where client-specific limits are configured, and daily liquidity is measured against these limits. Alert thresholds are set at 50%, 75%, and 90% of the limit. If a transaction causes the daily liquidity value to exceed one of these thresholds, an email notification is sent to the designated recipients." Alerts are **emails** to the address given at onboarding, not webhooks. Four threshold types; each "can be configured either as a specific amount or as a percentage of the relevant limit"; each has an `active` flag.
+
+### GET /v1/liquidity (getClientLiquidity)
+
+- Purpose: "Get client Liquidity" — "retrieve client liquidity for a specific date, including both scheme and non-scheme liquidity details" [spec][docs:liquidity-monitoring-and-alerting-1]. Not deprecated. No description.
+- Query params: `date` — string, `format: date`, optional, `nullable: true`, "Optional date to retrieve Liquidity for" [spec]. Default when absent is not stated [inferred: today, in the platform's business-day timezone].
+- Request body: none.
+- Response: `200 Success` → `ClientLiquidity`, `required: ["clientReference","date","nonScheme","scheme"]` [spec]:
+  - `clientReference` — string.
+  - `date` — string `format: date`.
+  - `nonScheme` — `NonSchemeLiquidity`, `required: ["bpay","directEntry","haas","npp","total"]` = `{ bpay: BPayLiquidity, directEntry: DirectEntryLiquidity, haas: HaasLiquidity, npp: NppLiquidity, total: number }`.
+    - `BPayLiquidity`, `HaasLiquidity`, `NppLiquidity`, `DirectCreditLiquidity`, `DirectDebitLiquidity` each = `{ inbound: number, outbound: number, total: number }`, all three required.
+    - `DirectEntryLiquidity` = `{ credit: DirectCreditLiquidity, debit: DirectDebitLiquidity, total: number }`, all required.
+  - `scheme` — `SchemeLiquidity`, `required: ["domestic","international","total"]` = `{ domestic: number, international: number, total: number }`.
+  No field has a description [spec]. Common error responses.
+- Behaviour: read-only aggregate of the day's flows per channel [docs:liquidity-monitoring-and-alerting-1]; sign convention and the formula for each `total` (sum vs. net of `inbound`/`outbound`) are not stated anywhere — see §4/§7; which transaction channels feed `haas`, `npp`, `directEntry`, `bpay`, and `scheme.domestic`/`international` is not stated [inferred: `FinancialTransaction.transactionChannel` families `HAAS_TRANSFER_*`, `CUSCAL_NPP_*`, `CUSCAL_DE_*`, `CUSCAL_BPAY_*`, and `VISA_*`/`APPLE_PAY_*`/`GOOGLE_PAY_*` split by the `_INTERNATIONAL` suffix].
+- Webhooks: none.
+
+### GET /v1/liquidity/thresholds (getClientLiquidityThresholds)
+
+- Purpose: "Get all liquidity alerting Thresholds" — "retrieve all active or inactive liquidity alerting thresholds created through the Create Liquidity Threshold API" [spec][docs:liquidity-monitoring-and-alerting-1]. Not deprecated.
+- Query params: `active` — boolean, optional, `nullable: true`, "Determines whether to retrieve only active thresholds" [spec]. Semantics of `active=false` (only inactive vs. all) are not stated [inferred: filter `active == value`; absent ⇒ all].
+- Request body: none.
+- Response: `200 Success` → array of `LiquidityThreshold` (§2). Common error responses.
+- Behaviour: read-only; "By default each of the payment channel will be set with 3 thresholds enabled at: 50%, 75% and 90%" [docs:liquidity-monitoring-and-alerting-1] — so a fresh client lists 12 percental thresholds [inferred]; whether platform defaults are flagged by `external: false` is not stated (see §7).
+- Webhooks: none.
+
+### POST /v1/liquidity/thresholds (createLiquidityThreshold)
+
+- Purpose: "Create liquidity alerting Threshold" [spec]. Not deprecated. No description.
+- Path/query params: none.
+- Request body (required): `CreateThresholdRequestBody` (description "Body of a request to create a liquidity threshold alert."), `required: ["id","type"]` [spec]
+  - `active` — boolean, optional, "Determines whether the threshold is active. If set to **false**,the threshold will not be checked and won't raise an alert in case of a breach."
+  - `amount` — number, optional, `nullable: true`, `minimum: 1`, "Absolute monetary value for the threshold. Required if `percental` is set to **false**."
+  - `id` — string, **required**, `format: uuid`, "Unique identifier (UUID) for the threshold." (client-supplied).
+  - `percent` — integer int32, optional, `nullable: true`, `minimum: 1`, `maximum: 100`, "Relative percentage value for the threshold. Required if `percental` is set to **true**."
+  - `percental` — boolean, optional, "Calculation method for the threshold: **true**: Threshold is set as a percentage of corresponding limit. When set to **true**, the `percent` field needs to be set. / **false**: Threshold is set as an absolute value. When set to **false**, the `amount` field needs to be set."
+  - `type` — string, **required**, enum `["TOTAL_DAILY_INBOUND_DIRECT_DEBIT","TOTAL_DAILY_NET_NON_SCHEME","TOTAL_DAILY_NET_VISA","TOTAL_DAILY_OUTBOUND_BPAY"]`, "Liquidity threshold type: **TOTAL_DAILY_INBOUND_DIRECT_DEBIT**: Total daily inbound Direct Debits threshold / **TOTAL_DAILY_NET_NON_SCHEME**: Total daily non-scheme payments threshold / **TOTAL_DAILY_NET_VISA**: Total daily Visa card payments threshold / **TOTAL_DAILY_OUTBOUND_BPAY**: Total daily outbound BPAY payments threshold".
+- Response: `200 Success` (not 201) → `LiquidityThreshold` [spec]. Common error responses.
+- Behaviour / validation [docs:liquidity-monitoring-and-alerting-1]: "Between **0 and 10 max** different thresholds can be set" per type; percentage ⇒ "only values between **1 and 100**"; amount ⇒ "only positive values … **AND** whole amount **AND** must be between" 1 and the channel max (`TOTAL_DAILY_NET_NON_SCHEME`: Non-Scheme Float Account Cash Balance + Non-Scheme CM Liquidity Account Cash Balance; `TOTAL_DAILY_OUTBOUND_BPAY`: `BPAY_DAILY_LIMIT`; `TOTAL_DAILY_INBOUND_DIRECT_DEBIT`: `DIRECT_DEBIT_PER_DAY`; `TOTAL_DAILY_NET_VISA`: `CARD_PAYMENTS_DAILY`); "To use a fixed amount, set `percental = false` and specify the desired amount value, e.g., `$1000.`"; `percental=true` without `percent`, or `percental=false` without `amount` ⇒ validation error [spec descriptions] (status unspecified; [inferred] 400); `percental` absent ⇒ unspecified [inferred: treat as `true`, the "preferred configuration method"]; `active` absent ⇒ unspecified [inferred: `true`]; duplicate `id` ⇒ unspecified (no 409 declared) [inferred: 400/422]; exceeding 10 per type ⇒ unspecified [inferred: 422]; `clientReference` in the response is set from the caller's identity [inferred]. Idempotency: client-supplied `id` makes an exact retry detectable [inferred].
+- Webhooks: none (alerts are emails).
+
+### PUT /v1/liquidity/thresholds/{thresholdId} (updateLiquidityThreshold)
+
+- Purpose: "Update liquidity alerting Threshold" — "modifies an existing liquidity threshold's value, type, or status to align with updated monitoring requirements" [spec][docs:liquidity-monitoring-and-alerting-1]. Not deprecated.
+- Path params: `thresholdId` — string, `format: uuid`, required, "Threshold ID" [spec].
+- Request body (required): `UpdateThresholdRequestBody` (description "Body of a request to update a liquidity threshold alert."), no required fields [spec]
+  - `active` — boolean, optional, same description as create.
+  - `amount` — number, optional, `nullable: true`, `minimum: 1`; description is a spec copy-paste error: "Relative percentage value for the threshold. Required if `percental` is set to **true**." (read as: absolute value, required if `percental` is false — matching create) [spec].
+  - `percent` — integer int32, optional, `nullable: true`, `minimum: 1`, `maximum: 100`, same description as create.
+  - `percental` — boolean, optional, same description as create.
+  - **No `type` field** — the docs' "type" cannot be changed through this body [spec].
+- Response: `200 Success` → `LiquidityThreshold` (the updated record) [spec]. Common error responses; **no 404 declared**.
+- Behaviour: PUT with all-optional body — whether omitted fields are left unchanged (PATCH-like) or reset is not stated [inferred: unchanged]; same percent/amount rules as create [docs]; unknown `thresholdId` ⇒ unspecified [inferred: 404 `ErrorResponse`]; whether the platform default thresholds can be updated is not stated.
+- Webhooks: none.
+
+### Perks API
+
+Context [spec tag]: "Customer value-added services (top-ups, gift cards, bill pay)". Catalogue reads (countries → operators → products) are cached upstream data ("matched to the cached operators" [spec]); ordering is asynchronous with a final status delivered by the `PERK_ORDER_UPDATE` webhook [webhook-spec]. No docs page exists for Perks beyond the reference pages, which are the spec verbatim (verified).
+
+### GET /v1/perks/countries (getCountries)
+
+- Purpose: "Gets the countries where perks are available (optionally filtered by perkType)" [spec]. Not deprecated.
+- Query params: `perkType` (optional, enum `["MOBILE_TOP_UP","UTILITIES","GIFT_CARDS","ESIM"]`, "PerkType to filter by; omit to return all countries"); `limit`; `offset` (see Conventions) [spec].
+- Request body: none.
+- Response: `200 Success` → array of `CountrySummary` (description "A country where perks are available.") = `{ isoCode: string ("ISO 3166-1 alpha-3 country code", example "SGP"), name: string ("Country name", example "Singapore"), regions: RegionSummary[] ("Regions or states within the country") }`; `RegionSummary` ("A region or state within a country.") = `{ code: string ("Region code"), name: string ("Region name") }` [spec]. Common error responses.
+- Behaviour: read-only catalogue; ordering unspecified [inferred: by `name`].
+- Webhooks: none.
+
+### GET /v1/perks/operators (getOperators)
+
+- Purpose: "Gets the operators available as perks (optionally filtered by perkType and country)" [spec]. Not deprecated.
+- Query params: `perkType` (optional, enum as above, "PerkType to filter by; omit to return all operators"); `country` (string, optional, "Country ISO 3166-1 alpha-3 code to filter by; omit for all countries"); `limit`; `offset` [spec].
+- Request body: none.
+- Response: `200 Success` → array of `OperatorSummary` (description "An operator (mobile/utility provider) whose products are available as perks.") = `{ countryIsoCode: string ("ISO 3166-1 alpha-3 country code", example "IDN"), id: string uuid ("Operator identifier", example "3f2504e0-4f89-41d3-9a0c-0305e82c3301"), name: string ("Operator name", example "Telkomsel"), regions: RegionSummary[] ("Regions or states the operator serves") }` [spec]. Common error responses.
+- Behaviour: read-only catalogue; an operator's perk type is not a field on `OperatorSummary`, so `perkType` filtering must be derived from the operator's products [inferred].
+- Webhooks: none.
+
+### GET /v1/perks/operators/{id} (getOperatorById)
+
+- Purpose: "Gets a single perk operator by its id" [spec]. Not deprecated.
+- Path params: `id` — string, `format: uuid`, required, no description [spec].
+- Request body: none.
+- Response: `200 Success` → `OperatorSummary`. `404` declared, described "Not Found", **with schema `OperatorSummary`** (spec quirk) [spec]. Common error responses.
+- Behaviour: read-only; unknown id ⇒ 404 [spec]; body on 404 [inferred: `ErrorResponse`, since `OperatorSummary` on a 404 is almost certainly a generator artefact].
+- Webhooks: none.
+
+### POST /v1/perks/operators/by-mobile-number (lookupOperators)
+
+- Purpose: "Looks up the operators for a mobile number, matched to the cached operators" [spec]. Not deprecated.
+- Path/query params: none.
+- Request body (required): `MobileNumberLookupRequestBody` (description "Request to look up operators for a given mobile number."), `required: ["mobileNumber"]`
+  - `mobileNumber` — string, **required**, `minLength: 1`, `pattern: ^\+[1-9][0-9]{6,14}$`, "Mobile number in E.164 format", example `"+6591234567"` [spec].
+- Response: `200 Success` → array of `MobileNumberOperatorSummary` (description "An operator returned by a mobile-number lookup, flagged when it is the identified match.") = `{ identified: boolean ("Whether this operator was identified as the direct match for the mobile number", example true), operator: OperatorSummary }` [spec]. Common error responses.
+- Behaviour: pattern violation ⇒ validation error [spec] (status [inferred] 400); result semantics — the operator detected for the number carries `identified: true`, other operators in the number's country carry `false` [inferred from the description]; no match ⇒ unspecified [inferred: empty array].
+- Webhooks: none.
+
+### GET /v1/perks/products (getProducts)
+
+- Purpose: "Gets the products available as perks (optionally filtered by perkType, country and operator)" [spec]. Not deprecated.
+- Query params: `perkType` (optional, enum as above, "PerkType to filter by; omit to return all products"); `country` (string, optional, "Country ISO 3166-1 alpha-3 code to filter by; omit for all countries"); `operatorId` (string uuid, optional, "Operator id to filter by; omit for all operators"); `limit`; `offset` [spec].
+- Request body: none.
+- Response: `200 Success` → array of `ProductSummary` (full field list in §2; enums: `type` ∈ `["FIXED_VALUE_RECHARGE","RANGED_VALUE_RECHARGE","FIXED_VALUE_PIN_PURCHASE","RANGED_VALUE_PIN_PURCHASE","RANGED_VALUE_PAYMENT"]`, `perkSubType` ∈ `["AIRTIME","BUNDLE","DATA","ELECTRICITY","WATER","GAS","INTERNET","LANDLINE","TELEVISION","VOIP","RETAIL","GAMING","CASH_CARDS","FOOD","ENTERTAINMENT","TRAVEL_AND_TRANSPORT","ESIM"]`) [spec]. Common error responses.
+- Behaviour: read-only catalogue; `ProductSummary` has no `perkType` field — the `perkType` filter must map from `perkSubType` [inferred: AIRTIME/BUNDLE/DATA → MOBILE_TOP_UP; ELECTRICITY/WATER/GAS/INTERNET/LANDLINE/TELEVISION/VOIP → UTILITIES; RETAIL/GAMING/CASH_CARDS/FOOD/ENTERTAINMENT/TRAVEL_AND_TRANSPORT → GIFT_CARDS; ESIM → ESIM — grouping not stated anywhere].
+- Webhooks: none.
+
+### GET /v1/perks/products/{id} (getProductById)
+
+- Purpose: "Gets a single perk product by its id" [spec]. Not deprecated.
+- Path params: `id` — string, `format: uuid`, required [spec].
+- Request body: none.
+- Response: `200 Success` → `ProductSummary`. `404` declared, "Not Found", **with schema `ProductSummary`** (spec quirk) [spec]. Common error responses.
+- Behaviour: read-only; unknown id ⇒ 404 [spec]; body [inferred: `ErrorResponse`].
+- Webhooks: none.
+
+### GET /v1/perks/orders (getOrders)
+
+- Purpose: "Gets perk orders (last 24h unless filtered by externalId or a from/to window of max 24h)" [spec]. Not deprecated.
+- Query params (all optional) [spec]: `perkType` (enum as above, "PerkType to filter by"); `country` (string, "Country ISO 3166-1 alpha-3 code to filter by"); `operatorId` (string uuid, "Operator id to filter by"); `externalId` (string uuid, "External reference an order was created with"); `productType` (string — **no enum declared**, "Product type to filter by, e.g. FIXED_VALUE_RECHARGE"); `fromDate` (string — no format, "Created-from timestamp (ISO 8601); window to toDate max 24h"); `toDate` (string, "Created-to timestamp (ISO 8601)"); `limit`; `offset` (int32, min 0, default 0, "Number of results to skip; defaults to 0, must be a multiple of limit").
+- Request body: none.
+- Response: `200 Success` → array of `OrderSummary` (§2) [spec]. Common error responses.
+- Behaviour: default window = last 24 hours from now, unless `externalId` given (exact match, no window) or a `fromDate`/`toDate` window ≤ 24h [spec summary]; window > 24h ⇒ error, status unspecified [inferred: 400]; `offset` not a multiple of `limit` ⇒ error [spec], status unspecified [inferred: 400]; `fromDate` without `toDate` (or vice versa) ⇒ unspecified [inferred: open end clamped to 24h]; `productType` values are `ProductSummary.type` values [inferred from the example]; ordering unspecified [inferred: `createdAt` desc].
+- Webhooks: none.
+
+### POST /v1/perks/orders (createOrder)
+
+- Purpose: "Places an order for a perk product, delivered to the given beneficiary" [spec]. Not deprecated.
+- Path/query params: none.
+- Request body (required): `CreateOrderRequestBody` (description "Request to place a perk order."), `required: ["externalId","productId"]` [spec]
+  - `beneficiary` — `Party`, optional.
+  - `calculationMode` — string, optional, enum `["SOURCE_AMOUNT","DESTINATION_AMOUNT"]` (also `pattern: SOURCE_AMOUNT|DESTINATION_AMOUNT`), "Required for ranged products".
+  - `creditPartyIdentifier` — `PartyIdentifier`, optional.
+  - `debitPartyIdentifier` — `PartyIdentifier`, optional.
+  - `destination` — `Money`, optional.
+  - `externalId` — string, **required**, `format: uuid`, "Caller-specified external reference; must be unique per order".
+  - `productId` — string, **required**, `format: uuid`, "Product identifier to order".
+  - `purchaserId` — string, optional, `format: uuid`, "Purchaser id; see product requiredAdditionalIdentifierFields".
+  - `sender` — `Party`, optional.
+  - `source` — `Money`, optional.
+  - `statementIdentifier` — `StatementIdentifier`, optional.
+  - Nested shapes [spec]: `Party` ("A person taking part in the order.") = `{ addressCity, addressCountryIsoCode ("Address country ISO 3166-1 alpha-3 code"), addressPostalCode, addressText ("Street address"), email, firstName, lastName, middleName, mobileNumber (pattern ^\+[1-9][0-9]{6,14}$, "Mobile number in E.164 format"), nationalityCountryIsoCode ("Nationality ISO 3166-1 alpha-3 code") }`, all strings, none required. `PartyIdentifier` ("An account taking part in the order.") = `{ accountNumber ("Account number"), accountQualifier ("Account qualifier, when the operator requires one"), mobileNumber (same pattern, example "+6591234567") }`, none required. `Money` ("A monetary amount.") = `{ amount: number double (example 5), currency: string ("ISO currency code", example "USD") }`, both required. `StatementIdentifier` ("A bill or statement reference.") = `{ dueDate: string ("Statement due date (ISO 8601 date)"), reference: string ("Statement or bill reference") }`, none required.
+- Response: **`201 Created`** → `OrderSummary` (§2) [spec]. Common error responses (no 409).
+- Behaviour: which optional groups are mandatory is data-driven by the product's `requiredBeneficiaryFields`, `requiredSenderFields`, `requiredCreditPartyIdentifierFields`, `requiredDebitPartyIdentifierFields`, `requiredStatementIdentifierFields`, `requiredAdditionalIdentifierFields` — each an array of alternative field-name combinations, "provide all fields of one combination" [spec]; for ranged products (`RANGED_VALUE_*`) `calculationMode` is required and exactly one of `source`/`destination` is the fixed amount, which must lie within the product's `MonetaryValue.min`/`max` [spec descriptions; range check inferred]; for fixed products the amount is the product's `MonetaryValue.amount` [inferred]; `externalId` must be unique per order [spec] — duplicate ⇒ status unspecified [inferred: 422, or idempotent replay of the original order]; unknown `productId` ⇒ unspecified [inferred: 422]; the order is created in a non-final state and the final `status` (`COMPLETED` | `DECLINED` | `REVERSED`) arrives via webhook [webhook-spec]; **how the order is funded from a Shaype account is not stated anywhere** — there is no `accountId`/`customerId` in the request (see §7); `pinCode`/`pinSerial`/`redemption` are populated only for PIN-based products, on completion [spec][webhook-spec].
+- Webhooks: `PERK_ORDER_UPDATE` on the v1 notification stream (`POST /api/hay/v1/communications/notification`): `NotificationDtoV1 { idempotencyKey (uuid, required), type: "PERK_ORDER_UPDATE" (required), createdTimeUtc, actionOwner: CLIENT|PLATFORM, eventDetails: PerkOrderUpdateEventDto }`; `PerkOrderUpdateEventDto` = `EventDetailsDto { eventType: "PERK_ORDER_UPDATE" }` + `{ orderExternalId: uuid ("The externalId the perk order was created with."), status: enum ["COMPLETED","DECLINED","REVERSED"] ("Final order status."), pinCode ("PIN code, for PIN-based products."), pinSerial ("PIN serial, for PIN-based products."), confirmedTimeUtc: date-time ("DateTime of when the order was confirmed."), redemption: RedemptionDto { usageInfo: string[], terms: string (Markdown), validity: ValidityDto { unit: string (example "DAY"), quantity: int32 ("Unit count; -1 unlimited, null unknown.", example 365) } } }` [webhook-spec].
