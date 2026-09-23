@@ -9,7 +9,7 @@ Conventions common to every Cards API operation [spec]:
 - No query parameters on any Cards API operation.
 - Error responses declared on **every** operation: `400` "Bad Request", `403` "Forbidden", `422` "Unprocessable Content", `500` "Internal Server Error", `501` "Not Implemented" — all with schema `ErrorResponse`. Only `rewards` adds `201` and `429`.
 - **No operation declares `404` or `409`.** The spec never says what an unknown `cardId` returns (see §7).
-- `ErrorResponse` = `{ details: string, message: string, status: string ("HTTP response status"), traceId: string }`. No example error message text exists anywhere in the spec or docs.
+- `ErrorResponse` = `{ details: string, message: string, status: string ("HTTP response status"), traceId: string }`. No Cards API operation carries an error example, but other endpoints in the same spec do, which fixes the real body shape [spec, `POST /v0/customers/{customerHayId}/account` 422 example]: `{"message":"PERMISSION_DENIED: Account cannot be created for customer with id eed1e718-b1ca-4b94-a508-3d2d41c2e96b as their status is currently BLOCKED","details":"Please refer to the API documentation or contact Shaype for more info with the traceId.","status":"422","traceId":"b24daeb7-4242-4ff1-ba50-9825d5deedd8"}` — `status` is a **string**, `message` is `<UPPER_SNAKE_CODE>: <sentence>`, `details` is boilerplate. A state-precondition failure ("status is currently BLOCKED") is returned as **422** there, which is the best available precedent for the cards precondition failures below [inferred].
 - `GenericMessage` = `{ message: string ("Message indicating operation result") }`. No example value given.
 - The spec declares no `securitySchemes` and no top-level `security`; servers = `http://localhost:8080` ("Generated server url"). Auth is out of scope for this map.
 - No Cards API operation is marked `deprecated` [spec].
@@ -678,7 +678,7 @@ No un-enrol transition exists [spec].
 
 ## 6. Error catalogue
 
-No error message text is documented anywhere for the Cards API; `ErrorResponse.message`/`details` content is unknown [spec][docs]. Status codes declared per operation: `400`, `403`, `422`, `500`, `501` on all 19; `429` additionally on `rewards` (body `CardRewardsStatusBody`, not `ErrorResponse`) [spec].
+No error message text is documented for any Cards API operation [spec][docs]. The only `ErrorResponse` examples in the spec are on other endpoints (see the header): `message` = `<UPPER_SNAKE_CODE>: <sentence>` (e.g. `PERMISSION_DENIED: …`), `details` = "Please refer to the API documentation or contact Shaype for more info with the traceId.", `status` = the code as a string, `traceId` = uuid; a status-precondition failure is a **422** in those examples [spec]. Status codes declared per Cards operation: `400`, `403`, `422`, `500`, `501` on all 19; `429` additionally on `rewards` (body `CardRewardsStatusBody`, not `ErrorResponse`) [spec].
 
 | condition | code | source |
 |---|---|---|
@@ -701,7 +701,7 @@ Related non-API error vocabularies (transactions domain, for completeness): `car
 ## 7. Open questions
 
 1. **Unknown `cardId`:** no `404` is declared on any operation. Decide: return `404` (pragmatic) or `422`/`400` (spec-literal).
-2. **400 vs 422 split:** the spec declares both on every operation with no conditions. Suggested split [inferred]: `400` for unparsable/structurally invalid bodies, `422` for semantically invalid (bad enum, wrong state, failed precondition).
+2. **400 vs 422 split:** the spec declares both on every operation with no conditions. Suggested split [inferred, supported by the non-cards 422 examples in the spec]: `400` for unparsable/structurally invalid bodies, `422` for semantically invalid (bad enum, wrong state, failed precondition) with `message` = `<CODE>: <sentence>`.
 3. **Idempotency replay:** what `createHayCard`/`reissueHayCard` return when the same `idempotencyKey` is re-sent (same `HayCard` + 200? a `409`? and is the key scoped per client, per customer, or global?). Not documented. `renewCard` has no key at all.
 4. **Account/customer status preconditions:** which `HayAccount.status` / `HayCustomer.status` values allow card creation, re-issue, renew, activate. Cards docs are silent.
 5. **Undocumented status transitions:** block/cancel from `AWAITING_ACTIVATION`; cancel from `BLOCKED`; expiry of `BLOCKED`/`AWAITING_ACTIVATION` cards; re-issue/renew from `BLOCKED`, `EXPIRED`, `AWAITING_ACTIVATION`; convert from `BLOCKED`. The diagram only draws these operations from the Activated (`ACTIVE`) state.
