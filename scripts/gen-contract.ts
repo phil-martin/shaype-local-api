@@ -61,6 +61,11 @@ function convert(node: Json, prefix: string, stripRequired: boolean): Json {
     if (k === 'allOf' || k === 'anyOf' || k === 'oneOf') { out[k] = (v as Json[]).map((s) => convert(s, prefix, stripRequired)); continue }
     out[k] = v
   }
+  // Free-form objects (customData): fast-json-stringify drops every key of an object schema without
+  // properties, so response schemas must pass them through verbatim.
+  if (stripRequired && isObjectType(out.type) && out.properties === undefined && out.patternProperties === undefined && out.additionalProperties === undefined) {
+    out.additionalProperties = true
+  }
   if (node.nullable === true) {
     if (typeof out.type === 'string') out.type = [out.type, 'null']
     else if (Array.isArray(out.type) && !out.type.includes('null')) out.type = [...out.type, 'null']
@@ -68,6 +73,10 @@ function convert(node: Json, prefix: string, stripRequired: boolean): Json {
     if (out.type === undefined && out.enum === undefined && !out.anyOf && !out.allOf && !out.oneOf) out.type = ['object', 'null']
   }
   return out
+}
+
+function isObjectType(type: unknown): boolean {
+  return type === 'object' || (Array.isArray(type) && type.includes('object'))
 }
 
 function components(spec: Json, prefix: string, stripRequired: boolean): Json[] {
