@@ -182,3 +182,119 @@ Conventions common to every operation in this domain [spec]:
   - Not part of daily transfer limits [docs:stack lists "Available Balance to Stack or Stack to Stack"; stack→account is not listed explicitly but is an "internal cash transfer within an account that involve a Stack" — inferred to be exempt].
   - Creates a `HayStackTransaction` with `type = STANDARD` [inferred].
 - **Webhooks:** none mentioned.
+
+### POST /v0/groups/create (createHayGroup)
+- **Purpose:** "Create Group" [spec]. Not deprecated.
+- **Path/query params:** none [spec].
+- **Request body:** `CreateHayGroupRequestBody` (required) — "Body of a request to create a group of customers." [spec]
+  | field | type | required | constraints | description |
+  |---|---|---|---|---|
+  | `customerHayIds` | array of string uuid | **yes** | no `minItems` declared; docs require ≥ 1 | "Unique identifiers (UUID) of the Customer(s) associated to this Group" |
+  | `idempotencyKey` | string uuid | **yes** | — | "Unique value (UUID) used to identify this request and used to recognise any subsequent retries" |
+  | `groupName` | string | no | none declared (contrast updateGroup: 1..100) | "Name of the Group, if not provided a generic name associated with the client will be generated" |
+  | `groupType` | string enum `["PERSONAL","BUSINESS"]` | no | default `PERSONAL` | "Group type. Possible values: **BUSINESS**: Non-individual / joint entity; **PERSONAL**: Joint account entity (default if no option selected)" |
+  | `businessIdentifiers` | `BusinessIdentifiers` object | no | see below | "Identifiers issued by the government to the entity represented by this Group" |
+  `BusinessIdentifiers` [spec]: `businessNumber` string minLength 11 maxLength 11 "Australian Business Number (ABN)"; `companyNumber` string 9/9 "Australian Company Number (ACN)"; `registeredBodyNumber` string 9/9 "Australian Registered Body Number (ARBN)"; `registeredSchemeNumber` string 9/9 "Australian Registered Scheme Number (ARSN)". None required.
+- **Response 200:** `HayGroup` — "Details of a Group" [spec]: `businessIdentifiers` (BusinessIdentifiers), `customerHayIds` (array uuid), `groupHayId` (uuid, "Unique identifier (UUID) of the Group"), `groupName` (string), `groupType` (enum `["PERSONAL","BUSINESS"]`).
+- **Behaviour:**
+  - "A group is an association of 1 or more customers. It can be of type PERSONAL or BUSINESS" [docs:groups].
+  - "Creating a group requires a minimum of one customerHayId but a list of customerHayIds can be passed in this request to include as many customers to the group as required. Once the group is created successfully the API will respond with the groupHayId" [docs:groups]. Empty `customerHayIds` → rejected; status code undefined (400 or 422) [docs:groups + open].
+  - "There is currently no limit on the number of customers that can be added to a group." [docs:groups]
+  - Customers must already exist ("Create customers A, B and C individually using Create Customer" precedes group creation in the example flow) [docs:groups]. Unknown customer id → error, status undefined [open].
+  - Whether members must be `ACTIVE` at group-creation time is not stated; the ACTIVE requirement is documented only for account creation (see createHayAccountForGroup) [open].
+  - `groupName` omitted → "a generic name associated with the client will be generated" [spec]; the generated value is undefined [open].
+  - `idempotencyKey` is "used to recognise any subsequent retries" [spec] → a retry with the same key should return the same group rather than create a duplicate; exact replay semantics (same body required? conflict status?) undefined [inferred, open].
+  - Whether `businessIdentifiers` are validated against `groupType = BUSINESS` is undefined [open].
+  - Creates no account: the account is a separate step (createAccount with `accountHolderType = GROUP` or the deprecated createHayAccountForGroup) [docs:groups].
+- **Webhooks:** none mentioned.
+
+### GET /v0/groups/{groupHayId} (getHayJointAccountByGroupHayId)
+- **Purpose:** "Get Account by Group ID" [spec]. Not deprecated.
+- **Path params:** `groupHayId` — string uuid required, "Unique identifier (UUID) of the Group" [spec].
+- **Request body:** none.
+- **Response 200:** `HayJointAccount` — "Details of a joint or business account." [spec]:
+  | field | type | description |
+  |---|---|---|
+  | `businessIdentifiers` | `BusinessIdentifiers` | see createHayGroup |
+  | `customerHayIds` | array of string uuid | "Unique identifiers (UUID) of the Customer(s) associated to this Group" |
+  | `groupHayId` | string uuid | "Unique identifier (UUID) of the Group" |
+  | `groupType` | string enum `["PERSONAL","BUSINESS"]` | as above |
+  | `hayAccount` | `HayAccount` | the group's account (see §2 for the one-level expansion; notable fields `accountHayId`, `accountHolderId` = groupHayId, `accountHolderType = GROUP`, `status`, `availableBalance`, `stacksBalance`, `totalBalance`) |
+  | `name` | string | "Name of the Group, if not provided a generic name associated with the client will be generated" — **note: `name` here vs `groupName` on `HayGroup`** |
+- **Behaviour:**
+  - Read-only. Returns the group and its (single) account: "A group should have a single account." [docs:groups]
+  - When the group has no account yet, the shape of `hayAccount` (absent / null) is undefined [open]. If more than one account was created for the group via createAccount, which is returned is undefined [open].
+  - Unknown `groupHayId` → status undefined (no 404 declared) [open].
+- **Webhooks:** none.
+
+### PATCH /v0/groups/{groupHayId} (updateGroup)
+- **Purpose:** "Update Group details" [spec]. Not deprecated.
+- **Path params:** `groupHayId` — string uuid required [spec].
+- **Request body:** `UpdateGroupRequestBody` (required) — "Describes the changes to be applied to Group record. Only the provided information will be updated. Business identifiers will be replaced as a whole (no partial updates are possible)." No required fields [spec].
+  | field | type | required | constraints | description |
+  |---|---|---|---|---|
+  | `businessIdentifiers` | `BusinessIdentifiers` | no | replaced as a whole | see createHayGroup |
+  | `groupName` | string | no | minLength 1, maxLength 100 | "Name of the Group" |
+  | `groupType` | string enum `["PERSONAL","BUSINESS"]` | no | — | as above |
+- **Response 200:** `HayGroup` (`businessIdentifiers`, `customerHayIds`, `groupHayId`, `groupName`, `groupType`) [spec].
+- **Behaviour:**
+  - Partial update: fields absent from the body are left unchanged; `businessIdentifiers`, when present, replaces the whole object (sub-fields omitted are cleared) [spec description].
+  - Membership (`customerHayIds`) cannot be changed here — use addCustomersToGroup / removeCustomerFromGroup [spec: not in body].
+  - Whether changing `groupType` after an account exists is allowed is undefined [open]. Whether `businessIdentifiers: null` clears is undefined [open].
+- **Webhooks:** none mentioned.
+
+### POST /v0/groups/{groupHayId}/account (createHayAccountForGroup)
+- **Purpose:** "Create Account for Group - (To be DEPRECATED - Use POST /v1/accounts instead)" [spec]. **Deprecation:** flagged "To be DEPRECATED" in the summary; not marked `deprecated: true` in the spec. Replacement: `POST /v1/accounts` (createAccount) with `accountHolderType = "GROUP"` and `accountHolderId = groupHayId` [spec: CreateAccountRequestBody; docs:groups "To be used with accountHolderType = GROUP. Creating an account for a group requires the groupHayId to be provided."].
+- **Path params:** `groupHayId` — string uuid required [spec].
+- **Request body:** `CreateHayAccountForGroupRequestBody` (required) — "Body of a request to create an account owned by a group (joint or business account)" [spec]
+  | field | type | required | constraints | description |
+  |---|---|---|---|---|
+  | `idempotencyKey` | string uuid | **yes** | — | "Unique value (UUID) used to identify this request and used to recognise any subsequent retries" |
+  | `customData` | object, nullable | no | — | "Contains custom metadata stored with the Account" |
+  No `productId`, `currency`, or `accountNumber` — contrast createAccount, which requires `productId` [spec].
+- **Response 200:** `HayJointAccount` (see getHayJointAccountByGroupHayId) [spec].
+- **Response 422** (`Unprocessable Entity`) — the only worked error example in this domain [spec]:
+  ```json
+  {"message":"PERMISSION_DENIED: Account cannot be created for group with id f64f41eb-41f4-4619-9fc4-68d292aeb0f9, all members of the group should have an ACTIVE status","details":"Please refer to the API documentation or contact Shaype for more info with the traceId.","status":"422","traceId":"b24daeb7-4242-4ff1-ba50-9825d5deedd8"}
+  ```
+  (example name "Not enough permissions").
+- **Behaviour:**
+  - Precondition: **every** member customer of the group has `status = ACTIVE`; otherwise 422 with the message above [spec example]. Consistent with "An account can only be opened if the customer is in `ACTIVE` status." [docs:customer-status-flow].
+  - Creates a `HayAccount` with `accountHolderType = GROUP`, `accountHolderId = groupHayId` [spec HayAccount descriptions]; initial `status = APPROVED` ("Accounts created through this API are automatically set as APPROVED") [spec HayAccount.status]; balances 0 [inferred].
+  - Which product / currency the account gets (no `productId` in body) is undefined — presumably a client default [open].
+  - "A group should have a single account." [docs:groups] — whether a second call (different idempotencyKey) is rejected or creates a second account is undefined [open].
+  - `idempotencyKey` replay → same account [spec description; inferred].
+  - All members get equal, flat access: "Our Group Accounts have a flat structure so all customers linked to the account have the same access and their is no specified notion of a primary owner or main account holder." / "All parties linked to the account have the ability to request account closure without requiring consent from other account holders." [docs:groups]
+- **Webhooks:** none stated. (An `ACCOUNT_STATUS_CHANGE` notification type exists [webhooks]; whether account creation emits one is not documented [open].)
+
+### POST /v0/groups/{groupHayId}/addCustomers (addCustomersToGroup)
+- **Purpose:** "Add Customers to Group" [spec]. Not deprecated.
+- **Path params:** `groupHayId` — string uuid required [spec].
+- **Request body:** `AddCustomersToGroupRequestBody` (required) — "Body of a request to add customers to an existing group" [spec]
+  | field | type | required | constraints | description |
+  |---|---|---|---|---|
+  | `customerHayIds` | array of string uuid | **yes** | no `minItems` | "Unique identifiers (UUID) of the Customer(s) associated to this Group" |
+- **Response 200:** `HayJointAccount` (group + its account) [spec].
+- **Behaviour:**
+  - "Once a group has a groupHayId assigned to it in the system it can have additional customers added to that group that will have immediate access to any accounts linked to that groupHayId." [docs:groups] → membership is appended; no re-approval step; the added customers can immediately create cards against the group account [docs:groups example flow, inferred].
+  - "There is currently no limit on the number of customers that can be added to a group." [docs:groups]
+  - Adding a customer who is already a member, an unknown customer, or a non-`ACTIVE` customer: outcomes undefined [open].
+  - No idempotency key; the natural idempotent behaviour (set-union) is not stated [open].
+- **Webhooks:** none mentioned.
+
+### POST /v0/groups/{groupHayId}/removeCustomer (removeCustomerFromGroup)
+- **Purpose:** "Remove a Customer from a Group" [spec]. Not deprecated.
+- **Path params:** `groupHayId` — string uuid required [spec].
+- **Request body:** `RemoveCustomerFromGroupRequestBody` (required) — "Body of a request to remove a customer from an existing group" [spec]
+  | field | type | required | constraints | description |
+  |---|---|---|---|---|
+  | `customerId` | string uuid | **yes** | — | "Unique identifier (UUID) of the Customer associated to this Group" — **note: `customerId`, not `customerHayId`** |
+- **Response 200:** `HayJointAccount` (group after removal + its account) [spec].
+- **Behaviour** [docs:customer-removal unless noted]:
+  - Precondition / rejection: "the system will validate if the group has one or more members remaining. If the customer is the group's final member, then the remove from group API will reject the request." → removing the last member fails; HTTP status not stated (422 most plausible given the rest of the domain) [open]. "When a group only has one member, that customer should remain associated with the group. Any accounts linked to that group should be closed via the close account API."
+  - State change: `customerId` removed from `customerHayIds`.
+  - Side effect 1 — card cancellation: "the Shaype system will search for any cards the customer holds that are issued against accounts held by the group and cancel them." (Cards domain: the customer's cards whose account is a group account → cancelled.)
+  - Side effect 2 — customer status: "we will assess if that customer now meets our definition of a customer status **Inactive**. ... If the customer is linked only to accounts with a Closed status, then the customer is deemed Inactive, and their status is updated to reflect this." → after removal, if every account the customer is still linked to (own accounts + remaining group accounts) has `status = CLOSED` (a customer with no linked accounts at all is not explicitly covered [open]), set `HayCustomer.status = INACTIVE`.
+  - Removing a customer who is not a member, or unknown ids: undefined [open].
+  - Whether the removal is synchronous or the side effects are asynchronous (account closure's customer-status update is described as asynchronous in docs:account-closure) is not stated [open].
+- **Webhooks:** none stated explicitly for this operation. By consequence of the side effects, the client may receive `CARD_STATUS_CHANGE` ("The status of a card has changed") and `CUSTOMER_STATUS_UPDATED` ("Customer's status has been updated") notifications, both defined in `NotificationDto.type` [webhooks] — [inferred].
