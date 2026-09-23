@@ -419,3 +419,114 @@ A group has no lifecycle state; the only mutable dimensions are membership (`cus
 | Card status | (active states) | cancelled | removeCustomerFromGroup | for cards the customer holds on accounts held by the group [docs:customer-removal] |
 
 Customer status values for reference [spec HayCustomer.status]: `ACTIVE` "Customer is active", `BLOCKED` "Customer is blocked", `INACTIVE` "Customer is not active (closed)", `PENDING_APPROVAL` "Customer is awaiting approval", `REFERRED` "Customer is referred for further KYC checks", `REJECTED` "Customer has been rejected". Account status values [spec HayAccount.status]: `PENDING_APPROVAL`, `APPROVED`, `ACTIVE`, `LOCKED`, `DORMANT`, `CLOSED`, `ACTIVE_IN_ARREARS` (`CLOSED` "is a final status" [docs:account-status]).
+
+## 4. Invariants and calculations
+
+### Account balance decomposition (docs:account-balances, verbatim formulas)
+- "**Available Balance** = Account Balance + (Overdraft Limit + Overdraft Balance) + Technical Overdraft Balance + Held Balance + Stacks balance" — where in that doc Held, Overdraft Balance, Technical Overdraft are "$0 or Negative" and Stack Balance is "$0 or Positive" but is being subtracted in effect ("Total balance of stacks within an account"). Read together with the spec: `availableBalance` = "Total balance available for use on Account. Funds that are held, locked and allocated to a Stack will not be available." [spec HayAccount].
+- "**Total Balance** = Total Available Balance + (Overdraft Limit + Overdraft Balance) + Technical Overdraft Balance + Stacks Balance" [docs:account-balances]; spec: `totalBalance` "will also include unused overdraft limit and Stacks, held and locked value" [spec].
+- Practical invariant for the local implementation [inferred from the above]: `availableBalance = totalBalance - stacksBalance - heldBalance - lockedBalance (± overdraft terms)`; a stack transfer changes `stacksBalance` and `availableBalance` by equal and opposite amounts and leaves `totalBalance` unchanged.
+- `stacksBalance` = "Total value current held against any Stack(s) on the Account. Positive value to 2 decimal places." [spec] = sum of `balance` over the account's stacks [inferred]; since CLOSED stacks have balance 0 after the sweep, sum over OPEN stacks is equivalent [inferred].
+- Webhook `TransactionEventDto.accountBalances.stacksBalance` (CurrencyAmount) carries the same figure in transaction notifications [webhooks].
+- External-authorisation callbacks present `account.balance` **excluding** stack money: "Money held in stacks is not included" [ext-auth].
+
+### Stack balance rules
+- Stack `balance` ≥ 0 at all times: transfers out beyond the balance yield `REFUSED_INSUFFICIENT_FUNDS` [spec enum; inferred].
+- Card transactions and outbound payments never draw down stacks: "Any Card transactions and Outbound payments (NPP, DE, BPAY, Internal transfer) are linked solely to the main transactional account and its balance. Therefore, if a transaction is attempted by a customer where insufficient balance is present on their main transactional account, this transaction will fail due to insufficient balance being available. No drawdown will occur from the various Stacks that may hold balance." [docs:stack]
+- Stack funds count toward the account maximum: "Any funds that reside in a Stack will form part of the total account's max balance limit." [docs:stack] (limit type `MAX_BALANCE` "Maximum balance that can be held in Account" [spec]).
+- Stack movements are exempt from daily transfer limits: "Any internal cash transfers within an account that involve a Stack will not form part of the daily transfer limits, these include: Available Balance to Stack or Stack to Stack" [docs:stack].
+- `MIN_STACK_BALANCE` — "Minimum balance that can be held in Stack (Shaype use only)" [spec limitType enum; docs:account-limits] — exists as a platform-set limit; not client-settable (absent from setAccountLimit's enum, present in deleteAccountLimit's) [spec]. Enforcement point undefined [open].
+- `targetAmount` is informational (a goal); nothing in spec/docs says reaching it changes state or blocks further deposits [inferred]. Constraint: ≥ 0 [spec] and "up to the total limit applied to the account" [docs:stack].
+
+### Stack-to-stack accounting
+- One request → two `HayStackTransaction` records (withdrawal from source stack, deposit to destination stack), ids returned as `withdrawalTransactionId` / `depositTransactionId`, mutually referenced via `counterpartTransactionId` [spec descriptions]. Amount must be > 0 (`exclusiveMinimum`) [spec]. Whether an all-or-nothing guarantee is enforced when the second leg fails is undefined (`INTERNAL_ERROR` / `UNKNOWN` outcomes exist) [open].
+
+### Names, limits, counters
+- Stack `name`: 1–20 chars [spec], unique within the account [docs:stack], no emojis [docs:stack]. Error token `STACK_NAME_ALREADY_IN_USE` [spec].
+- Stack count limits: error tokens `OPEN_STACKS_LIMIT_REACHED`, `TOTAL_STACKS_LIMIT_REACHED` [spec] vs "as many stacks as you like" [docs:stack]; values undefined [open].
+- Group membership: ≥ 1 member always [docs:groups, docs:customer-removal]; no upper bound [docs:groups]. "A group should have a single account." [docs:groups].
+- `description` on all three transfer bodies: 0–20 chars; `groupName` on update: 1–100 chars; `BusinessIdentifiers`: ABN exactly 11 chars, ACN/ARBN/ARSN exactly 9 chars [spec].
+
+### Account closure interaction
+- `ClosureCheckerError.type` enum includes `ACCOUNT_BALANCE_STACKS` (alongside `ACCOUNT_BALANCE_TOTAL`, `ACCOUNT_BALANCE_HELD`, `ACCOUNT_BALANCE_LOCKED`, `ACCOUNT_BALANCE_OVERDRAFT`, `ACCOUNT_BALANCE_TECHNICAL_OVERDRAFT`, `INFLIGHT_OUTBOUND_DIRECT_DEBITS`, `CHILD_ACCOUNT_STATUS`) [spec, CloseAccountResponse] → closeAccount is refused while stacks hold a balance; the client must empty/close stacks first [inferred from enum name; docs:account-closure lists only the total/held/direct-debit checks in prose]. Error message pattern from the doc's examples: `"Account has 17.78 held balance."` / `"Account has 17.78 total balance."` [docs:account-closure] — the stacks variant's wording is not shown [open].
+
+### ID and date formats
+- All identifiers: UUID strings (`groupHayId`, `customerHayId(s)`/`customerId`, `accountHayId`/`accountId`, `stackHayId`/`stackId`/`hayId`, transaction ids, `idempotencyKey`) [spec].
+- Timestamps: RFC 3339 `date-time`, UTC (`createdAtUtc`, `closedAtUtc`, `transactionTimeUtc`) [spec].
+- Amounts: JSON numbers with 2 decimal places; `targetAmount` on create is `format: double` [spec].
+- Idempotency: only createHayGroup and createHayAccountForGroup carry `idempotencyKey`; no stack operation has one [spec].
+
+## 5. Cross-domain dependencies
+
+| this domain | depends on / affects | how | source |
+|---|---|---|---|
+| createHayGroup, addCustomersToGroup | Customers API | members must be existing customers (created via createHayCustomer first) | docs:groups example flow |
+| createHayAccountForGroup | Customers API | all members must have `status = ACTIVE` else 422 `PERMISSION_DENIED: ...` | spec 422 example; docs:customer-status-flow |
+| createHayAccountForGroup | Accounts API | creates a `HayAccount` (`accountHolderType = GROUP`, `accountHolderId = groupHayId`, `status = APPROVED`); superseded by createAccount `POST /v1/accounts` with `accountHolderType = "GROUP"` (which additionally requires `productId`) | spec |
+| getHayJointAccountByGroupHayId | Accounts API | embeds the group's `HayAccount` | spec |
+| removeCustomerFromGroup | Cards API | cancels the customer's cards issued against group-held accounts | docs:customer-removal |
+| removeCustomerFromGroup | Customers API | sets customer `INACTIVE` when only CLOSED accounts remain linked | docs:customer-removal |
+| Group accounts | Cards API | "A card must belong to an individual customer and linked to the group account." Any member may create a card on the group account via createHayCard with the group account's `accountId`; multiple cards per group account; "All group account members have the same level of access to the account via their card." | docs:groups |
+| Group accounts | Accounts API (closeAccount) | any member may request closure; a single remaining member closes accounts via closeAccount rather than being removed | docs:groups; docs:customer-removal |
+| All stack ops | Accounts API | stacks belong to exactly one account; every stack path is nested under `/v0/accounts/{accountId}`; account status gating (LOCKED "will block all transactions and transfers") | spec; docs:stack; docs:account-status |
+| Stack transfers | Accounts API balances | move value between `availableBalance` and `stacksBalance`; `totalBalance` invariant | spec HayAccount; docs:account-balances |
+| Stacks | Accounts API (closeAccount) | `ACCOUNT_BALANCE_STACKS` closure-check error | spec ClosureCheckerError |
+| Stacks | Limits (setAccountLimit/deleteAccountLimit) | `MAX_BALANCE` includes stack funds; `MIN_STACK_BALANCE` platform-only limit; daily transfer limits exclude stack movements | docs:stack; spec limitType enums |
+| Stacks | Transactions API / webhooks | stack transactions have their own list endpoints and schema (`HayStackTransaction`), distinct from `HayTransaction`; webhook `TransactionEventDto.transactionType` has no stack value; `accountBalances.stacksBalance` is reported on transaction events | spec; webhooks |
+| Stacks | External authorisation | callback `account.balance` excludes stack money, so a client authoriser never sees stack funds as spendable | ext-auth |
+| Stacks | Payments (NPP/DE/BPAY/internal), Cards | never draw from stacks; insufficient main balance fails the payment | docs:stack |
+| Group accounts | External authorisation | `account.holder.type = GROUP`, `holder.id = groupHayId`; `customer` set to the initiating member when "a group account transaction was triggered by one" | ext-auth |
+
+## 6. Error catalogue
+
+Declared per operation (all 15): `400 Bad Request`, `403 Forbidden`, `422 Unprocessable Content`/`Unprocessable Entity`, `500 Internal Server Error`, `501 Not Implemented`, body `ErrorResponse` [spec]. No 404/409 anywhere in this domain [spec].
+
+| condition | status | message / token | source |
+|---|---|---|---|
+| createHayAccountForGroup: a group member is not `ACTIVE` | 422 | `PERMISSION_DENIED: Account cannot be created for group with id <groupHayId>, all members of the group should have an ACTIVE status`; `details`: `Please refer to the API documentation or contact Shaype for more info with the traceId.`; `status`: `"422"`; `traceId`: uuid | spec example |
+| removeCustomerFromGroup: customer is the group's final member | undefined (422 plausible) | not shown — "the remove from group API will reject the request" | docs:customer-removal; status [inferred] |
+| createHayGroup: empty `customerHayIds` | undefined (400/422) | not shown — "requires a minimum of one customerHayId" | docs:groups |
+| createStack / updateStack: duplicate stack name on the account | updateStack: 200 with `error = STACK_NAME_ALREADY_IN_USE` [inferred from schema]; createStack: undefined | `STACK_NAME_ALREADY_IN_USE` | spec enum; docs:stack |
+| createStack: emoji in name | undefined | not shown — "Stack names cannot contain emojis" | docs:stack |
+| createStack: `name` length outside 1..20; `targetAmount` < 0 | undefined (400 plausible) | — | spec constraints |
+| createStack: too many open / total stacks | undefined (tokens exist only on UpdateStackResponse) | `OPEN_STACKS_LIMIT_REACHED`, `TOTAL_STACKS_LIMIT_REACHED` | spec enum |
+| accountToStackTransfer: `availableBalance` < amount | 200 | `outcome = REFUSED_INSUFFICIENT_FUNDS` | spec enum; 200 mapping [inferred] |
+| stackToAccountTransfer: stack `balance` < amount | 200 | `outcome = REFUSED_INSUFFICIENT_FUNDS` | spec enum; [inferred] |
+| stackToStackTransfer: source stack `balance` < amount | 200 | `outcome = REFUSED_INSUFFICIENT_FUNDS` | spec enum; [inferred] |
+| any transfer: platform failure | 200 | `outcome = INTERNAL_ERROR` or `UNKNOWN` | spec enum |
+| stackToStackTransfer: `amount` ≤ 0 | undefined (400 plausible) | — | spec `exclusiveMinimum` |
+| any transfer: `description` > 20 chars | undefined (400 plausible) | — | spec |
+| getAllStackTransactions / getTransactionsForStack: `limit` not in 1..1000, missing `offset`/`limit` | undefined (400 plausible) | — | spec description |
+| updateGroup: `groupName` outside 1..100; `BusinessIdentifiers` field wrong length | undefined (400 plausible) | — | spec |
+| closeAccount on an account whose stacks hold funds | 422 (CloseAccountResponse) | `errors[].type = ACCOUNT_BALANCE_STACKS`, `result = FAILURE`; message wording not shown | spec; docs:account-closure pattern |
+| unknown `accountId` / `stackId` / `groupHayId` / `customerId` | undefined (no 404 declared) | — | spec |
+| stack operation on a `CLOSED` stack (update/transfer/close again) | undefined | — | docs:stack "can no longer be used" |
+| stack transfer on `LOCKED`/`CLOSED` account | undefined | — | docs:account-status [inferred] |
+
+## 7. Open questions
+
+1. **createStack returns a bare boolean** — the new `stackHayId` is not returned. Decide: return `true` and require getAllStacks, or (deviating from spec) also expose the id elsewhere. Recommend strict spec behaviour (`true`) so integrators' code paths match production.
+2. **HTTP status for validation failures**: nothing distinguishes 400 vs 422 except the single ACTIVE-members example (422). Decide a consistent rule (e.g. schema/shape → 400, business rule → 422) and document it as a local convention.
+3. **Not-found handling**: no 404 is declared for any op. Pick 400 or 422 (with an `ErrorResponse`) for unknown account/stack/group/customer ids.
+4. **Duplicate / emoji stack names on createStack**: HTTP status and whether the `STACK_NAME_ALREADY_IN_USE` token appears in `ErrorResponse.message`. Also whether uniqueness considers CLOSED stacks.
+5. **updateStack error channel**: is `UpdateStackResponse.error` returned with HTTP 200 (and `stack` omitted), or alongside a 4xx? Schema placement suggests 200.
+6. **Stack count limits**: values behind `OPEN_STACKS_LIMIT_REACHED` / `TOTAL_STACKS_LIMIT_REACHED`, and whether they apply at all ("as many stacks as you like"). Suggest configurable, default unlimited.
+7. **closeStack sweep transaction**: does closing a funded stack create a `HayStackTransaction` (STANDARD, stack → account)? What `customerId`/`originType` would it carry (no body on closeStack)?
+8. **Repeat closeStack / update or transfer on CLOSED stack**: error vs no-op.
+9. **Transfer outcomes as 200 vs 4xx**: `REFUSED_INSUFFICIENT_FUNDS` is modelled as a 200 outcome; confirm no 422 is used for refusals.
+10. **Sign convention of `HayStackTransaction.amount`** (positive for both legs vs signed by direction) and sort order of the transaction list endpoints; pagination beyond `offset`/`limit` (no total count field).
+11. **Does a stack transfer flip the account from `APPROVED` to `ACTIVE`** ("Once deposit or withdrawal happens account automatically changes status to Active")?
+12. **Overdraft into stacks**: can `accountToStackTransfer` use overdraft funds (availableBalance includes overdraft limit)?
+13. **`MIN_STACK_BALANCE`** enforcement: where and how (stackToAccountTransfer? closeStack?).
+14. **createHayGroup with zero members / unknown customer / non-ACTIVE customer**: which fail, with what status.
+15. **createHayGroup `idempotencyKey` replay**: same-key-different-body behaviour; whether replay returns 200 with the original group.
+16. **Generated `groupName`** when omitted: format of "a generic name associated with the client".
+17. **`HayJointAccount.hayAccount` when the group has no account** (omit vs null) and when several accounts exist (createAccount can be called repeatedly with the same GROUP holder — is "A group should have a single account" enforced?).
+18. **createHayAccountForGroup product/currency**: no `productId` in the body — which product does the account get? Mark deprecated in the local server and route to createAccount semantics with a default product?
+19. **addCustomersToGroup**: duplicates (ignore vs error), unknown ids, non-ACTIVE customers; empty array.
+20. **removeCustomerFromGroup**: status for last-member rejection; non-member `customerId`; whether the INACTIVE assessment treats "no linked accounts at all" as inactive; synchronous vs asynchronous card cancellation and status update; which card statuses count as "cancel".
+21. **Webhooks**: no event is documented for any group/stack operation. Decide whether the local server emits `CARD_STATUS_CHANGE` / `CUSTOMER_STATUS_UPDATED` for removeCustomerFromGroup side effects, `ACCOUNT_STATUS_CHANGE` on group-account creation, and whether stack transfers produce any `TRANSACTION` notification (the webhook `transactionType` enum has no stack value — suggests none).
+22. **Do stack transactions appear in the main account transaction list** (`HayTransaction`)? "Historical transactions will still be visible within transaction list" is ambiguous between the stack transaction endpoints and the account-level list.
+23. **`updateGroup` semantics** for `businessIdentifiers: null` / `{}` (clear vs ignore) and changing `groupType` once an account exists.
+24. **`ROUND_UP` transactions**: no API creates them; decide whether the local server needs a test hook to seed them.
+25. **`Stack` vs `HayStack` shape**: updateStack returns `hayId`; everything else returns `stackHayId`. Confirm both shapes are served verbatim.
