@@ -658,6 +658,21 @@ describe('blockAccount / unblockAccount', () => {
     expect(await customerStatus(holder)).toBe('BLOCKED')
   })
 
+  it('unblock lands on ACTIVE_IN_ARREARS when the account is technically overdrawn', async () => {
+    const a = await newLowRiskAccount()
+    const id = a.accountHayId!
+    svc.adjust(id, { ledgerDelta: 100 })
+    svc.adjust(id, { ledgerDelta: -600 })
+    expect((await getAccount(id)).status).toBe('ACTIVE_IN_ARREARS')
+    await app.inject({ method: 'POST', url: `/v0/accounts/${id}/block`, payload: { note: 'x', accountBlockStyle: 'ACCOUNT_ONLY' } })
+    expect(svc.requireOpenForMovement(id)).toBe('REFUSED_ACCOUNT_BLOCKED')
+    await app.inject({ method: 'POST', url: `/v0/accounts/${id}/unblock`, payload: { note: 'x' } })
+    expect((await getAccount(id)).status).toBe('ACTIVE_IN_ARREARS')
+    svc.adjust(id, { ledgerDelta: 500 })
+    expect((await getAccount(id)).status).toBe('ACTIVE')
+    expect((await accountEvents(id)).map((e) => e.accountStatusChangeEvent.accountStatus)).toEqual(['APPROVED', 'ACTIVE', 'ACTIVE_IN_ARREARS', 'BLOCKED', 'ACTIVE_IN_ARREARS', 'ACTIVE'])
+  })
+
   it('blocking is a partial success when the customer cannot be blocked, a no-op success on a CLOSED account, and never touches cards', async () => {
     const holder = await newCustomer()
     const a = await newAccount(holder)
