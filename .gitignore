@@ -153,3 +153,6 @@ src/contract/generated/
 *.db-journal
 *.db-wal
 *.db-shm
+
+# parallel implementation worktrees
+.worktrees/
