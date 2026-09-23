@@ -261,9 +261,195 @@ Spec example body (verbatim) [spec]:
 - Side effects: `FinancialTransaction.tags` for this transaction changes; visible immediately via `getTransactionById` and `searchTransactions` [docs:draft-transaction-tagging].
 - No webhook is documented for tag changes.
 
-## (section 2 pending)
+## 2. Entities and fields
 
-## (section 3 pending)
+No schema in this domain declares a `required` list on its **response** entities (`FinancialTransaction`, `AuthorisationHold`, `TransactionOutcome`) and only `ExternalMerchantDetails.merchantId`/`terminalId` and the three `Tag` fields are marked `nullable: true` [spec]. Treat every unmarked response field as "optional, omitted or null when not applicable". The spec ships **no example objects** for any of these entities (verified by jq: no `example`/`examples` on the nine ops or on the domain schemas); the only example values are the `Tag`/`ExternalIdentifier` property examples and the webhook samples in docs.
+
+### FinancialTransaction — "Details of a financial transaction." [spec]
+
+Created by: createCreditTransactionV1/V0, createDebitTransactionV1/V0 (`GENERAL_CREDIT`/`GENERAL_DEBIT`) [inferred]; card settlements, refunds, ATM stand-ins [docs:card-transactions]; and by every other money-moving domain (NPP, DE, BPAY, PayTo, FX, stacks — see section 5). Read by: getTransactionById, searchTransactions. Updated by: modifyTagsForTransaction (only `tags`) [docs:draft-transaction-tagging]. Nothing else in the API mutates a posted transaction [spec].
+
+| field | type | enum / constraint | description (spec verbatim unless noted) |
+|---|---|---|---|
+| `accountHayId` | string (uuid) | — | Unique identifier (UUID) of the Account |
+| `cardId` | string (uuid) | — | Unique identifier (UUID) of the Card ([inferred] only on card transactions) |
+| `category` | string | — | Category assigned to the Transaction |
+| `clearingTimeUtc` | string (date-time) | — | DateTime in UTC format when Transaction was posted to Account |
+| `counterpartDetails` | `ExternalCounterpartDetails` | — | Details of the counterpart |
+| `counterpartName` | string | **deprecated: true** | Counterpart name (superseded by `counterpartDetails.name` [inferred]) |
+| `countryOfExpenditure` | string | enum, 249 values (verbatim, below) | Country of the expenditure (applicable for card transactions) |
+| `currencyAmount` | `CurrencyAmount` | — | (amount in account currency; sign: credits positive, debits negative [inferred from webhook samples, docs:card-transactions]) |
+| `customerId` | string (uuid) | — | Unique identifier (UUID) of the Customer |
+| `description` | string | — | Description on the Transaction |
+| `externalIdentifiers` | array of `ExternalIdentifier` | — | External identifiers from third-party systems (e.g. VISA) |
+| `mandatePaymentDetails` | `ExternalMandatePaymentDetails` | — | Mandate information (see entity — currently never populated) |
+| `originChannel` | string | enum: `ATM_CASH`, `POS_DEBIT`, `VENUE` | Origin source of the Transaction (only applicable if specifically used by Client) |
+| `originId` | string (uuid) | — | Additional identifier applied to Transaction related to origin of the request |
+| `originType` | string | enum (7): `CUSTOMER`, `SCHEDULED_PAYMENT`, `HAAS_OPERATIONS`, `OPERATIONS`, `MANDATE_PAYMENT`, `DIRECT_DEBIT`, `TRANSACTION` (description documents only the first four) | Initiator origin of the Transaction |
+| `originalCurrencyAmount` | `CurrencyAmount` | — | ([inferred] amount in the original spend currency for FX/international card transactions) |
+| `productId` | string (uuid) | — | Unique identifier (UUID) of the Product of the account associated with the event |
+| `reference` | string | description: "maximum 35 alphanumeric characters" (not enforced in schema) | Reference on the transaction (only applicable to NPP transactions) |
+| `relatedHoldHayId` | string (uuid) | — | Unique identifier (UUID) of the Hold settled for the Transaction (only applicable to card transactions) |
+| `reportedFraudulent` | boolean | — | (NOT CURRENTLY IN USE) Indicates the Transaction has been reported as fraudulent |
+| `rollingAccountBalance` | number | — | Total Account balance after the transaction posted to Account |
+| `tags` | array of `Tag` | — | Tags associated with the transaction (always present, `[]` when none [docs:draft-transaction-tagging]) |
+| `transactionChannel` | string | enum, 62 values (verbatim, below) | see channel groups below |
+| `transactionHayId` | string (uuid) | — | Unique identifier (UUID) of the Transaction |
+| `transactionTimeUtc` | string (date-time) | — | DateTime in UTC format when Transaction was initiated / received on the Account |
+| `type` | string | enum, 15 values (verbatim, below) | Transaction type |
+
+**`type` enum (15, verbatim order)** [spec]: {{MISSING:type}}
+
+Spec meanings [spec description]: `ATM_WITHDRAWAL` Cash withdrawal from ATM; `BPAY_TRANSFER_IN` (not currently in use); `BPAY_TRANSFER_OUT` BPAY payment made out of Account; `CARD_NOT_PRESENT_PAYMENT` Payment online using card details, Apple Pay or Google Pay; `CARD_PAYMENT_REVERSAL` Refund for previous card payment; `CARD_PRESENT_PAYMENT` Payment using physical card, Apple device or Android device at physical terminal; `DIRECT_DEBIT_TRANSFER` Cash transfer out of Account via Direct Debit; `INTERBANK_TRANSFER_IN` Cash transfer into Account via Direct Credit or NPP; `INTERBANK_TRANSFER_OUT` Cash transfer out of Account via Direct Credit or NPP; `INTRABANK_TRANSFER_IN` Cash transfer into Account via ShaypePay; `INTRABANK_TRANSFER_OUT` Cash transfer out of Account via ShaypePay; `INTERBANK_TRANSFER_OUT_REVERSAL` (not currently in use); `GENERAL_CREDIT` General purpose credit on Account; `GENERAL_DEBIT` General purpose debit on Account; `ORIGINAL_CREDIT` Cash transfer to card via Visa OCT payment.
+
+**`transactionChannel` enum (62, verbatim order)** [spec]: {{MISSING:channel}}
+
+Spec groups [spec description]:
+- "applicable to Shaype operated functions": HAAS_TRANSFER_EXTERNAL_IN/OUT, HAAS_TRANSFER_INTERNAL_IN/OUT, CURRENCY_CLOUD_CLIENT_CONVERSION_IN/OUT, CURRENCY_CLOUD_CARD_CONVERSION_IN/OUT, CUSCAL_DE_CREDIT_IN/OUT, CUSCAL_DE_DEBIT_IN/OUT, DE_DEBIT_RETURN_IN, CUSCAL_NPP_TRANSFER_IN/OUT, NPP_RETURN_IN, CUSCAL_BPAY_TRANSFER_OUT, BPAY_IN_REJECT, VISA_ATM, VISA_ATM_INTERNATIONAL, VISA_CARD_NOT_PRESENT, VISA_CARD_NOT_PRESENT_INTERNATIONAL, VISA_CARD_PRESENT, VISA_CARD_PRESENT_INTERNATIONAL, VISA_CONTACTLESS, VISA_CONTACTLESS_INTERNATIONAL, VISA_OCT_DOMESTIC, VISA_OCT_INTERNATIONAL, VISA_OTHER, VISA_REFUND_DOMESTIC, VISA_REFUND_INTERNATIONAL, APPLE_PAY_CARD_NOT_PRESENT(_INTERNATIONAL), APPLE_PAY_CARD_PRESENT(_INTERNATIONAL), GOOGLE_PAY_CARD_NOT_PRESENT(_INTERNATIONAL), GOOGLE_PAY_CARD_PRESENT(_INTERNATIONAL).
+- "available for use by Shaype Clients" (= the `CreateTransactionRequestBody.transactionChannel` enum): ACCOUNT_ADJUSTMENT, APPLE_REWARD, INTEREST_ADJUSTMENT, LOAN_ADJUSTMENT, LOAN_REPAYMENT, MANUAL_ADJUSTMENT, SERVICE_FEE.
+- "for Shaype internal use only": HAY_TO_HAY_TRANSFER_IN, HAY_TO_HAY_TRANSFER_OUT, VALUE_TRANSFER.
+- "not in use": HAY_CREDIT, CUSCAL_BPAY_TRANSFER_IN, CUSCAL_DE_TRANSFER_IN, CUSCAL_DE_TRANSFER_OUT, CUSCAL_DE_TRANSFER_OUT_RETURN, CARD_REFUNDS, CUSCAL_LEGACY, CUSCAL_NPP_SOLICITED_RETURN, FAT_ZEBRA_TRANSFER_IN, NPP_RETURN_OUT, VISA_LEGACY, VISA_REFUNDS_LEGACY.
+- In the enum but in **no** description group: `CUSCAL_RTGS_TRANSFER_IN`.
+
+**`countryOfExpenditure` enum (249, verbatim order)** [spec]: {{MISSING:country}}
+
+### AuthorisationHold — "Details of an authorisation hold" [spec]
+
+Created by: Visa authorisation (platform-internal) [docs:card-transactions]; staging Utilities `generateAuthHold`, `generateCardTransaction`, `generateHoldAndUpdateHoldTransactions` [docs:simulates-card-transaction-on-staging]. Read by: getAuthorisationHold; Accounts `getPendingHolds` (`AuthorisationHold[]`). Updated by: platform on incremental authorisation / reversal (amount in place) [docs:card-transactions]; released on settlement/full reversal/console cancel [docs:card-transactions; docs:authorisation-hold-cancel]. No B2B write operation.
+
+Fields: `accountHayId` uuid; `cardId` uuid; `category` string ("Category applied to transaction, will be initially populated based on merchant type if known"); `currencyAmount` CurrencyAmount; `customerId` uuid ("of the Customer (cardholder)"); `description` string; `holdHayId` uuid; `merchantDetails` ExternalMerchantDetails; `originalCurrencyAmount` CurrencyAmount; `transactionChannel` (same 62-value enum as FinancialTransaction); `transactionTimeUtc` date-time ("when Transaction was Authorised on the Account"); `type` (same 15-value enum). Full table in section 1 (getAuthorisationHold). No status field.
+
+### TransactionOutcome — "Transaction outcome details" [spec]
+
+Returned by the four create ops. `outcome` (21-value enum, verbatim): {{MISSING:outcome}}. `transactionId` uuid. Docs meanings for the values that also appear in the docs list [docs:payment-transaction-outcome]: `ACCEPTED` "Transaction accepted by platform for further processing"; `INTERNAL_ERROR` "system internal error within the payment processing service"; `REFUSED_FRAUD`; `REFUSED_MAX_BALANCE_EXCEEDED`; `REFUSED_ACCOUNT_BLOCKED`; `REFUSED_ACCOUNT_CLOSED`; `REFUSED_RECIPIENT_ACCOUNT_BLOCKED` / `_CLOSED` ("This occurs when transferring funds between Shaype accounts"); `REFUSED_DAILY_TRANSFERS_OUT_LIMIT_BREACHED`; `REFUSED_TOTAL_INBOUND_DIRECT_DEBIT_DAILY_LIMIT_BREACHED`; `REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED` (BPAY_DAILY_LIMIT); `REFUSED_TOTAL_NET_VISA_DAILY_LIMIT_BREACHED` ("client scheme transactions are currently blocked"); `REFUSED_TOTAL_NON_SCHEME_DAILY_LIMIT_BREACHED`. Not in the docs list at all: `REFUSED_LIMIT_BREACH` (v0 only [spec]), `REFUSED_CUSTOMER_PREFERENCE`, `REFUSED_INSUFFICIENT_FUNDS`, `REFUSED_INVALID_PAY_ID`, `UNKNOWN`, `REFUSED_SENDER_ACCOUNT_NOT_VERIFIED`, `REFUSED_CAPABILITY_NOT_ENABLED`, `REFUSED_QUOTE_EXPIRED`.
+
+### CurrencyAmount — "Monetary value and currency" [spec]
+
+`amount` number, **required**, "Amount of the transaction to 2 decimal places"; `currency` string, **required**, "Currency as three letter code as per ISO 4217", enum (162, verbatim): {{MISSING:currency}}
+
+(The webhook spec's `CurrencyAmount` and the external-balance `CurrencyAmount` are separate schemas: external-balance's `amount` is a **string** (e.g. `"12.43"`) and carries "Positive when crediting customer account and negative when debiting" [spec:external-balance].)
+
+### ExternalCounterpartDetails — "Details of the counterpart" [spec]
+
+`accountId` uuid "Counterpart account-Id"; `basicAccountNumber` BasicAccountNumber; `customerId` uuid "Counterpart customer-Id"; `merchantDetails` ExternalMerchantDetails; `name` string "Counterpart name". [inferred] For a general credit/debit only `name` is set (from request `counterpartName`); `accountId`/`customerId` are for intrabank transfers; `basicAccountNumber` for interbank; `merchantDetails` for card.
+
+### BasicAccountNumber — "Details of the recipient account number" [spec]
+
+`accountNumber` string "Account number, 5-9 digits in length"; `branchNumber` string "BSB (Bank State Branch) of Account, 6 digits in length". (No pattern enforced in schema.)
+
+### ExternalMerchantDetails — "Details of the merchant" [spec]
+
+`address` MerchantAddress; `cardAcceptorLocation` string "Name and/or location information of merchant, maximum 101 characters in length"; `chainName` string "Retail chain name - if merchant is part of a wider group this can be different to the merchant name"; `circularLogoUrl` string "Merchant logo"; `merchantCategoryCode` integer int32 "Merchant Category Code (MCC) as four digit code as per ISO 18245"; `merchantId` string **nullable** "Merchant ID, alphanumeric / special characters maximum 15 characters in length"; `name` string "Merchant name"; `terminalId` string **nullable** "Terminal ID, alphanumeric / special characters maximum 8 characters in length".
+
+### MerchantAddress — "Merchant address - Shaype recommends the use of cardAcceptorLocation if provided in transaction" [spec]
+
+`addressLine1` string; `lat` number double; `lng` number double; `postcode` string; `singleLineAddress` string; `state` string; `suburb` string. (No descriptions. The external-balance `MerchantAddress` is different: `street`, `city`, `state`, `postcode`, `country` [spec:external-balance].)
+
+### ExternalIdentifier — "External identifier from a third-party system such as VISA." [spec]
+
+`source` string "Source system (e.g. visa, npp)" example `visa`; `type` string "Identifier type: trace-lifecycle, acquirer-reference, or retrieval-reference" example `trace-lifecycle` (free string, not an enum); `value` string "Identifier value" example `123456789012`. (Webhook `ExternalIdentifierDto` names the middle field `identifierType` instead of `type` [spec:webhooks].)
+
+### ExternalMandatePaymentDetails [spec]
+
+`initiatingPartyName` string 1–140; `instructionId` string 1–35 **required**; `mandateId` uuid. Description (verbatim): "Making Mandate Information available is under construction. The fields are provided to help with integration but no data will be provided at present." ⇒ implementer: always omit/null.
+
+### Tag — "A category-value pair Tag for an entity. Either provide an 'id' to reference an existing tag, or provide both 'category' and 'value' to create/reference a tag. If 'id' is null, both 'category' and 'value' are required." [spec]
+
+`id` uuid nullable (example `550e8400-e29b-41d4-a716-446655440000`); `category` string nullable 1–64 pattern `\S(.*\S)?` (example `expense-type`); `value` string nullable 1–64 pattern `\S(.*\S)?` (example `groceries`). Docs model: "id — Shaype-assigned identifier for the tag association. Returned in API responses; not required when adding tags." [docs:draft-transaction-tagging]. Created by modifyTagsForTransaction (ADD); deleted by modifyTagsForTransaction (REMOVE); read by getTagsForTransaction, getTransactionById, searchTransactions. Ordering key `createdAt` (internal) [docs].
+
+### TagsResponseBody / ModifyTagsRequestBody / SearchTransactionsRequestBody / CreateTransactionRequestBody
+
+Request/response wrappers; full field tables are in section 1 (`TagsResponseBody.tags` required; `ModifyTagsRequestBody.operation` enum `ADD`,`REMOVE` + `tags` 1..100; `SearchTransactionsRequestBody` requires `fromDateTimeUtc`,`toDateTimeUtc`; `CreateTransactionRequestBody` requires `accountHayId`,`amount`,`counterpartName`,`description`,`idempotencyKey`,`transactionChannel`) [spec].
+
+### ErrorResponse — "An error response." [spec]
+
+`details` string "Error details"; `message` string "Error description"; `status` string "HTTP response status" (a **string**, e.g. `"422"`); `traceId` string "TraceID that can be used by HAY for troubleshooting the request". Example from elsewhere in the spec: `{"message":"PERMISSION_DENIED: …","details":"Please refer to the API documentation or contact Shaype for more info with the traceId.","status":"422","traceId":"b24daeb7-…"}`.
+
+### Webhook projection: NotificationDto / TransactionEventDto [spec:webhooks]
+
+Not an API entity of this domain, but every hold/transaction state change is surfaced to the client through it, so the local implementation must emit it. `POST {client}/api/hay/v0/communications/notification` with `NotificationDto`: required `customerHayId` uuid, `idempotencyKey` uuid, `type` (for this domain always `TRANSACTION`); plus `productId` uuid, `actionOwner` enum `CLIENT`,`PLATFORM`, `cardHayId` uuid nullable, and `transactionEvent` = `TransactionEventDto` ("Details of the **Transaction** event; provided when the type is `TRANSACTION`"):
+
+| field | type | enum / notes |
+|---|---|---|
+| `transactionHayId` | uuid | for a hold and its updates = the hold id; for settlement a new id [docs:card-transactions] |
+| `holdHayId` | uuid | "Unique identifier (UUID) of the Hold associated with the event (only applicable to card transactions). This is also referred to as `relatedHoldHayId` when `isPending` flag is `false`." |
+| `accountHayId` | uuid | |
+| `currencyAmount` | CurrencyAmount | samples: hold `-8.40`, hold-increase `-19.00` (new total), reversal `+0.50`, settlement `-8.40`, refund `+5.99` [docs:card-transactions] |
+| `originalCurrencyAmount` | CurrencyAmount | |
+| `updatedBalance` | CurrencyAmount | samples equal `accountBalances.availableBalance` [docs:card-transactions] |
+| `isPending` | boolean | "Specifies whether the transaction is still pending" — `true` for holds/hold updates, `false` for settlements/refunds/ATM stand-ins [docs:card-transactions; docs:simulates-card-transaction-on-staging] |
+| `counterpartName` | string | |
+| `outcome` | string | 41 values (verbatim): {{MISSING:wh_outcome}} |
+| `transactionTimeUtc` | date-time | |
+| `cardPreferenceOutcome` | string | 9 values (verbatim): {{MISSING:wh_cardPreferenceOutcome}} |
+| `cardProcessorResponse` | string | 57 values (verbatim): {{MISSING:wh_cardProcessorResponse}} |
+| `merchantName` | string | |
+| `isAtmTransaction` | boolean | **deprecated** |
+| `transactionType` | string | 17 values (verbatim): {{MISSING:wh_transactionType}} — spec meanings: `CARD_TRANSACTION` Card transaction; `CARD_TRANSACTION_REFUND` A refund of a card transaction; `CARD_TRANSACTION_SETTLED` A settlement of a card transaction; `INTRABANK_TRANSFER_IN/OUT`; `INTERBANK_TRANSFER_IN/OUT`; `DIRECT_DEBIT_TRANSFER`; `HAY_TOP_UP` An account top-up; `INTERBANK_TRANSFER_OUT_REVERSAL` (NOT CURRENTLY IN USE); `REWARD`; `GENERAL_CREDIT` A general account credit; `GENERAL_DEBIT` A general account debit; `ORIGINAL_CREDIT` Visa Original Credit transaction; `BPAY_TRANSFER_OUT`; `CONVERSION_IN` Currency conversion buy (credit); `CONVERSION_OUT` Currency conversion sell (debit) |
+| `cardUsageDetails` | {`isMagneticStripePayment`, `isContactless`, `isCardPresent`, `isMobileWalletPayment`, `isAtmWithdrawal`: boolean} | |
+| `accountBalances` | {`totalBalance`, `heldBalance`, `lockedBalance`, `stacksBalance`, `availableBalance`: CurrencyAmount} | not populated for external-balance clients [docs:external-authorisation-and-balance] |
+| `cardHayId`, `customerHayId` | uuid | |
+| `ruleDetails` | {`ruleId` uuid} | "transaction blocking rule" |
+| `counterpartDetails` | {`accountId`, `customerId`, `name`, `bpayDetails`, `basicAccountNumber`} | |
+| `originId` | uuid; `originType` | enum (7): `CUSTOMER`, `SCHEDULED_PAYMENT`, `HAAS_OPERATIONS`, `OPERATIONS`, `MANDATE_PAYMENT`, `DIRECT_DEBIT`, `TRANSACTION` ("initiated by another transaction") |
+| `category`, `merchantId`, `description`, `reference` | string | |
+| `mandatePaymentDetails` | {`mandateId`, `instructionId`, `initiatingPartyName`} | |
+| `returnReason` | {`code` enum (10): {{MISSING:wh_returnReason}}; `message`} required both | "Reason for a transaction reversal." |
+| `externalIdentifiers` | array of {`source`, `identifierType`, `value`} | |
+
+## 3. State machines
+
+**There is no `status` enum on any entity in this domain** [spec]: `FinancialTransaction`, `AuthorisationHold` and `Tag` carry no status field, and `TransactionOutcome.outcome` is a one-shot result, not a state. The lifecycles below are reconstructed from the webhook sequence documented for card transactions and from field semantics; every transition is therefore [docs:…] or [inferred] as labelled. The implementer must store an internal state for holds (not exposed on `AuthorisationHold`) to drive the webhook `transactionType`/`isPending` values and the balance arithmetic.
+
+### 3.1 Authorisation hold (internal state; not exposed)
+
+Internal states: `AUTHORISED` (open, held funds), `SETTLED`, `REVERSED` (fully), `CANCELLED`. `AUTHORISED` is re-entered on increase/decrease. Terminal: `SETTLED`, `REVERSED`, `CANCELLED`.
+
+| from | to | via | webhook emitted (`transactionType` / `isPending`) | source |
+|---|---|---|---|---|
+| (none) | `AUTHORISED` | Visa authorisation request passes balance/limit/rule/fraud checks (or external-balance client returns 200 to `POST /holds`); staging: `POST /v0/utils/generate-auth-hold` | `CARD_TRANSACTION` / `true`; `transactionHayId` = `holdHayId` = hold id; `outcome` `ACCEPTED` | [docs:card-transactions] [docs:simulates-card-transaction-on-staging] [spec:external-balance] |
+| (none) | refused (no hold created) | checks fail | `CARD_TRANSACTION` / — with `outcome` = `REFUSED_*` (e.g. `REFUSED_CARD_PREFERENCE`, `REFUSED_NOT_ENOUGH_FUNDS`, `REFUSED_SINGLE_CARD_TRANSACTION_LIMIT_BREACHED`, `REFUSED_DAILY_CARD_TRANSACTIONS_LIMIT_BREACHED`, `REFUSED_RULES`, `REFUSED_FRAUD`) | [docs:payment-transaction-outcome] [docs:card-transactions "determines the transaction outcome"] — [inferred] that a refused authorisation still emits a webhook |
+| `AUTHORISED` | `AUTHORISED` (amount ↑) | incremental authorisation (hold increase); external-balance: `PATCH /holds/{holdId}`; staging: `generate-update-auth-hold` with negative `updateHoldAmount` | `CARD_TRANSACTION` / `true`; same `transactionHayId`; `currencyAmount` = new total (original + increase) | [docs:card-transactions §2] [docs:simulates-card-transaction-on-staging] |
+| `AUTHORISED` | `AUTHORISED` (amount ↓) | partial reversal / hold decrease; staging: positive `updateHoldAmount` | `CARD_TRANSACTION_REFUND` / `true`; same `transactionHayId`; `currencyAmount` = +reversed portion (sample `+0.50`) | [docs:card-transactions §3] |
+| `AUTHORISED` | `REVERSED` (terminal) | full reversal — "Update amount … May be equal to the total hold amount in which case reverses the whole transaction" | `CARD_TRANSACTION_REFUND` / `true` [inferred: same as partial] | [spec:external-balance updateHoldAmount] [docs:card-transactions "partial or full reversal"] |
+| `AUTHORISED` | `SETTLED` (terminal) | Visa settlement/presentment; staging: `generate-card-transaction` / after `settlementDelayInSeconds` | `CARD_TRANSACTION_SETTLED` / `false`; **new** `transactionHayId`; `holdHayId` = hold id; creates `FinancialTransaction` with `relatedHoldHayId` = hold id | [docs:card-transactions §1] [spec FinancialTransaction.relatedHoldHayId] |
+| `AUTHORISED` | `CANCELLED` (terminal) | Shaype ops console "CANCEL AUTHORISATION HOLD" (no API) | not documented ([inferred] `CARD_TRANSACTION_REFUND` / `true` like a full reversal) | [docs:authorisation-hold-cancel] |
+| `AUTHORISED` | expiry | not documented — docs mention merchants have "up to 28 days" / "7-10 days" to settle but define no automatic release | — | open question |
+
+Post-settlement, a merchant **refund** is a new, unlinked transaction: `CARD_TRANSACTION_REFUND` / `false`, own `transactionHayId`, "it is not linked to a prior purchase by Shaype" [docs:simulates-card-transaction-on-staging; docs:card-transactions §4]. An ATM stand-in is a single `CARD_TRANSACTION` / `false` with no hold ("settled in-line, no separate _SETTLED event") [docs:simulates-card-transaction-on-staging].
+
+Composite (FX) holds: reversal also unwinds the linked conversions (newest→oldest, aggregated, at the original rate; FX movement borne by the client) [docs:composite-authorisation-reversal] — out of scope for a single-currency local implementation but noted.
+
+### 3.2 FinancialTransaction (posted ledger entry)
+
+Single state: **posted**. A `FinancialTransaction` exists only once cleared (`clearingTimeUtc`); no field ever changes afterwards except `tags` [spec; docs:draft-transaction-tagging]. There is no reversal/void of a posted transaction in this API — corrections are new transactions (refund, `DE_DEBIT_RETURN_IN`, `NPP_RETURN_IN` channels, `CARD_PAYMENT_REVERSAL` type) [spec enum semantics; inferred].
+
+| from | to | via |
+|---|---|---|
+| (none) | posted | createCredit/DebitTransactionV1/V0 with outcome `ACCEPTED` [inferred]; hold settlement [docs:card-transactions]; refund / ATM / any other channel [docs] |
+| (none) | (nothing) | create op with outcome ≠ `ACCEPTED` — no ledger entry [inferred] |
+
+### 3.3 TransactionOutcome.outcome (per request, terminal)
+
+One value per create request; no transitions. `ACCEPTED` ⇒ transaction posted; any `REFUSED_*` ⇒ nothing posted; `INTERNAL_ERROR` ⇒ nothing posted (also the mapped outcome when an external-balance client times out or returns an unsupported code [docs:external-authorisation-and-balance]); `UNKNOWN` — undefined (open question). v0 maps {`REFUSED_DAILY_TRANSFERS_OUT_LIMIT_BREACHED`, `REFUSED_MAX_BALANCE_EXCEEDED`} → `REFUSED_LIMIT_BREACH` [spec].
+
+### 3.4 Webhook `isPending`
+
+| from | to | via |
+|---|---|---|
+| `true` (hold / hold update) | `false` (settlement, new id) | settlement [docs:card-transactions] |
+| — | `false` directly | refund, ATM stand-in, general credit/debit, all non-card transactions [docs:simulates-card-transaction-on-staging; inferred for non-card] |
+
+### 3.5 Tag association on a transaction
+
+| from | to | via |
+|---|---|---|
+| absent | present | `modifyTagsForTransaction` `ADD` (by `category`+`value`, or by existing `id`) [spec; docs] |
+| present | present (no-op) | `ADD` of an already-present (`category`,`value`) [docs:draft-transaction-tagging] |
+| present | absent | `REMOVE` [docs] |
+| absent | absent (no-op, 200) | `REMOVE` of a tag not on the transaction [docs] |
+
+No terminal state; unlimited re-adds/removes [docs:draft-transaction-tagging].
 
 ## (section 4-7 pending)
 
