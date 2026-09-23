@@ -980,3 +980,1889 @@ Observation `[docs:apple-and-google-pay-notifications]`: the `APPLE_PAY_REMINDER
 - Timestamps: `transactionTimeUtc` ISO-8601 with microseconds and `Z` (`2025-07-17T11:13:20.990107Z`).
 - `productId` at envelope level is present in most TRANSACTION samples (`8aa6…` style UUID-ish values) but absent in some (reversal samples) `[docs:card-transactions]`.
 
+---
+
+## 4. Trigger mapping — which operation / mock generator / external event emits which webhook, and when
+
+Legend for "emitted by": `op:<operationId>` = B2B operation (`[spec:b2b]` / `ops.json`), `mock:<operationId>` = staging Utilities API generator, `ext:` = external system event (Visa, NPP, MMS, DE), `platform:` = Shaype scheduler / async processing. The `when` column is only as precise as the cited source; rows marked `[inferred]` have no doc backing for the emission itself.
+
+### 4.1 `TRANSACTION` (`transactionEvent`), keyed by `transactionType`
+
+| `transactionType` | `isPending` | emitted by | when | source |
+|---|---|---|---|---|
+| `CARD_TRANSACTION` | `true` | ext: Visa authorisation request; mock:`generateAuthHold`, mock:`generateCardTransaction` (1st of 2), mock:`generateHoldAndUpdateHoldTransactions` (initial hold, and again for a hold **increase** with the same `transactionHayId` and the updated total amount) | After internal checks (balance, limits, rules, fraud) and acknowledgement to Visa; "Then the platform sends transaction details, along with the outcome" — sent for declined outcomes too (`outcome` ≠ `ACCEPTED`, e.g. `REFUSED_RULES` with `ruleDetails`) | [docs:card-transactions] [docs:simulates-card-transaction-on-staging] [docs:accounts-overview] ("notification with the ruleDetail under type TRANSACTION on rule failed") |
+| `CARD_TRANSACTION` | `false` | ext: Visa stand-in / ATM; mock:`generateAtmTransaction` | "settled in-line, no separate _SETTLED event", `isAtmTransaction: true`, `cardUsageDetails.isAtmWithdrawal: true` | [docs:simulates-card-transaction-on-staging] |
+| `CARD_TRANSACTION_SETTLED` | `false` | ext: Visa presentment/clearing; mock:`generateCardTransaction` (2nd), mock:`generateHoldAndUpdateHoldTransactions` (last, after `settlementDelayInSeconds` 5–300) | "After successfully processing the settlement"; new `transactionHayId`, `holdHayId` = original hold; held balance released, total balance reduced | [docs:card-transactions] [docs:simulates-card-transaction-on-staging] [docs:external-authorisation-and-balance] ("After Hold accepted") |
+| `CARD_TRANSACTION_REFUND` | `true` | ext: Visa authorisation reversal (partial/full hold decrease); mock:`generateHoldAndUpdateHoldTransactions` with **positive** `updateHoldAmount` | Pre-settlement; same `transactionHayId` as the hold; positive `currencyAmount.amount` = released portion | [docs:card-transactions] [docs:simulates-card-transaction-on-staging] |
+| `CARD_TRANSACTION_REFUND` | `false` | ext: merchant refund / Visa OCT; mock:`generateRefundTransaction` | Post-settlement, own `transactionHayId`, "not linked to a prior purchase by Shaype" | [docs:card-transactions] [docs:simulates-card-transaction-on-staging] [docs:external-authorisation-and-balance] ("Hold decrease - OCT - Reversal - Refund") |
+| `INTRABANK_TRANSFER_IN` | `false` | op:`makeTransferV1` (and deprecated `makeTransferV0`) with `transferType` `ACCOUNT` to a Shaype BSB ("automatically converted to an INTERNAL (ShaypePay) transaction") — delivered to the **recipient** customer | after execution; "both the sender and receiver will receive a webhook notification" | [docs:payments] [docs:direct-debits] |
+| `INTRABANK_TRANSFER_OUT` | `false` | same as above — delivered to the **sender** customer | after execution; a reversal carries `returnReason` | [docs:payments] (NB: the page's INTRABANK_TRANSFER_OUT samples actually show `"transactionType": "INTERBANK_TRANSFER_OUT"` — §6 Q7) |
+| `INTERBANK_TRANSFER_IN` | `false` | ext: inbound NPP / DE credit; mock:`generateInboundNppTransaction`, mock:`generateInboundNppTransactionV2` (also the settlement leg of a PayTo payment when the client is creditor), mock:`generateInboundDeTransaction` with `transactionType: CREDIT` `[inferred for the DE mock]` | on receipt of funds from an external bank | [docs:payments] [docs:direct-debits] [docs:payto-staging-testing-suite] |
+| `INTERBANK_TRANSFER_OUT` | `false` | op:`makeTransferV1` to a non-Shaype BSB (NPP if eligible else DE); batch items from `createBatch` (`ACCOUNT_TRANSFER`) `[spec:batch]`; scheduled payments executing (`originType: SCHEDULED_PAYMENT`) `[inferred]` | after execution; NPP return → second event with positive amount and `returnReason` (e.g. `CUSTOMER_REQUEST`) | [docs:payments] [docs:direct-debits] [docs:batch-api] |
+| `DIRECT_DEBIT_TRANSFER` | `false` | ext: external institution pulls funds ("external bank account pull funds from customer account using Direct Debit"); op:`createDirectDebitV1` outbound DD (credited "after two working days") — the `DIRECT_ENTRY` event is about the *request*, this one is "for the actual transaction"; mock:`generateInboundDeTransaction` with `transactionType: DEBIT` `[inferred]` | at posting | [docs:direct-debits] |
+| `BPAY_TRANSFER_OUT` | `false` | op:`makeBpayPayment` | after payment accepted; `counterpartDetails.bpayDetails` populated | [docs:bpay] |
+| `HAY_TOP_UP` | — | — | "An account top-up" — no docs | [spec] only; `[inferred]` legacy/Accelerator funding |
+| `REWARD` | — | — | "A reward credited to the account" — no docs; Apple rewards are instead created by the client via `createCreditTransactionV1` with `transactionChannel: APPLE_REWARD` `[docs:apple-reward-transactions]` | [spec] only |
+| `GENERAL_CREDIT` / `GENERAL_DEBIT` | `false` `[inferred]` | op:`createCreditTransactionV1` / op:`createDebitTransactionV1` (and V0) `[inferred]` — matches the ext-auth `authorisationTransactionType` values `GENERAL_CREDIT`/`GENERAL_DEBIT` `[spec:ext-auth]` | after the transaction is accepted | [inferred] |
+| `ORIGINAL_CREDIT` | — | ext: "Visa Original Credit transaction" | — | [spec] only (ext-auth docs list OCT under CARD_TRANSACTION_REFUND — §6 Q8) |
+| `CONVERSION_IN` / `CONVERSION_OUT` | — | op:`executeConversion` (FX) `[inferred]` — "Currency conversion buy (credit)" / "sell (debit)" | — | [spec] + [inferred] |
+| `INTERBANK_TRANSFER_OUT_REVERSAL` | — | "(NOT CURRENTLY IN USE)" | never | [spec] |
+| (any, PayTo settlement) | `false` | op:`makeAdhocPayment` / platform: scheduled mandate payments — "webhook notification of the payment with transaction event object that contain mandateId and Payment InstructionId" (`mandatePaymentDetails`) | when the NPP payment lands on the creditor account | [docs:payto-payment] |
+
+### 4.2 Non-transaction v0 events
+
+| `type` | emitted by | when | source |
+|---|---|---|---|
+| `ACCOUNT_STATUS_CHANGE` | op:`createAccount` / op:`createHayAccount` → `APPROVED` (`actionOwner: PLATFORM` in the sample); platform: first deposit/withdrawal `APPROVED → ACTIVE`; op:`blockAccount` → blocked (`LOCKED` per docs / `BLOCKED` per enum, §6 Q2); op:`unblockAccount` → `ACTIVE`; op:`closeAccount` → `CLOSED`; platform: overdraft arrears `ACTIVE ↔ ACTIVE_IN_ARREARS` | on each status transition `[inferred: docs give the transitions, the sample, and the event's purpose "The status of an account has changed", not an explicit per-op emission list]` | [docs:customer-creation-1] (sample) [docs:account-status] [docs:account-closure] |
+| `CUSTOMER_STATUS_UPDATED` | op:`changeHayCustomerStatus` ("also sends a webhook event with the type CUSTOMER_STATUS_UPDATED"); op:`blockCustomer` → `BLOCKED`; op:`unblockCustomer` → `ACTIVE`; platform: account closure making the customer `INACTIVE` `[inferred]`; platform: onboarding outcome → `ACTIVE`/`REFERRED`/`REJECTED` `[inferred]` | on status change; `actionOwner: CLIENT` in the sample | [docs:customer-creation-1] [docs:account-closure] |
+| `CUSTOMER_DETAILS_CHANGE` | op:`updateCustomer` ("also sends a webhook event with the type CUSTOMER_DETAILS_CHANGE along with the customerDetailsChangeEvent object") | after update; booleans flag which of phone/name/email/address changed | [docs:customer-creation-1] |
+| `ONBOARDING_PASSED` | platform: async onboarding checks after op:`createHayCustomer` (and KYC ops `approve*Check` `[inferred]`) | when onboarding completes successfully | [docs:customer-creation-1] (sample only; wording "Customer onboarding completed successfully" from spec) |
+| `ONBOARDING_FAILED` | platform: same pipeline | on failure at `DOCUMENT_SCAN` / `SANCTIONS_SCAN` / `KYC_AML_SCAN` / `DUPLICATE_CHECK` | [docs:customer-creation-1] (sample) [spec] |
+| `CARD_STATUS_CHANGE` | op:`activateCard` → `ACTIVE`; op:`blockCard` → `BLOCKED`; op:`unblockCard` → `ACTIVE`; op:`cancelCard` → `INACTIVE`; op:`reissueHayCard` (old → `INACTIVE`, new `AWAITING_ACTIVATION` if physical / `ACTIVE` if virtual); op:`renewCard` (old disabled after new activated); op:`convertCard`; op:`createHayCard` (`AWAITING_ACTIVATION`/`ACTIVE`); op:`closeAccount` → all linked cards `INACTIVE` ("you will receive the following Notification events … Card Status Change"); platform: expiry → `EXPIRED` | on each card status transition `[inferred for all but closeAccount; docs:card-operations gives resulting statuses but never says a webhook fires]` | [docs:account-closure] [docs:card-operations] [spec] |
+| `CARD_ADDED_TO_WALLET` | ext: Apple/Google/Samsung wallet provisioning completes | "Triggered immediately after card added to wallet" | [docs:apple-and-google-pay-notifications] |
+| `REMINDER` (Apple/Google `reminderType`s) | platform: reminder scheduler, started "when a customer starts the process of adding their card to a digital wallet" (or, for the `_ADD_TO_WALLET_REMINDER_30/60/90_DAYS`, when the card is created but provisioning never started) | 24h / 7d / 14d / 30d / 60d / 90d schedules as named; `_7_DAYS_PARTIAL_PROVISIONING` "Only triggered on first attempt of partial provisioning attempt" | [docs:apple-and-google-pay-notifications] |
+| `REMINDER` (`CARD_EXPIRY_MONTH_REMINDER`, `CARD_EXPIRY_2_WEEK_REMINDER`, `CARD_EXPIRY_DAY_REMINDER`) | platform: pre-expiry scheduler, with `cardExpiryReminderEvent{cardId, expirationMonth, expirationYear}`; staging can move expiry with mock:`changeCardExpiryDate` `[inferred]` | 1 month / 2 weeks / 1 day before expiry `[inferred from names]` | [spec] |
+| `REMINDER` (`REMINDER_TO_COMPLETE_FUNDING`, `REMINDER_TO_PROVISION_DIGITAL_CARD`, `REMINDER_TO_TRANSACT`, `APPLE_PAY_ADDITION_REWARD`, `APPLE_PAY_SPEND_REWARD`) | — | no docs at all | [spec] only |
+| `APPLE_PAY_REWARD_FOR_CUSTOMER` | platform: "After the reminders notification, if a condition is met (provision completed or spent on Apple Pay token)"; "client configurable, so it can be enabled/disabled"; account-level (one reward per joint account) | when condition met; client then calls `createCreditTransactionV1` with `transactionChannel: APPLE_REWARD` | [docs:apple-reward-transactions] |
+| `SCHEDULED_PAYMENT` | platform/GraphQL: scheduled-payment **creation** (`createScheduledPayment` mutation on the UI portal — "not available through the B2B API"); PayTo: automatic scheduled payment creation when a mandate becomes active `[inferred]` | on creation; payload = `{hayId}` | [spec] ("Scheduled payment creation notification") [docs:scheduled-payments] |
+| `DIRECT_ENTRY` | op:`createDirectDebitV1` — "The platform will send `DIRECT_ENTRY` webhook notification for each of the statuses in the diagram above. A RECEIVED and ACCEPTED webhook will be sent synchronously and SUBMITTED and COMPLETE status notification will arrive later."; returns → `RETURNED` / `REJECTED` / `INCOMPLETE` `[inferred]`; mock:`generateInboundDeTransaction` with `recordType` `RETURN`/`REFUSAL` `[inferred]` | per status; `type: DEBIT`, `direction: OUTBOUND` only | [docs:direct-debits] [spec] |
+| `MANDATE` | ext: NPP Mandate Management Service notifications (client = Payment Initiator, or Payer); mock:`generateMandateNotificationForInitiator` (triggers `MCRC,MCRD,MCRX,MAMC,MAMD,MAMN,MAMX,MPOF,MPOT,MPOX,MSCH`) and mock:`generateMandateNotificationForPayer` (`MCRX,MCRT,MCRP,MAMN,MAMP,MAMR,MAMX,MSCH`) | on MMS action: authorisation responses (accepted/declined/expired), debtor status changes (suspended/released/cancelled), amendments, recalls; `trigger` = MMS code | [docs:payto-notifications] [docs:payto-staging-testing-suite] [spec:b2b] |
+| `MANDATE_PAYMENT` | op:`makeAdhocPayment` (staging: "will receive a RJCT PSR notification"); platform: scheduled mandate payments; mock:`generateReceiveAPaymentInstruction` (`transactionStatus` `ACCP`/`RJCT`) `[inferred]` | "sent for all payment instructions when the final status is known"; `paymentStatus` + `isFinal` + `reasonCode` on rejection | [docs:payto-notifications] [docs:payto-payment] [spec:b2b] |
+| `MANDATE_DUE_PAYMENT` | platform `[inferred]` | ahead of a scheduled mandate payment (`paymentDateTimeUtc`) `[inferred]` | [spec] only |
+| `MANDATE_ACTION_EXPIRATION` | platform/MMS `[inferred]` — bilateral action pending resolution with `resolutionRequestedByDateTimeUtc`; MMS expiry itself arrives as `MANDATE` with `MCRX`/`MAMX` | `[inferred]` | [spec] only |
+| `DELEGATED_OTP_NOTIFICATION` | ext: 3-D Secure authentication of a card-not-present transaction (Shaype delegates OTP delivery to the client) | during 3DS challenge; payload has `passcode`, `merchantInfo`, `transactionInfo` | [spec] only |
+
+### 4.3 v1 generic events
+
+| `type` / `eventType` | emitted by | when | source |
+|---|---|---|---|
+| `BATCH_COMPLETED` | op:`createBatch` (`[spec:batch]`, `POST /batches`) | "Once the batch has completed … confirm all records have been attempted … count of how many transactions have been ACCEPTED, FAILED or returned an ERROR" (spec field names: `itemStatistics.pending/success/error/failed`; `status` `RECEIVED`/`PROCESSING`/`COMPLETED`). Each ACCEPTED/FAILED item also produces its own `TRANSACTION` webhook; ERROR items produce none. | [docs:batch-api] [spec] |
+| `PERK_ORDER_UPDATE` | op:`createOrder` (`POST /v1/perks/orders`) `[inferred]` | "Final order status" `COMPLETED`/`DECLINED`/`REVERSED`, with PIN details for PIN-based products | [spec] only |
+
+### 4.4 Mock generators (staging Utilities API) → webhooks, at a glance `[docs:simulates-card-transaction-on-staging]` `[spec:b2b]`
+
+| mock operationId | path | webhooks produced |
+|---|---|---|
+| `generateAtmTransaction` | `POST /v0/utils/generate-atm-transaction` | 1× `TRANSACTION` `CARD_TRANSACTION` `isPending:false`, `isAtmTransaction:true` |
+| `generateAuthHold` | `POST /v0/utils/generate-auth-hold` | 1× `CARD_TRANSACTION` `isPending:true`, `holdHayId == transactionHayId` |
+| `generateCardTransaction` | `POST /v0/utils/generate-card-transaction` | `CARD_TRANSACTION` (pending) then `CARD_TRANSACTION_SETTLED` after `settlementDelayInSeconds` |
+| `generateHoldAndUpdateHoldTransactions` | `POST /v0/utils/generate-update-auth-hold` | hold → (increase: `CARD_TRANSACTION` pending, same id \| decrease: `CARD_TRANSACTION_REFUND` pending, same id) after `updateHoldDelayInSeconds` → `CARD_TRANSACTION_SETTLED` |
+| `generateRefundTransaction` | `POST /v0/utils/generate-refund-transaction` | 1× `CARD_TRANSACTION_REFUND` `isPending:false` |
+| `generateInboundNppTransaction` / `…V2` | `POST /v0/utils/generate-npp-inbound`, `…/generate-inbound-npp-transaction-v2` | `TRANSACTION` `INTERBANK_TRANSFER_IN` `[inferred from docs:payments]` |
+| `generateInboundDeTransaction` | `POST /v0/utils/generate-de-inbound` | `TRANSACTION` (`INTERBANK_TRANSFER_IN` for CREDIT / `DIRECT_DEBIT_TRANSFER` for DEBIT) and/or `DIRECT_ENTRY` for RETURN/REFUSAL `[inferred]` |
+| `generateMandateNotificationForInitiator` / `…ForPayer` | `POST /v0/utils/generate-mandate-notification-initiator`, `…-payer` | `MANDATE` with the requested `trigger` `[inferred: docs say "notification", spec DTO is MandateEventDto]` |
+| `generateReceiveAPaymentInstruction` | `POST /v0/utils/generate-receive-a-payment-instruction` | `MANDATE_PAYMENT` (`ACCP`→accepted / `RJCT`→rejected) `[inferred]` |
+| `changeCardExpiryDate` | `PATCH /v0/utils/cards/{cardId}/expiry-date` | enables testing `CARD_EXPIRY_*` reminders / `EXPIRED` status `[inferred]` |
+| `createStubForMandateSearchPaymentInstructions` | `POST /v0/utils/create-stub-search-payment-instructions` | none (stubs a query) |
+
+Declined simulations: `declineReason` (`CARD_EXPIRED`, `WRONG_CVV`, `CVV_BLOCKED`, `PIN_BLOCKED`, `INCORRECT_PIN`, `ALLOWED_PIN_RETRIES_EXCEEDED`, `INVALID_MERCHANT`, `CARD_IS_NOT_ACTIVE`, `RESTRICTED_CARD`) makes the processor decline; how that maps onto `outcome`/`cardProcessorResponse` in the resulting webhook is not documented (§6 Q9) `[docs:simulates-card-transaction-on-staging]`.
+
+---
+
+## 5. Example payloads (verbatim copies from the docs; the spec itself contains no examples)
+
+Every block below is copied byte-for-byte from the cited page (including typos such as a missing opening quote or a trailing space in an id — they are in the source). Nothing here is fabricated; where no example exists for an event type, that is stated and a clearly-labelled **[inferred] skeleton** derived from the spec is given instead.
+
+### 5.1 `TRANSACTION` — card hold / settlement / incremental / reversal / refund
+
+#### TRANSACTION (card) — scenario "1. Hold Authorisation Request + Settlement" — Authorisation Hold Webhook Sample `[docs:card-transactions]`
+
+```json
+{
+  "customerHayId": "1111a53d-d8e0-45af-9977-6309879cedd7",
+  "idempotencyKey": "22228600-489b-4dc9-8177-d712024c3c5d",
+  "type": "TRANSACTION",
+  "productId": "33338e33-77ce-fdfa-0188-cfa462650060",
+  "firebaseDeviceToken": null,
+  "actionOwner": null,
+  "cardHayId": null,
+  "accountStatusChangeEvent": null,
+  "customerStatusUpdatedEvent": null,
+  "transactionEvent": {
+    "transactionHayId": "44449ce6-3251-4a18-ac77-439e370e6bb4",
+		"holdHayId": "44449ce6-3251-4a18-ac77-439e370e6bb4",
+    "accountHayId": "555507d1-10f8-41f9-ba77-d71542ba4e4c",
+    "currencyAmount": {
+      "currency": "AUD",
+      "amount": -8.40
+    },
+    "updatedBalance": {
+      "currency": "AUD",
+      "amount": 2.73
+    },
+    "isPending": true,
+    "outcome": "ACCEPTED",
+    "transactionTimeUtc": "2025-07-17T11:13:20.990107Z",
+    "cardPreferenceOutcome": null,
+    "cardProcessorResponse": null,
+    "transactionType": "CARD_TRANSACTION",
+    "cardUsageDetails": {
+      "isMagneticStripePayment": null,
+      "isContactless": null,
+      "isCardPresent": true,
+      "isMobileWalletPayment": false,
+      "isAtmWithdrawal": false
+    },
+    "isAtmTransaction": false,
+    "accountBalances": {
+      "totalBalance": {
+        "currency": "AUD",
+        "amount": 11.13
+      },
+      "heldBalance": {
+        "currency": "AUD",
+        "amount": 8.4
+      },
+      "lockedBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "stacksBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "availableBalance": {
+        "currency": "AUD",
+        "amount": 2.73
+      }
+    },
+    "cardHayId": "66660ee3-f26d-47f9-8d77-a475170043b8",
+    "customerHayId": "1111a53d-d8e0-45af-9977-6309879cedd7",
+    "ruleDetails": null,
+    "counterpartDetails": null,
+    "originId": null,
+    "originType": null,
+    "counterpartName": "IGA (Mt Cotton)",
+    "merchantName": null,
+    "category": null,
+    "merchantId": "000009493578577",
+    "description": null,
+    "mandatePaymentDetails": null,
+    "returnReason": null
+  },
+  "cardStatusChangeEvent": null,
+  "customerDetailsChangeEvent": null,
+  "cardAdditionToWalletEvent": null,
+  "reminderType": null,
+  "scheduledPaymentEvent": null,
+  "onboardingFailedEvent": null,
+  "directEntryEvent": null,
+  "mandateDuePaymentEvent": null,
+  "mandateEvent": null,
+  "mandatePaymentEvent": null,
+  "applePayRewardForCustomerEvent": null,
+  "cardExpiryReminderEvent": null,
+  "mandateActionExpirationEvent": null
+}
+```
+
+#### TRANSACTION (card) — scenario "1. Hold Authorisation Request + Settlement" — Settlement Webhook Sample `[docs:card-transactions]`
+
+```json
+{
+  "customerHayId": "1111a53d-d8e0-45af-9977-6309879cedd7",
+  "idempotencyKey": "777797a5-9b88-49a6-aa77-6918ee8dfc1e",
+  "type": "TRANSACTION",
+  "productId": "33338e33-77ce-fdfa-0188-cfa462650060",
+  "firebaseDeviceToken": null,
+  "actionOwner": null,
+  "cardHayId": null,
+  "accountStatusChangeEvent": null,
+  "customerStatusUpdatedEvent": null,
+  "transactionEvent": {
+    "transactionHayId": 888858f5-12bc-4e06-a577-21776b900a12",
+    "holdHayId": "44449ce6-3251-4a18-ac77-439e370e6bb4",
+		"accountHayId": "555507d1-10f8-41f9-ba77-d71542ba4e4c",
+    "currencyAmount": {
+      "currency": "AUD",
+      "amount": -8.40
+    },
+    "updatedBalance": {
+      "currency": "AUD",
+      "amount": 2.73
+    },
+    "isPending": false,
+    "outcome": "ACCEPTED",
+    "transactionTimeUtc": "2025-07-17T11:13:20.990107Z",
+    "cardPreferenceOutcome": null,
+    "cardProcessorResponse": null,
+    "transactionType": "CARD_TRANSACTION_SETTLED",
+    "cardUsageDetails": {
+      "isMagneticStripePayment": null,
+      "isContactless": null,
+      "isCardPresent": true,
+      "isMobileWalletPayment": false,
+      "isAtmWithdrawal": false
+    },
+    "isAtmTransaction": false,
+    "accountBalances": {
+      "totalBalance": {
+        "currency": "AUD",
+        "amount": 2.73
+      },
+      "heldBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "lockedBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "stacksBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "availableBalance": {
+        "currency": "AUD",
+        "amount": 2.73
+      }
+    },
+    "cardHayId": "66660ee3-f26d-47f9-8d77-a475170043b8",
+    "customerHayId": "1111a53d-d8e0-45af-9977-6309879cedd7",
+    "ruleDetails": null,
+    "counterpartDetails": null,
+    "originId": null,
+    "originType": null,
+    "counterpartName": "IGA (Mt Cotton)",
+    "merchantName": null,
+    "category": null,
+    "merchantId": "000009493578598",
+    "description": null,
+    "mandatePaymentDetails": null,
+    "returnReason": null
+  },
+  "cardStatusChangeEvent": null,
+  "customerDetailsChangeEvent": null,
+  "cardAdditionToWalletEvent": null,
+  "reminderType": null,
+  "scheduledPaymentEvent": null,
+  "onboardingFailedEvent": null,
+  "directEntryEvent": null,
+  "mandateDuePaymentEvent": null,
+  "mandateEvent": null,
+  "mandatePaymentEvent": null,
+  "applePayRewardForCustomerEvent": null,
+  "cardExpiryReminderEvent": null,
+  "mandateActionExpirationEvent": null
+}
+```
+
+#### TRANSACTION (card) — scenario "2. Incremental Authorisation" — Initial Hold Webhook Sample `[docs:card-transactions]`
+
+```json
+{
+  "customerHayId": "111c046d-32f4-4920-af32-7df893f85b5b",
+  "idempotencyKey": "22272762-37a1-4911-b432-b51fd032cc0d",
+  "type": "TRANSACTION",
+  "productId": "33368fda-8047-2f19-0132-477797f6016e",
+  "firebaseDeviceToken": null,
+  "actionOwner": null,
+  "cardHayId": null,
+  "accountStatusChangeEvent": null,
+  "customerStatusUpdatedEvent": null,
+  "transactionEvent": {
+  	"transactionHayId": "4441ae58-1f2b-417d-98d3-08c8b12504e0",    
+		"holdHayId": "4441ae58-1f2b-417d-98d3-08c8b12504e0",
+    "accountHayId": "5554720e-33ed-4bfe-9832-9f87de9e8fff",
+    "currencyAmount": {
+      "currency": "AUD",
+      "amount": -9.00
+    },
+    "updatedBalance": {
+      "currency": "AUD",
+      "amount": 5066
+    },
+    "isPending": true,
+    "outcome": "ACCEPTED",
+    "transactionTimeUtc": "2025-07-17T11:13:20.990107Z",
+    "cardPreferenceOutcome": null,
+    "cardProcessorResponse": null,
+    "transactionType": "CARD_TRANSACTION",
+    "cardUsageDetails": {
+      "isMagneticStripePayment": null,
+      "isContactless": null,
+      "isCardPresent": false,
+      "isMobileWalletPayment": false,
+      "isAtmWithdrawal": false
+    },
+    "isAtmTransaction": false,
+    "accountBalances": {
+      "totalBalance": {
+        "currency": "AUD",
+        "amount": 232.64
+      },
+      "heldBalance": {
+        "currency": "AUD",
+        "amount": 166.64
+      },
+      "lockedBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "stacksBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "availableBalance": {
+        "currency": "AUD",
+        "amount": 66.00
+      }
+    },
+    "cardHayId": "6666eb76-a0cb-4c1c-a9c3-4e89b40b70ff",
+    "customerHayId": "111c046d-32f4-4920-af32-7df893f85b5b",
+    "ruleDetails": null,
+    "counterpartDetails": null,
+    "originId": null,
+    "originType": null,
+    "counterpartName": "PayPal",
+    "merchantName": null,
+    "category": null,
+    "merchantId": "000980200061932",
+    "description": null,
+    "mandatePaymentDetails": null,
+    "returnReason": null
+  },
+  "cardStatusChangeEvent": null,
+  "customerDetailsChangeEvent": null,
+  "cardAdditionToWalletEvent": null,
+  "reminderType": null,
+  "scheduledPaymentEvent": null,
+  "onboardingFailedEvent": null,
+  "directEntryEvent": null,
+  "mandateDuePaymentEvent": null,
+  "mandateEvent": null,
+  "mandatePaymentEvent": null,
+  "applePayRewardForCustomerEvent": null,
+  "cardExpiryReminderEvent": null,
+  "mandateActionExpirationEvent": null
+}
+```
+
+#### TRANSACTION (card) — scenario "2. Incremental Authorisation" — Incremental Hold Webhook Sample `[docs:card-transactions]`
+
+```json
+{
+  "customerHayId": "111c046d-32f4-4920-af32-7df893f85b5b",
+  "idempotencyKey": "123e32c2-5b6c-4575-ad32-2f25a68d27e2",
+  "type": "TRANSACTION",
+  "productId": "33368fda-8047-2f19-0132-477797f6016e",
+  "firebaseDeviceToken": null,
+  "actionOwner": null,
+  "cardHayId": null,
+  "accountStatusChangeEvent": null,
+  "customerStatusUpdatedEvent": null,
+  "transactionEvent": {
+    "transactionHayId": "4441ae58-1f2b-417d-98d3-08c8b12504e0",
+    "holdHayId": "4441ae58-1f2b-417d-98d3-08c8b12504e0",
+		"accountHayId": "5554720e-33ed-4bfe-9832-9f87de9e8fff",
+    "currencyAmount": {
+      "currency": "AUD",
+      "amount": -19.00
+    },
+    "updatedBalance": {
+      "currency": "AUD",
+      "amount": 5065
+    },
+    "isPending": true,
+    "outcome": "ACCEPTED",
+    "transactionTimeUtc": "2025-07-17T11:13:20.990107Z",
+    "cardPreferenceOutcome": null,
+    "cardProcessorResponse": null,
+    "transactionType": "CARD_TRANSACTION",
+    "cardUsageDetails": {
+      "isMagneticStripePayment": null,
+      "isContactless": null,
+      "isCardPresent": true,
+      "isMobileWalletPayment": false,
+      "isAtmWithdrawal": false
+    },
+    "isAtmTransaction": false,
+    "accountBalances": {
+      "totalBalance": {
+        "currency": "AUD",
+        "amount": 241.64
+      },
+      "heldBalance": {
+        "currency": "AUD",
+        "amount": 176.64
+      },
+      "lockedBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "stacksBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "availableBalance": {
+        "currency": "AUD",
+        "amount": 65.00
+      }
+    },
+    "cardHayId": "6666eb76-a0cb-4c1c-a9c3-4e89b40b70ff",
+    "customerHayId": "111c046d-32f4-4920-af32-7df893f85b5b",
+    "ruleDetails": null,
+    "counterpartDetails": null,
+    "originId": null,
+    "originType": null,
+    "counterpartName": "PayPal",
+    "merchantName": null,
+    "category": null,
+    "merchantId": "000980200061932",
+    "description": null,
+    "mandatePaymentDetails": null,
+    "returnReason": null
+  },
+  "cardStatusChangeEvent": null,
+  "customerDetailsChangeEvent": null,
+  "cardAdditionToWalletEvent": null,
+  "reminderType": null,
+  "scheduledPaymentEvent": null,
+  "onboardingFailedEvent": null,
+  "directEntryEvent": null,
+  "mandateDuePaymentEvent": null,
+  "mandateEvent": null,
+  "mandatePaymentEvent": null,
+  "applePayRewardForCustomerEvent": null,
+  "cardExpiryReminderEvent": null,
+  "mandateActionExpirationEvent": null
+}
+```
+
+#### TRANSACTION (card) — scenario "2. Incremental Authorisation" — Settlement Webhook Sample `[docs:card-transactions]`
+
+```json
+{
+  "customerHayId": "111c046d-32f4-4920-af32-7df893f85b5b",
+  "idempotencyKey": "4560ac1d-fd93-442b-ab32-db57a64e3412",
+  "type": "TRANSACTION",
+  "productId": "33368fda-8047-2f19-0132-477797f6016e",
+  "firebaseDeviceToken": null,
+  "actionOwner": null,
+  "cardHayId": null,
+  "accountStatusChangeEvent": null,
+  "customerStatusUpdatedEvent": null,
+  "transactionEvent": {
+  	"transactionHayId": "7890c496-ff68-40d6-9932-af154202924b",
+		"holdHayId": "4441ae58-1f2b-417d-98d3-08c8b12504e0",
+    "accountHayId": "5554720e-33ed-4bfe-9832-9f87de9e8fff",
+    "currencyAmount": {
+      "currency": "AUD",
+      "amount": -19.00
+    },
+    "updatedBalance": {
+      "currency": "AUD",
+      "amount": 5075
+    },
+    "isPending": false,
+    "outcome": "ACCEPTED",
+    "transactionTimeUtc": "2025-07-17T11:13:20.990107Z",
+    "cardPreferenceOutcome": null,
+    "cardProcessorResponse": null,
+    "transactionType": "CARD_TRANSACTION_SETTLED",
+    "cardUsageDetails": {
+      "isMagneticStripePayment": null,
+      "isContactless": null,
+      "isCardPresent": false,
+      "isMobileWalletPayment": false,
+      "isAtmWithdrawal": false
+    },
+    "isAtmTransaction": false,
+    "accountBalances": {
+      "totalBalance": {
+        "currency": "AUD",
+        "amount": 75
+      },
+      "heldBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "lockedBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "stacksBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "availableBalance": {
+        "currency": "AUD",
+        "amount": 75
+      }
+    },
+    "cardHayId": "6666eb76-a0cb-4c1c-a9c3-4e89b40b70ff",
+    "customerHayId": "111c046d-32f4-4920-af32-7df893f85b5b",
+    "ruleDetails": null,
+    "counterpartDetails": null,
+    "originId": null,
+    "originType": null,
+    "counterpartName": "PayPal",
+    "merchantName": null,
+    "category": null,
+    "merchantId": "000980200061995",
+    "description": null,
+    "mandatePaymentDetails": null,
+    "returnReason": null
+  },
+  "cardStatusChangeEvent": null,
+  "customerDetailsChangeEvent": null,
+  "cardAdditionToWalletEvent": null,
+  "reminderType": null,
+  "scheduledPaymentEvent": null,
+  "onboardingFailedEvent": null,
+  "directEntryEvent": null,
+  "mandateDuePaymentEvent": null,
+  "mandateEvent": null,
+  "mandatePaymentEvent": null,
+  "applePayRewardForCustomerEvent": null,
+  "cardExpiryReminderEvent": null,
+  "mandateActionExpirationEvent": null
+}
+```
+
+#### TRANSACTION (card) — scenario "3. Authorisation Reversal / Hold Decrease (partial/full)" — Initial Hold Webhook Sample `[docs:card-transactions]`
+
+```json
+{
+  "customerHayId": "d09010f7-62f8-4575-8544-836447fd701e",
+  "idempotencyKey": "d80a2248-068d-4664-b944-94b4e6e8e149",
+  "type": "TRANSACTION",
+  "firebaseDeviceToken": null,
+  "actionOwner": null,
+  "cardHayId": null,
+  "accountStatusChangeEvent": null,
+  "customerStatusUpdatedEvent": null,
+  "transactionEvent": {
+    "transactionHayId": "fba1cf60-116d-4704-b744-2e937796e3fa",
+    "holdHayId": "fba1cf60-116d-4704-b744-2e937796e3fa",
+		"accountHayId": "dae57032-4ad7-44e3-b8a4-c9f7dae4ea1b",
+    "currencyAmount": {
+      "currency": "AUD",
+      "amount": -5.00
+    },
+    "updatedBalance": {
+      "currency": "AUD",
+      "amount": 1.37
+    },
+    "isPending": true,
+    "outcome": "ACCEPTED",
+    "transactionTimeUtc": "2025-07-17T11:13:20.990107Z",
+    "cardPreferenceOutcome": null,
+    "cardProcessorResponse": null,
+    "transactionType": "CARD_TRANSACTION",
+    "cardUsageDetails": {
+      "isMagneticStripePayment": null,
+      "isContactless": null,
+      "isCardPresent": true,
+      "isMobileWalletPayment": true,
+      "isAtmWithdrawal": false
+    },
+    "isAtmTransaction": false,
+    "accountBalances": {
+      "totalBalance": {
+        "currency": "AUD",
+        "amount": 10.87
+      },
+      "heldBalance": {
+        "currency": "AUD",
+        "amount": 9.5
+      },
+      "lockedBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "stacksBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "availableBalance": {
+        "currency": "AUD",
+        "amount": 1.37
+      }
+    },
+    "cardHayId": "88d88c60-c894-432a-95b4-cf907aec8d66",
+    "customerHayId": "d09010f7-62f8-4575-8544-836447fd701e",
+    "ruleDetails": null,
+    "counterpartDetails": null,
+    "originId": null,
+    "originType": null,
+    "counterpartName": "Coca-Cola Europacific Partners",
+    "merchantName": null,
+    "category": null,
+    "merchantId": "26185344",
+    "description": null,
+    "mandatePaymentDetails": null,
+    "returnReason": null
+  },
+  "cardStatusChangeEvent": null,
+  "customerDetailsChangeEvent": null,
+  "cardAdditionToWalletEvent": null,
+  "reminderType": null,
+  "scheduledPaymentEvent": null,
+  "onboardingFailedEvent": null,
+  "directEntryEvent": null,
+  "mandateDuePaymentEvent": null,
+  "mandateEvent": null,
+  "mandatePaymentEvent": null,
+  "applePayRewardForCustomerEvent": null,
+  "cardExpiryReminderEvent": null,
+  "mandateActionExpirationEvent": null
+}
+```
+
+#### TRANSACTION (card) — scenario "3. Authorisation Reversal / Hold Decrease (partial/full)" — Reversal Transaction Webhook Sample `[docs:card-transactions]`
+
+```json
+{
+  "customerHayId": "d09010f7-62f8-4575-8544-836447fd701e",
+  "idempotencyKey": "67b5c1f1-d73e-4481-aa44-f597f6fd9e31",
+  "type": "TRANSACTION",
+  "firebaseDeviceToken": null,
+  "actionOwner": null,
+  "cardHayId": null,
+  "accountStatusChangeEvent": null,
+  "customerStatusUpdatedEvent": null,
+  "transactionEvent": {
+    "transactionHayId": "fba1cf60-116d-4704-b744-2e937796e3fa",
+    "holdHayId": "fba1cf60-116d-4704-b744-2e937796e3fa",
+		"accountHayId": "dae57032-4ad7-44e3-b8a4-c9f7dae4ea1b",
+    "currencyAmount": {
+      "currency": "AUD",
+      "amount": 0.5000
+    },
+    "updatedBalance": {
+      "currency": "AUD",
+      "amount": 1.87
+    },
+    "isPending": true,
+    "outcome": "ACCEPTED",
+    "transactionTimeUtc": "2025-07-17T11:13:20.990107Z",
+    "cardPreferenceOutcome": null,
+    "cardProcessorResponse": null,
+    "transactionType": "CARD_TRANSACTION_REFUND",
+    "cardUsageDetails": {
+      "isMagneticStripePayment": null,
+      "isContactless": null,
+      "isCardPresent": false,
+      "isMobileWalletPayment": true,
+      "isAtmWithdrawal": false
+    },
+    "isAtmTransaction": false,
+    "accountBalances": {
+      "totalBalance": {
+        "currency": "AUD",
+        "amount": 10.87
+      },
+      "heldBalance": {
+        "currency": "AUD",
+        "amount": 9
+      },
+      "lockedBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "stacksBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "availableBalance": {
+        "currency": "AUD",
+        "amount": 1.87
+      }
+    },
+    "cardHayId": "88d88c60-c894-432a-95b4-cf907aec8d66",
+    "customerHayId": "d09010f7-62f8-4575-8544-836447fd701e",
+    "ruleDetails": null,
+    "counterpartDetails": null,
+    "originId": null,
+    "originType": null,
+    "counterpartName": "Coca-Cola Europacific Partners",
+    "merchantName": null,
+    "category": null,
+    "merchantId": "26185344",
+    "description": null,
+    "mandatePaymentDetails": null,
+    "returnReason": null
+  },
+  "cardStatusChangeEvent": null,
+  "customerDetailsChangeEvent": null,
+  "cardAdditionToWalletEvent": null,
+  "reminderType": null,
+  "scheduledPaymentEvent": null,
+  "onboardingFailedEvent": null,
+  "directEntryEvent": null,
+  "mandateDuePaymentEvent": null,
+  "mandateEvent": null,
+  "mandatePaymentEvent": null,
+  "applePayRewardForCustomerEvent": null,
+  "cardExpiryReminderEvent": null,
+  "mandateActionExpirationEvent": null
+}
+```
+
+#### TRANSACTION (card) — scenario "3. Authorisation Reversal / Hold Decrease (partial/full)" — Settlement Webhook Sample `[docs:card-transactions]`
+
+```json
+{
+  "customerHayId": "d09010f7-62f8-4575-8544-836447fd701e ",
+  "idempotencyKey": "99f35464-8d9d-40ff-a844-b0faa6d731ab",
+  "type": "TRANSACTION",
+  "firebaseDeviceToken": null,
+  "actionOwner": null,
+  "cardHayId": null,
+  "accountStatusChangeEvent": null,
+  "customerStatusUpdatedEvent": null,
+  "transactionEvent": {
+  	"transactionHayId": "88614cd9-cedd-4595-a044-39ed95c05a12",
+		"holdHayId": "fba1cf60-116d-4704-b744-2e937796e3fa",
+    "accountHayId": "dae57032-4ad7-44e3-b8a4-c9f7dae4ea1b",
+    "currencyAmount": {
+      "currency": "AUD",
+      "amount": -4.50
+    },
+    "updatedBalance": {
+      "currency": "AUD",
+      "amount": 1.87
+    },
+    "isPending": false,
+    "outcome": "ACCEPTED",
+    "transactionTimeUtc": "2025-07-17T11:13:20.990107Z",
+    "cardPreferenceOutcome": null,
+    "cardProcessorResponse": null,
+    "transactionType": "CARD_TRANSACTION_SETTLED",
+    "cardUsageDetails": {
+      "isMagneticStripePayment": null,
+      "isContactless": null,
+      "isCardPresent": true,
+      "isMobileWalletPayment": true,
+      "isAtmWithdrawal": false
+    },
+    "isAtmTransaction": false,
+    "accountBalances": {
+      "totalBalance": {
+        "currency": "AUD",
+        "amount": 1.87
+      },
+      "heldBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "lockedBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "stacksBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "availableBalance": {
+        "currency": "AUD",
+        "amount": 1.87
+      }
+    },
+    "cardHayId": "88d88c60-c894-432a-95b4-cf907aec8d66",
+    "customerHayId": "d09010f7-62f8-4575-8544-836447fd701e",
+    "ruleDetails": null,
+    "counterpartDetails": null,
+    "originId": null,
+    "originType": null,
+    "counterpartName": "Coca-Cola Europacific Partners",
+    "merchantName": null,
+    "category": null,
+    "merchantId": "26185330",
+    "description": null,
+    "mandatePaymentDetails": null,
+    "returnReason": null
+  },
+  "cardStatusChangeEvent": null,
+  "customerDetailsChangeEvent": null,
+  "cardAdditionToWalletEvent": null,
+  "reminderType": null,
+  "scheduledPaymentEvent": null,
+  "onboardingFailedEvent": null,
+  "directEntryEvent": null,
+  "mandateDuePaymentEvent": null,
+  "mandateEvent": null,
+  "mandatePaymentEvent": null,
+  "applePayRewardForCustomerEvent": null,
+  "cardExpiryReminderEvent": null,
+  "mandateActionExpirationEvent": null
+}
+```
+
+#### TRANSACTION (card) — scenario "4. Refund" — Refund Transaction Webhook Sample `[docs:card-transactions]`
+
+```json
+{
+  "customerHayId": "dc15c3fb-4feb-49d4-a278-b8d5d7d93dcd",
+  "idempotencyKey": "fbec65cd-00cf-423e-9d78-da1c885dc911",
+  "type": "TRANSACTION",
+  "productId": "8aa68667-8009-b773-0178-09f41bf00124",
+  "transactionEvent": {
+    "transactionHayId": "63c86de3-9146-4377-a388-421d08697d19",
+    "accountHayId": "98032560-0e21-475b-b876-e8672becb8d8",
+    "currencyAmount": {
+      "currency": "AUD",
+      "amount": 5.99
+    },
+    "updatedBalance": {
+      "currency": "AUD",
+      "amount": 3305.99
+    },
+    "isPending": false,
+    "counterpartName": "IGA (Piedimonte\u0027s Fitzroy North)",
+    "outcome": "ACCEPTED",
+    "transactionTimeUtc": "2024-09-16T08:17:18.947713Z",
+    "isAtmTransaction": false,
+    "transactionType": "CARD_TRANSACTION_REFUND",
+    "cardUsageDetails": {
+      "isCardPresent": false,
+      "isMobileWalletPayment": false,
+      "isAtmWithdrawal": false
+    },
+    "accountBalances": {
+      "totalBalance": {
+        "currency": "AUD",
+        "amount": 5.99
+      },
+      "heldBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "lockedBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "stacksBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "availableBalance": {
+        "currency": "AUD",
+        "amount": 5.99
+      }
+    },
+    "cardHayId": "1ade4041-27f8-4e07-ab78-bbed3ae1e740",
+    "customerHayId": "dc15c3fb-4feb-49d4-a278-b8d5d7d93dcd",
+    "merchantId": "000009391315129"
+  }
+}
+```
+
+### 5.2 `TRANSACTION` — NPP / internal transfers
+
+#### TRANSACTION (NPP/internal) — `INTRABANK_TRANSFER_IN` `[docs:payments]`
+
+```json
+{
+  "customerHayId": "3f42ae09-3e37-41b5-996e-70de4b4bc8y4",
+  "idempotencyKey": "2c84111b-a568-3434-9cac-70de4b4bc8y4",
+  "type": "TRANSACTION",
+  "productId": "8aa68667-8009-b773-0180-70de4b4bc8y4",
+  "transactionEvent": {
+    "transactionHayId": "bdb22873-ebdf-3c82-a1a0-70de4b4bc8y4",
+    "accountHayId": "4d4f348e-5f9b-4c01-9a04-70de4b4bc8y4",
+    "currencyAmount": {
+      "currency": "AUD",
+      "amount": 2000.00
+    },
+    "updatedBalance": {
+      "currency": "AUD",
+      "amount": 3144.69
+    },
+    "isPending": false,
+    "counterpartName": "Andy",
+    "outcome": "ACCEPTED",
+    "transactionTimeUtc": "2024-06-12T07:16:41.370341Z",
+    "isAtmTransaction": false,
+    "transactionType": "INTRABANK_TRANSFER_IN",
+    "accountBalances": {
+      "totalBalance": {
+        "currency": "AUD",
+        "amount": 3144.69
+      },
+      "heldBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "lockedBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "stacksBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "availableBalance": {
+        "currency": "AUD",
+        "amount": 3144.69
+      }
+    },
+    "counterpartDetails": {
+      "name": "Andy"
+    },
+    "category": "SAVING",
+    "description": "description"
+  }
+}
+```
+
+#### TRANSACTION (NPP/internal) — `Original Transfer Sample Notification` `[docs:payments]`
+
+```json
+{
+    "customerHayId": "c1ce15ef-9ee0-41ed-a562-f7b59ad70acb",
+    "idempotencyKey": "e1e0dd2b-8f0a-44bf-bee1-6870b8bf2541",
+    "type": "TRANSACTION",
+    "firebaseDeviceToken": null,
+    "actionOwner": null,
+    "cardHayId": null,
+    "accountStatusChangeEvent": null,
+    "customerStatusUpdatedEvent": null,
+    "transactionEvent": {
+      "transactionHayId": "a1a0c9ef-76a9-40b9-8606-cecb0b29d736",
+      "accountHayId": "b1b1ce0d-1a05-4bbf-9af2-4c4aaa7474a3",
+      "currencyAmount": {
+        "currency": "AUD",
+        "amount": -212.38
+      },
+      "updatedBalance": {
+        "currency": "AUD",
+        "amount": 1067.61
+      },
+      "isPending": false,
+      "outcome": "ACCEPTED",
+      "transactionTimeUtc": "2024-06-12T07:16:41.370341Z",
+      "cardPreferenceOutcome": null,
+      "cardProcessorResponse": null,
+      "transactionType": "INTERBANK_TRANSFER_OUT",
+      "cardUsageDetails": null,
+      "isAtmTransaction": false,
+      "accountBalances": {
+        "totalBalance": {
+          "currency": "AUD",
+          "amount": 5182.41
+        },
+        "heldBalance": {
+          "currency": "AUD",
+          "amount": 4114.8
+        },
+        "lockedBalance": {
+          "currency": "AUD",
+          "amount": 0
+        },
+        "stacksBalance": {
+          "currency": "AUD",
+          "amount": 0
+        },
+        "availableBalance": {
+          "currency": "AUD",
+          "amount": 1067.61
+        },
+        "legacyAvailableBalance": {
+          "currency": "AUD",
+          "amount": 1067.61
+        }
+      },
+      "cardHayId": null,
+      "customerHayId": "c1ce15ef-9ee0-41ed-a562-f7b59ad70acb",
+      "ruleDetails": null,
+      "counterpartDetails": {
+        "name": "Romar Viduya",
+        "bpayDetails": null,
+        "basicAccountNumber": {
+          "accountNumber": "123441287",
+          "branchNumber": "111985"
+        }
+      },
+      "originId": null,
+      "originType": null,
+      "counterpartName": "Romar Viduya",
+      "merchantName": null,
+      "category": "Shaype POC",
+      "merchantId": null,
+      "relatedHoldHayId": null,
+      "description": "Romar",
+      "mandatePaymentDetails": null,
+      "returnReason": null
+    },
+    "cardStatusChangeEvent": null,
+    "customerDetailsChangeEvent": null,
+    "cardAdditionToWalletEvent": null,
+    "reminderType": null,
+    "scheduledPaymentEvent": null,
+    "onboardingFailedEvent": null,
+    "directEntryEvent": null,
+    "mandateDuePaymentEvent": null,
+    "mandateEvent": null,
+    "mandatePaymentEvent": null,
+    "applePayRewardForCustomerEvent": null,
+    "cardExpiryReminderEvent": null,
+    "mandateActionExpirationEvent": null
+}
+```
+
+#### TRANSACTION (NPP/internal) — `Return Transfer Sample Notification` `[docs:payments]`
+
+```json
+{
+    "customerHayId": "c1ce15ef-9ee0-41ed-a562-f7b59ad70acb",
+    "idempotencyKey": "f1f2d7e6-e398-4638-adf1-29b87013ad10",
+    "type": "TRANSACTION",
+    "firebaseDeviceToken": null,
+    "actionOwner": null,
+    "cardHayId": null,
+    "accountStatusChangeEvent": null,
+    "customerStatusUpdatedEvent": null,
+    "transactionEvent": {
+      "transactionHayId": "d1db4bea-650c-44db-b55e-b1473ccaaf99",
+      "accountHayId": "b1b1ce0d-1a05-4bbf-9af2-4c4aaa7474a3",
+      "currencyAmount": {
+        "currency": "AUD",
+        "amount": 212.38
+      },
+      "updatedBalance": {
+        "currency": "AUD",
+        "amount": 267.61
+      },
+      "isPending": false,
+      "outcome": "ACCEPTED",
+      "transactionTimeUtc": "2024-06-12T07:16:41.370341Z",
+      "cardPreferenceOutcome": null,
+      "cardProcessorResponse": null,
+      "transactionType": "INTERBANK_TRANSFER_OUT",
+      "cardUsageDetails": null,
+      "isAtmTransaction": false,
+      "accountBalances": {
+        "totalBalance": {
+          "currency": "AUD",
+          "amount": 267.61
+        },
+        "heldBalance": {
+          "currency": "AUD",
+          "amount": 0
+        },
+        "lockedBalance": {
+          "currency": "AUD",
+          "amount": 0
+        },
+        "stacksBalance": {
+          "currency": "AUD",
+          "amount": 0
+        },
+        "availableBalance": {
+          "currency": "AUD",
+          "amount": 267.61
+        },
+        "legacyAvailableBalance": {
+          "currency": "AUD",
+          "amount": 267.61
+        }
+      },
+      "cardHayId": null,
+      "customerHayId": null,
+      "ruleDetails": null,
+      "counterpartDetails": {
+        "name": "Romar Viduya",
+        "bpayDetails": null,
+        "basicAccountNumber": {
+          "accountNumber": "123441287",
+          "branchNumber": "111985"
+        }
+      },
+      "originId": null,
+      "originType": null,
+      "counterpartName": "Romar Viduya",
+      "merchantName": null,
+      "category": "BANK_TRANSFER",
+      "merchantId": null,
+      "relatedHoldHayId": null,
+      "description": "Romar",
+      "mandatePaymentDetails": null,
+      "returnReason": {
+        "code": "CUSTOMER_REQUEST",
+        "message": "Return of funds requested by end customer"
+      }
+    },
+    "cardStatusChangeEvent": null,
+    "customerDetailsChangeEvent": null,
+    "cardAdditionToWalletEvent": null,
+    "reminderType": null,
+    "scheduledPaymentEvent": null,
+    "onboardingFailedEvent": null,
+    "directEntryEvent": null,
+    "mandateDuePaymentEvent": null,
+    "mandateEvent": null,
+    "mandatePaymentEvent": null,
+    "applePayRewardForCustomerEvent": null,
+    "cardExpiryReminderEvent": null,
+    "mandateActionExpirationEvent": null
+  }
+```
+
+#### TRANSACTION (NPP/internal) — `INTERBANK_TRANSFER_IN` `[docs:payments]`
+
+```json
+{
+  "customerHayId": "61f3d1d3-78e1-4da4-ab8f-faa13546ab8f",
+  "idempotencyKey": "b98b9584-a296-40db-8a52-faa13546ab8f",
+  "type": "TRANSACTION",
+  "productId": "8aa686b7-7c36-e802-017c-faa13546ab8f",
+  "transactionEvent": {
+    "transactionHayId": "f416825e-17d0-4366-acba-faa13546ab8f",
+    "accountHayId": "0285c377-bdf8-461e-a885-faa13546ab8f",
+    "currencyAmount": {
+      "currency": "AUD",
+      "amount": 200.00
+    },
+    "updatedBalance": {
+      "currency": "AUD",
+      "amount": 62925.58
+    },
+    "isPending": false,
+    "counterpartName": "Andy",
+    "outcome": "ACCEPTED",
+    "transactionTimeUtc": "2024-06-12T07:21:54.220527Z",
+    "isAtmTransaction": false,
+    "transactionType": "INTERBANK_TRANSFER_IN",
+    "accountBalances": {
+      "totalBalance": {
+        "currency": "AUD",
+        "amount": 66049.69
+      },
+      "heldBalance": {
+        "currency": "AUD",
+        "amount": 3124.11
+      },
+      "lockedBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "stacksBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "availableBalance": {
+        "currency": "AUD",
+        "amount": 62925.58
+      }
+    },
+    "counterpartDetails": {
+      "name": "Andy"
+    },
+    "category": "BANK_TRANSFER",
+    "description": "withdrawal"
+  }
+}
+```
+
+#### TRANSACTION (NPP/internal) — `INTERBANK_TRANSFER_OUT` `[docs:payments]`
+
+```json
+{
+  "customerHayId": "58b86c08-d2b4-4f1d-a7fc-fcd1aeb6a7fc",
+  "idempotencyKey": "54b7383a-0b68-4757-9e96-fcd1aeb6a7fc",
+  "type": "TRANSACTION",
+  "firebaseDeviceToken": "eQwhRSuQkWk:APA91bE4E2fcd2mpB_CkHNukNSESigu3fK_vDaVqvzXu0K_1z_aHZPfGyD5IouQFhArUe_S0BIb5QYwnilRnTubAfO1Q_fcd1aeb6a7fc",
+  "productId": "8aa686b7-7c36-e802-017c-fcd1aeb6a7fc",
+  "transactionEvent": {
+    "transactionHayId": "90f90c57-a85e-4a2f-b444-fcd1aeb6a7fc",
+    "accountHayId": "9ea48b15-474c-4276-bf90-fcd1aeb6a7fc",
+    "currencyAmount": {
+      "currency": "AUD",
+      "amount": -0.01
+    },
+    "updatedBalance": {
+      "currency": "AUD",
+      "amount": 9568.52
+    },
+    "isPending": false,
+    "counterpartName": "Andy",
+    "outcome": "ACCEPTED",
+    "transactionTimeUtc": "2024-06-12T07:31:58.77028Z",
+    "isAtmTransaction": false,
+    "transactionType": "INTERBANK_TRANSFER_OUT",
+    "accountBalances": {
+      "totalBalance": {
+        "currency": "AUD",
+        "amount": 9568.52
+      },
+      "heldBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "lockedBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "stacksBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "availableBalance": {
+        "currency": "AUD",
+        "amount": 9568.52
+      }
+    },
+    "customerHayId": "58b86c08-d2b4-4f1d-a7fc-fcd1aeb6a7fc",
+    "counterpartDetails": {
+      "name": "Andy",
+      "basicAccountNumber": {
+        "accountNumber": "12345000",
+        "branchNumber": "518900"
+      }
+    },
+    "category": "BANK_TRANSFER",
+    "description": "Trip expenses"
+  }
+}
+```
+
+### 5.3 `TRANSACTION` — Direct Entry / Direct Debit, and `DIRECT_ENTRY`
+
+#### TRANSACTION (Direct Debit) — `DIRECT_DEBIT_TRANSFER` `[docs:direct-debits]`
+
+```json
+{
+  "customerHayId": "46db5ab0-8ee2-4cb9-b059-68a75b23b059",
+  "idempotencyKey": "8183131d-021b-49ae-a032-68a75b23b059",
+  "type": "TRANSACTION",
+  "productId": "8aa6879a-74d5-37a5-0174-68a75b23b059",
+  "transactionEvent": {
+    "transactionHayId": "fd7a2acb-f906-415d-9378-68a75b23b059",
+    "accountHayId": "ac364762-56bd-41a2-a966-68a75b23b059",
+    "currencyAmount": {
+      "currency": "AUD",
+      "amount": -457.12
+    },
+    "updatedBalance": {
+      "currency": "AUD",
+      "amount": 3197.26
+    },
+    "isPending": false,
+    "counterpartName": "Andy",
+    "outcome": "ACCEPTED",
+    "transactionTimeUtc": "2024-06-21T12:21:54.689834Z",
+    "isAtmTransaction": false,
+    "transactionType": "DIRECT_DEBIT_TRANSFER",
+    "accountBalances": {
+      "totalBalance": {
+        "currency": "AUD",
+        "amount": 3197.26
+      },
+      "heldBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "lockedBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "stacksBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "availableBalance": {
+        "currency": "AUD",
+        "amount": 3197.26
+      }
+    },
+    "customerHayId": "46db5ab0-8ee2-4cb9-b059-68a75b23b059",
+    "counterpartDetails": {
+      "name": "Andy"
+    },
+    "category": "BANK_TRANSFER",
+    "description": "Thanks for lunch"
+  }
+}
+```
+
+#### `DIRECT_ENTRY` — `status: COMPLETE` `[docs:direct-debits]`
+
+```json
+{
+  "customerHayId": "000d8874-f9c4-455e-b565-6d439fdd55ad",
+  "idempotencyKey": "5fcae09b-b2f1-3d6f-a60c-c02b8c842083",
+  "type": "DIRECT_ENTRY",
+  "directEntryEvent": {
+    "transactionId": "7a70baa7-a4d4-4359-8cae-37e7bf971342",
+    "type": "DEBIT",
+    "direction": "OUTBOUND",
+    "status": "COMPLETE"
+  }
+}
+```
+
+### 5.4 `TRANSACTION` — BPAY
+
+#### TRANSACTION (BPAY) — `BPAY_TRANSFER_OUT` `[docs:bpay]`
+
+```json
+{
+  "customerHayId": "63d24ae0-d497-485e-800a-ad141542d23r",
+  "idempotencyKey": "f2f7076f-6fb1-46e1-9730-369a86f3234e",
+  "type": "TRANSACTION",
+  "productId": "8aa68646-77a4-8411-0177-a4dabc5d03d1",
+  "transactionEvent": {
+    "transactionHayId": "d3daec8e-6044-4c60-b233-ad141542d23r",
+    "accountHayId": "150960b2-d042-4b63-abaa-ad141542d23r",
+    "currencyAmount": {
+      "currency": "AUD",
+      "amount": -20.00
+    },
+    "updatedBalance": {
+      "currency": "AUD",
+      "amount": 151087.66
+    },
+    "isPending": false,
+    "counterpartName": "TestGQL",
+    "outcome": "ACCEPTED",
+    "transactionTimeUtc": "2024-06-21T03:03:16.354179Z",
+    "isAtmTransaction": false,
+    "transactionType": "BPAY_TRANSFER_OUT",
+    "accountBalances": {
+      "totalBalance": {
+        "currency": "AUD",
+        "amount": 151087.66
+      },
+      "heldBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "lockedBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "stacksBalance": {
+        "currency": "AUD",
+        "amount": 0
+      },
+      "availableBalance": {
+        "currency": "AUD",
+        "amount": 151087.66
+      }
+    },
+    "customerHayId": "63d24ae0-d497-485e-800a-ad141542d23r",
+    "counterpartDetails": {
+      "name": "TestGQL",
+      "bpayDetails": {
+        "billerCode": "93880",
+        "billerReference": "271682361223",
+        "billerName": "iiNet",
+        "billerImage": "https://images.lookwhoscharging.com/8d9595b6-812e-4e32-8a58-fedbe856b2f2/iinet-ci-image.png"
+      }
+    },
+    "category": "Category",
+    "description": "test BPAY TRANSFER BA AU PAYEE"
+  }
+}
+```
+
+### 5.5 Customer / account lifecycle events
+
+#### `ONBOARDING_PASSED` `[docs:customer-creation-1]`
+
+```json
+{
+  "customerHayId": "42f5b631-edd5-00f0-9f17-cd17da0ca0d9",
+  "idempotencyKey": "42f5b631-edd5-00f0-9f17-cd17da0ca0d9",
+  "type": "ONBOARDING_PASSED",
+  "firebaseDeviceToken": "fD3ZhPHr3UxGsi81Xc_zGt:APA91bFuuqvv4pUJ39sXE79RJK3kBvgYwUmfH2E9F9wUdlgurBkvWNyxv8vsLL93RCKKyyaZ9i4hk5rM1oxgCvTH6rtOozmoAge0_VPdJg32eNVHvdfZlKpAUhsaPKtV3JfriZsdf234sd"
+}
+```
+
+#### `ONBOARDING_FAILED` `[docs:customer-creation-1]`
+
+```json
+{
+  "customerHayId": "c1c476dd-6c1a-23dd-8e4f-a4229f9563bf",
+  "idempotencyKey": "3971e549-a178-23dd-9d76-737328a6ce40",
+  "type": "ONBOARDING_FAILED",
+  "firebaseDeviceToken": "dbRQCIhFLEsIn3_SSDE8r9:APA91bHTpCuhS6sjHG6uRMnP_tn7mOmy0QebEprYDQPVoJf7oXspxhagt9Ai1OuDqZHssU7BMk-sxII85WcFoxqruW8NXCykwvPzyjTh9UiYbKYdUdS6tg-TPsaPuAeQGQblasdd32sdfsZ",
+  "onboardingFailedEvent": {
+    "state": "KYC_AML_SCAN",
+    "isSubmissionFailure": true
+  }
+}
+```
+
+#### `CUSTOMER_STATUS_UPDATED` `[docs:customer-creation-1]`
+
+```json
+{
+  "customerHayId": "74b7aaa9-dwe3-4a09-a618-f1bd405c3ead",
+  "idempotencyKey": "f7ec6a11-df3t-4eff-a5d9-31e948e8210f",
+  "type": "CUSTOMER_STATUS_UPDATED",
+  "actionOwner": "CLIENT",
+  "customerStatusUpdatedEvent": {
+    "customerStatus": "ACTIVE"
+  }
+}
+```
+
+#### `ACCOUNT_STATUS_CHANGE` `[docs:customer-creation-1]`
+
+```json
+{
+  "customerHayId": "0964ac36-a1dd-8dj8-b0a1-f01eca1941b4",
+  "idempotencyKey": "ff1531ca-d069-6537-bede-95db70c12a91",
+  "type": "ACCOUNT_STATUS_CHANGE",
+  "actionOwner": "PLATFORM",
+  "accountStatusChangeEvent": {
+    "accountHayId": "92000f75-11f6-4ec1-h892-6a98591ab95f",
+    "accountStatus": "APPROVED"
+  }
+}
+```
+
+### 5.6 Apple / Google Pay reminders, `CARD_ADDED_TO_WALLET`, `APPLE_PAY_REWARD_FOR_CUSTOMER`
+
+Note: several reminder blocks on the docs page start with a prose line inside the code fence; it is reproduced as-is. Blocks with `emailAddress`/`customerDetails` are `EmailDto`-shaped (see §2.5).
+
+#### REMINDER / wallet — `APPLE_PAY_ADD_TO_WALLET_REMINDER_30_DAYS` `[docs:apple-and-google-pay-notifications]`
+
+```json
+{
+  "customerHayId": "e35176d6-0d18-4d0d-bfde-186583ef5s23",
+  "idempotencyKey": "43ff14b2-2f0a-4409-a821-bb823d92cs34",
+  "type": "REMINDER",
+  "cardHayId": "8d382435-3fba-4edb-807b-1f0389698765",
+  "reminderType": "APPLE_PAY_ADD_TO_WALLET_REMINDER_30_DAYS"
+}
+```
+
+#### REMINDER / wallet — `APPLE_PAY_ADD_TO_WALLET_REMINDER_60_DAYS` `[docs:apple-and-google-pay-notifications]`
+
+```json
+{
+  "customerHayId": "e98a0fa5-df8f-4b5a-b365-186583ef5s23",
+  "idempotencyKey": "01b58dc2-7590-43ea-9b8e-bb823d92cs34",
+  "type": "REMINDER",
+  "cardHayId": "e2a4f618-d452-4fe9-ae5e-1f0389698765",
+  "reminderType": "APPLE_PAY_ADD_TO_WALLET_REMINDER_60_DAYS"
+}
+```
+
+#### REMINDER / wallet — `APPLE_PAY_ADD_TO_WALLET_REMINDER_90_DAYS` `[docs:apple-and-google-pay-notifications]`
+
+```json
+{
+  "customerHayId": "0349ee9d-771d-4f54-a2c1-186583ef5s23",
+  "idempotencyKey": "67e54ae5-aac8-469d-be35-bb823d92cs34",
+  "type": "REMINDER",
+  "cardHayId": "38323d18-c472-45da-8456-1f0389698765",
+  "reminderType": "APPLE_PAY_ADD_TO_WALLET_REMINDER_90_DAYS"
+}
+```
+
+#### REMINDER / wallet — `APPLE_PAY_REMINDER_24_HRS` `[docs:apple-and-google-pay-notifications]`
+
+```json
+Within 24 hours of customer onboarding, Apple Pay provisioning has begun but
+has not yet been completed.
+
+{
+  "idempotencyKey": "bd84afb3-80de-456b-909e-186583ef5s23",
+  "emailAddress": "abc@xx.com",
+  "type": "REMINDER",
+  "customerDetails": {
+    "customerHayId": "f064f06a-e5bb-4b0c-8318-186583ef5s23",
+    "firstName": "Andyfirstname",
+    "lastName": "Andylastname",
+    "preferredName": "Andy"
+  },
+  "cardHayId": "3057cd4f-45cf-48ba-af7f-186583ef5s23",
+  "reminderType": "APPLE_PAY_REMINDER_24_HRS"
+}
+```
+
+#### REMINDER / wallet — `APPLE_PAY_REMINDER_7_DAYS` `[docs:apple-and-google-pay-notifications]`
+
+```json
+Within 7 days of provisioning commencing, but it still has not been completed.
+Only triggered on first attempt of partial provisioning attempt
+
+{
+  "idempotencyKey": "4bf4bca6-67c3-450e-82b3-bb823d92cs34",
+  "emailAddress": "abc@xx.com.au",
+  "type": "REMINDER",
+  "customerDetails": {
+    "customerHayId": "3f11e4df-fcf1-484a-918a-186583ef5s23",
+    "firstName": "Andy firstname",
+    "lastName": "Andy lastname",
+    "preferredName": "Andy"
+  },
+  "reminderType": "APPLE_PAY_REMINDER_7_DAYS"
+}
+```
+
+#### REMINDER / wallet — `GOOGLE_PAY_24_HRS_PARTIAL_PROVISIONING` `[docs:apple-and-google-pay-notifications]`
+
+```json
+Within 24 hours of customer onboarding, Google Pay provisioning 
+has begun but has not yet been completed.
+
+{
+  "idempotencyKey": "ed004e8a-522b-4899-910e-49c74bea1976",
+  "emailAddress": "abc@xx.com.au",
+  "type": "REMINDER",
+  "customerDetails": {
+    "customerHayId": "9528f731-8447-433c-936b-9940d7d3121b",
+    "firstName": "Andyfirstname",
+    "lastName": "Andylastname",
+    "preferredName": "Andy"
+  },
+  "cardHayId": "4893794b-37a6-4234-8b35-9940d7d3121b",
+  "reminderType": "GOOGLE_PAY_24_HRS_PARTIAL_PROVISIONING"
+}
+```
+
+#### REMINDER / wallet — `GOOGLE_PAY_7_DAYS_PARTIAL_PROVISIONING` `[docs:apple-and-google-pay-notifications]`
+
+```json
+Within 7 days of provisioning commencing, but it still has not been completed.
+Only triggered on first attempt of partial provisioning attempt
+
+{
+  "idempotencyKey": "a7052ab2-82d6-42a4-beff-9940d7d3121b",
+  "emailAddress": "abc@xx.com.au",
+  "type": "REMINDER",
+  "customerDetails": {
+    "customerHayId": "81926133-2621-48cc-9ad7-9940d7d3121b",
+    "firstName": "Andyfirstname",
+    "lastName": "Andylastname",
+    "preferredName": "Andy"
+  },
+  "cardHayId": "d852865b-6f76-49d3-968f-9940d7d3121b",
+  "reminderType": "GOOGLE_PAY_7_DAYS_PARTIAL_PROVISIONING"
+}
+```
+
+#### REMINDER / wallet — `CARD_ADDED_TO_WALLET` `[docs:apple-and-google-pay-notifications]`
+
+```json
+Triggered immediately after card added to wallet
+
+{  
+  "customerHayId": "e818093c-4bd6-4dbc-b054-66318a55a587",  
+  "idempotencyKey": "7ed153c1-e1f9-4305-a92c-0b30e1c56b20",  
+  "type": "CARD_ADDED_TO_WALLET",  
+  "cardAdditionToWalletEvent": {  
+    "cardHayId": "b91826b8-78f2-4d36-bfb4-a4139cee591e",  
+    "cardLastFourDigits": "7927",  
+    "walletType": "APPLE_WALLET"  
+  }  
+}
+```
+
+#### REMINDER / wallet — `APPLE_PAY_SPEND_REMINDER_7_DAYS` `[docs:apple-and-google-pay-notifications]`
+
+```json
+Within the 7 days of provisioning Apple Pay, but no transactions have been made 
+using Apple Pay. Awareness of being able to use contactless payments with Apple Pay.
+
+{
+  "customerHayId": "203d1dda-5665-440a-a757-186583ef5s23",
+  "idempotencyKey": "bf3506c2-3781-44b8-8304-186583ef5s23",
+  "type": "REMINDER",
+  "reminderType": "APPLE_PAY_SPEND_REMINDER_7_DAYS"
+}
+```
+
+#### REMINDER / wallet — `APPLE_PAY_SPEND_REMINDER_14_DAYS` `[docs:apple-and-google-pay-notifications]`
+
+```json
+Within the 14 days of provisioning Apple Pay, but no transactions have been made using Apple Pay.
+
+{
+  "customerHayId": "203d1dda-5665-440a-a757-bb823d92cs34",
+  "idempotencyKey": "84f96abf-2ea5-4eea-bd63-186583ef5s23",
+  "type": "REMINDER",
+  "reminderType": "APPLE_PAY_SPEND_REMINDER_14_DAYS"
+}
+```
+
+#### REMINDER / wallet — `GOOGLE_PAY_7_DAYS_SPEND_REMINDER` `[docs:apple-and-google-pay-notifications]`
+
+```json
+Within the 7 days of provisioning Google Pay, but no transactions have been made 
+using Google Pay. Awareness of being able to use contactless payments with Google Pay.
+
+{
+  "idempotencyKey": "8b52b805-0524-4d75-98e3-9940d7d3121b",
+  "emailAddress": "abc@xx.com.au",
+  "type": "REMINDER",
+  "customerDetails": {
+    "customerHayId": "401f8748-fa16-4642-9a6f-9940d7d3121b",
+    "firstName": "Andyfirstname",
+    "lastName": "Andylastname",
+    "preferredName": "Andy"
+  },
+  "cardHayId": "231f83c5-f77b-4e3d-8845-9940d7d3121b",
+  "reminderType": "GOOGLE_PAY_7_DAYS_SPEND_REMINDER"
+}
+```
+
+#### REMINDER / wallet — `GOOGLE_PAY_14_DAYS_SPEND_REMINDER` `[docs:apple-and-google-pay-notifications]`
+
+```json
+Within the 14 days of provisioning Google Pay, but no transactions have been made using Google Pay.
+
+{
+  "idempotencyKey": "c8884b45-bf2b-45bc-9ff5-9940d7d3121b",
+  "emailAddress": "abc@xx.com.au",
+  "type": "REMINDER",
+  "customerDetails": {
+    "customerHayId": "a6fefd05-c76f-4da8-81e5-9940d7d3121b",
+    "firstName": "Andyfirstname",
+    "lastName": "Andylastname",
+    "preferredName": "Andy"
+  },
+  "cardHayId": "0000f60a-4cfa-451e-ae82-9940d7d3121b",
+  "reminderType": "GOOGLE_PAY_14_DAYS_SPEND_REMINDER"
+}
+```
+
+#### APPLE_PAY_REWARD_FOR_CUSTOMER — `APPLE_PAY_REWARD_FOR_CUSTOMER` `[docs:apple-reward-transactions]`
+
+```json
+{
+  "customerHayId": "203d1dda-5665-440a-a757-102519fb0da8",
+  "idempotencyKey": "bf3506c2-3781-44b8-8304-e1cc89e10ad2",
+  "type": "APPLE_PAY_REWARD_FOR_CUSTOMER",
+  "applePayRewardForCustomerEvent": {
+    "accountId": "b91826b8-78f2-4d36-bfb4-a4139cee591e",
+    "cardId": "bac20509-f094-470d-a65f-794b58e88f37"
+  }
+}
+```
+### 5.7 Event types with **no example anywhere** in spec or docs
+
+The following have no sample payload in `notification-webhooks.json` (which has zero `example`/`examples` entries apart from `ValidityDto.unit`/`quantity` and `MandatePaymentEventDto.reasonCode: "AB01"`) nor on any fetched docs page: `CARD_STATUS_CHANGE`, `CUSTOMER_DETAILS_CHANGE`, `SCHEDULED_PAYMENT`, `MANDATE`, `MANDATE_DUE_PAYMENT`, `MANDATE_PAYMENT`, `MANDATE_ACTION_EXPIRATION`, `DELEGATED_OTP_NOTIFICATION`, the `CARD_EXPIRY_*` / `REMINDER_TO_*` reminders, and both v1 events `BATCH_COMPLETED`, `PERK_ORDER_UPDATE`.
+
+The skeletons below are **[inferred]**: field names and enum values are verbatim from the spec DTOs (§2), the *values* are placeholders, and the choice of which envelope fields to populate follows the pattern of the real samples above. They are what the local mock should emit unless Shaype provides real samples.
+
+```json CARD_STATUS_CHANGE [inferred skeleton]
+{
+  "customerHayId": "<uuid>",
+  "idempotencyKey": "<uuid>",
+  "type": "CARD_STATUS_CHANGE",
+  "actionOwner": "CLIENT",
+  "cardHayId": "<uuid>",
+  "cardStatusChangeEvent": {
+    "cardHayId": "<uuid>",
+    "accountHayId": "<uuid>",
+    "cardStatus": "BLOCKED",
+    "cardLastFourDigits": "7927"
+  }
+}
+```
+
+```json CUSTOMER_DETAILS_CHANGE [inferred skeleton]
+{
+  "customerHayId": "<uuid>",
+  "idempotencyKey": "<uuid>",
+  "type": "CUSTOMER_DETAILS_CHANGE",
+  "actionOwner": "CLIENT",
+  "customerDetailsChangeEvent": {
+    "phoneNumberChanged": false,
+    "customerNameChanged": true,
+    "emailAddressChanged": false,
+    "addressChanged": false
+  }
+}
+```
+
+```json SCHEDULED_PAYMENT [inferred skeleton]
+{
+  "customerHayId": "<uuid>",
+  "idempotencyKey": "<uuid>",
+  "type": "SCHEDULED_PAYMENT",
+  "scheduledPaymentEvent": { "hayId": "<uuid>" }
+}
+```
+
+```json MANDATE [inferred skeleton — property name per spec is mandateEventDto; docs null-lists show mandateEvent, see §6 Q1]
+{
+  "customerHayId": "<uuid>",
+  "idempotencyKey": "<uuid>",
+  "type": "MANDATE",
+  "mandateEventDto": {
+    "mandateId": "<uuid>",
+    "actionId": "<uuid>",
+    "description": "Mandate create confirmed",
+    "trigger": "MCRC"
+  }
+}
+```
+
+```json MANDATE_PAYMENT [inferred skeleton]
+{
+  "customerHayId": "<uuid>",
+  "idempotencyKey": "<uuid>",
+  "type": "MANDATE_PAYMENT",
+  "mandatePaymentEventDto": {
+    "instructionId": "<string>",
+    "mandateId": "<uuid>",
+    "paymentStatus": "MANDATE_PAYMENT_ACCEPTED",
+    "reasonCode": null,
+    "transactionHayId": "<uuid>",
+    "isFinal": true,
+    "originId": "<uuid>",
+    "originType": "MANDATE_PAYMENT"
+  }
+}
+```
+
+```json MANDATE_DUE_PAYMENT [inferred skeleton]
+{
+  "customerHayId": "<uuid>",
+  "idempotencyKey": "<uuid>",
+  "type": "MANDATE_DUE_PAYMENT",
+  "mandateDuePaymentEventDto": {
+    "mandateId": "<uuid>",
+    "notificationId": "<uuid>",
+    "paymentDateTimeUtc": "2026-09-24T00:00:00Z"
+  }
+}
+```
+
+```json MANDATE_ACTION_EXPIRATION [inferred skeleton]
+{
+  "customerHayId": "<uuid>",
+  "idempotencyKey": "<uuid>",
+  "type": "MANDATE_ACTION_EXPIRATION",
+  "mandateActionExpirationEvent": {
+    "mandateId": "<uuid>",
+    "actionId": "<uuid>",
+    "resolutionRequestedByDateTimeUtc": "2026-09-30T00:00:00Z"
+  }
+}
+```
+
+```json DELEGATED_OTP_NOTIFICATION [inferred skeleton]
+{
+  "customerHayId": "<uuid>",
+  "idempotencyKey": "<uuid>",
+  "type": "DELEGATED_OTP_NOTIFICATION",
+  "cardHayId": "<uuid>",
+  "delegatedOtpNotificationEvent": {
+    "cardId": "<uuid>",
+    "accountId": "<uuid>",
+    "merchantInfo": {
+      "acquirerId": "<string>", "merchantId": "<string>", "merchantName": "<string>", "merchantUrl": "<string>",
+      "merchantCategoryCode": "<string>", "merchantCountryCode": "<string>", "merchantAppRedirectUrl": "<string>"
+    },
+    "transactionInfo": {
+      "transactionTimeStamp": "<string>", "transactionAmount": 1234, "transactionCurrency": "AUD", "transactionExponent": 2
+    },
+    "passcode": "123456"
+  }
+}
+```
+
+```json REMINDER (card expiry) [inferred skeleton]
+{
+  "customerHayId": "<uuid>",
+  "idempotencyKey": "<uuid>",
+  "type": "REMINDER",
+  "cardHayId": "<uuid>",
+  "reminderType": "CARD_EXPIRY_2_WEEK_REMINDER",
+  "cardExpiryReminderEvent": { "cardId": "<uuid>", "expirationMonth": 10, "expirationYear": 2026 }
+}
+```
+
+```json BATCH_COMPLETED (v1, POST /api/hay/v1/communications/notification) [inferred skeleton]
+{
+  "idempotencyKey": "<uuid>",
+  "type": "BATCH_COMPLETED",
+  "createdTimeUtc": "2026-09-24T01:02:03Z",
+  "actionOwner": "PLATFORM",
+  "eventDetails": {
+    "eventType": "BATCH_COMPLETED",
+    "batchId": "<uuid>",
+    "batchType": "ACCOUNT_TRANSFER",
+    "receivedAtUtc": "2026-09-24T01:00:00Z",
+    "finishedAtUtc": "2026-09-24T01:02:03Z",
+    "status": "COMPLETED",
+    "itemStatistics": { "pending": 0, "success": 8, "error": 1, "failed": 1 }
+  }
+}
+```
+
+```json PERK_ORDER_UPDATE (v1) [inferred skeleton]
+{
+  "idempotencyKey": "<uuid>",
+  "type": "PERK_ORDER_UPDATE",
+  "createdTimeUtc": "2026-09-24T01:02:03Z",
+  "actionOwner": "PLATFORM",
+  "eventDetails": {
+    "eventType": "PERK_ORDER_UPDATE",
+    "orderExternalId": "<uuid>",
+    "status": "COMPLETED",
+    "pinCode": "<string>",
+    "pinSerial": "<string>",
+    "confirmedTimeUtc": "2026-09-24T01:02:03Z",
+    "redemption": { "usageInfo": ["<string>"], "terms": "<markdown>", "validity": { "unit": "DAY", "quantity": 365 } }
+  }
+}
+```
+
+(`batchType: "ACCOUNT_TRANSFER"` is the only batch type named in `[docs:batch-api]`; the spec leaves `batchType` as a free string.)
+
+---
+
+## 6. Open questions (things the sources do not settle)
+
+| # | question | evidence | impact on local mock |
+|---|---|---|---|
+| Q1 | **Property names for the three mandate payloads**: spec says `mandateEventDto`, `mandateDuePaymentEventDto`, `mandatePaymentEventDto`; every real v0 sample's null-list shows `mandateEvent`, `mandateDuePaymentEvent`, `mandatePaymentEvent` `[docs:card-transactions]` `[docs:payments]`. Which key does production actually send? | spec vs 7 docs samples | Emit the spec names by default; make it switchable; SUT parsers should accept both. |
+| Q2 | **Blocked account status value**: `AccountStatusChangeEventDto.accountStatus` enum has `BLOCKED` (and `DORMANT`, `PENDING_APPROVAL`) but no `LOCKED`; B2B `HayAccount.status` and `[docs:account-status]` use `LOCKED` (no `BLOCKED`). What does `blockAccount` actually emit? | spec vs spec:b2b vs docs | Pick `BLOCKED` for the webhook (spec) while the account resource reports `LOCKED`; flag in tests. |
+| Q3 | `ONBOARDING_FAILED` sample uses `isSubmissionFailure`; spec property is `submissionFailure` (boolean, no description). Which is real? What does it mean? | [docs:customer-creation-1] vs spec | Emit `submissionFailure`; note both. |
+| Q4 | Undocumented fields in samples: `relatedHoldHayId` (null) and `accountBalances.legacyAvailableBalance` `[docs:payments]`; envelope `productId` present in most but not all TRANSACTION samples. Are they part of the contract? | docs samples only | Do not rely on them; optionally emit `productId`. |
+| Q5 | Which endpoint receives the Apple/Google **reminder** notifications? Half the samples are `EmailDto`-shaped (`emailAddress`, `customerDetails`), half `NotificationDto`-shaped; the page never names the endpoint. | [docs:apple-and-google-pay-notifications] | Deliver the `NotificationDto`-shaped ones to `/notification`; treat `EmailDto`-shaped ones as `/email` traffic (Accelerator only). |
+| Q6 | **Authentication of webhook calls**: no scheme in spec; docs say it is arranged with the Client Integration Team; retry on 401/403 implies *some* credential is sent. Is it the `Shaype-Signature`/`Shaype-Key-Id`/`Shaype-Timestamp` header set from the external-authorisation API, a static bearer/basic header, mTLS, or IP allow-listing? | [spec] [docs:webhook-notification] [spec:ext-auth] | Make headers configurable (none by default; optional static header; optional HMAC with the ext-auth header names). |
+| Q7 | `[docs:payments]` INTRABANK_TRANSFER_OUT section: its two samples carry `"transactionType": "INTERBANK_TRANSFER_OUT"` and a BSB counterpart (the "Original"/"Return" pair) — copy-paste error, or does an internal transfer to another Shaype account really surface as INTERBANK? Also: does the internal sender get `INTRABANK_TRANSFER_OUT` and the recipient `INTRABANK_TRANSFER_IN` (implied by "both the sender and receiver will receive a webhook")? | docs inconsistency | Emit `INTRABANK_TRANSFER_OUT`/`_IN` for Shaype-to-Shaype; `INTERBANK_*` for external. |
+| Q8 | Where do Visa OCT (original credit) events land — `transactionType: ORIGINAL_CREDIT` (spec enum) or `CARD_TRANSACTION_REFUND` (ext-auth docs list "OCT" under refund)? | [spec] vs [docs:external-authorisation-and-balance] | Low priority; default to `CARD_TRANSACTION_REFUND`, `isPending:false`. |
+| Q9 | For a declined card authorisation: is a `TRANSACTION` webhook always emitted (with `outcome` ≠ `ACCEPTED`), and how do the staging `declineReason` values map to `outcome` / `cardProcessorResponse` / `cardPreferenceOutcome`? `[docs:accounts-overview]` confirms a webhook for `REFUSED_RULES`; `[docs:card-transactions]` says the outcome is sent "along with" transaction details. | partial | Emit on decline too, `isPending:false`, `updatedBalance` unchanged `[inferred]`. |
+| Q10 | Exact exponential-backoff schedule for the 18 retries / 48h, and what happens after exhaustion (dead-letter, manual replay, alert)? | [docs:webhook-notification] gives only totals | Mock: configurable retry (default e.g. 18 attempts, capped backoff) + a dead-letter list inspectable by tests. |
+| Q11 | Is there a client-response **timeout** for webhook delivery? (Ext-auth says "strict synchronous response timeout" without a value; nothing for webhooks.) | none | Mock: configurable, default 10 s. |
+| Q12 | **Ordering / concurrency**: any per-customer or per-account ordering guarantee? Are hold and settlement guaranteed in order? | none | Mock: sequential per-destination queue; tests must tolerate reordering. |
+| Q13 | Does `ACCOUNT_STATUS_CHANGE` fire for every transition listed in `[docs:account-status]` (incl. `APPROVED → ACTIVE` on first transaction and `ACTIVE ↔ ACTIVE_IN_ARREARS`), and does `CARD_STATUS_CHANGE` fire for every card op (activate/block/unblock/cancel/reissue/renew/convert/create)? Only `closeAccount → Card Status Change` and the `createAccount → APPROVED` sample are documented. | [docs:account-closure] [docs:customer-creation-1] | Mock: fire on every transition (superset); document it. |
+| Q14 | Who receives `CUSTOMER_STATUS_UPDATED` when onboarding resolves (`PENDING_APPROVAL → ACTIVE/REFERRED/REJECTED`) — is it emitted in addition to `ONBOARDING_PASSED`/`ONBOARDING_FAILED`? | none | Mock: emit both `[inferred]`. |
+| Q15 | `MANDATE_DUE_PAYMENT`, `MANDATE_ACTION_EXPIRATION`, `DELEGATED_OTP_NOTIFICATION`, `SCHEDULED_PAYMENT`, `PERK_ORDER_UPDATE`, `REMINDER_TO_*`, `APPLE_PAY_*_REWARD` reminder types, `HAY_TOP_UP`, `REWARD`, `CONVERSION_IN/OUT`: spec-only, no docs, no samples — semantics and triggers unknown. | [spec] | Implement from spec shapes; mark as low-confidence in the mock's docs. |
+| Q16 | `NotificationDtoV1.type` description lists only `BATCH_COMPLETED` while the enum also has `PERK_ORDER_UPDATE`; `createdTimeUtc` is described as "Resolution requested by date and time" (copy-paste from the mandate DTO?). Is `createdTimeUtc` the emission time? | [spec] | Treat as emission time `[inferred]`. |
+| Q17 | Are the "compact" (nulls omitted) and "full" (all keys, nulls explicit) serialisations both current, or is the compact form from an older platform version? | docs samples of different vintages | SUT must accept both; mock emits compact by default. |
+| Q18 | `CurrencyAmount.amount` is documented as "to 2 decimal places" but samples show `0.5000` and integer `5066` — is the wire type always a JSON number? Any big-decimal string variant? | [spec] vs samples | Emit JSON numbers with 2 dp. |
+| Q19 | Reminder scheduling for `REMINDER` events and the Apple reward: are these enabled per client (docs say the reward is "client configurable")? Are reminders also delivered on `/notification` for non-Accelerator clients? | [docs:apple-reward-transactions] | Mock: feature-flag reminders/rewards off by default. |
+
+---
+
+## Appendix A — `CurrencyAmount.currency` enum (162 values, verbatim) `[spec]`
+
+`jq -c '.components.schemas.CurrencyAmount.properties.currency.enum' notification-webhooks.json`:
+
+```
+["AED","AFN","ALL","AMD","ANG","AOA","ARS","AUD","AWG","AZN","BAM","BBD","BDT","BGN","BHD","BIF","BMD","BND","BOB","BOV","BRL","BSD","BTN","BWP","BYN","BZD","CAD","CDF","CHF","CLP","CNH","CNY","COP","CRC","CUC","CUP","CVE","CZK","DJF","DKK","DOP","DZD","EGP","ERN","ETB","EUR","FJD","FKP","GBP","GEL","GHS","GIP","GMD","GNF","GTQ","GYD","HKD","HNL","HRK","HTG","HUF","IDR","ILS","INR","IQD","IRR","ISK","JMD","JOD","JPY","KES","KGS","KHR","KMF","KPW","KRW","KWD","KYD","KZT","LAK","LBP","LKR","LRD","LSL","LYD","MAD","MDL","MGA","MKD","MMK","MNT","MOP","MRU","MUR","MVR","MWK","MXN","MYR","MZN","NAD","NGN","NIO","NOK","NPR","NZD","OMR","PAB","PEN","PGK","PHP","PKR","PLN","PYG","QAR","RON","RSD","RUB","RWF","SAR","SBD","SCR","SDG","SEK","SGD","SHP","SLE","SLL","SOS","SRD","SSP","STN","SVC","SYP","SZL","THB","TJS","TMT","TND","TOP","TRY","TTD","TWD","TZS","UAH","UGX","USD","UYU","UZS","VES","VND","VUV","WST","XAF","XCD","XCG","XOF","XPF","YER","ZAR","ZMW","ZWG","ZWL"]
+```
+
+## Appendix B — jq one-liners used for this map
+
+```
+J=notification-webhooks.json
+jq -r '.components.schemas | keys[]' $J                                   # 45 schemas
+jq -c '.paths | to_entries[] | {path:.key, op:.value.post.operationId}' $J
+jq '.components.schemas.NotificationDto.properties.type.enum' $J          # 17 event types
+jq '.components.schemas.NotificationDtoV1.properties.type.enum' $J        # 2 event types
+jq '.components.schemas.NotificationDto.properties.reminderType.enum' $J  # 19 reminder types
+jq '.components.schemas.TransactionEventDto.properties.transactionType.enum' $J   # 17
+jq '.components.schemas.TransactionEventDto.properties.outcome.enum' $J           # 41
+jq '.components.schemas.TransactionEventDto.properties.cardProcessorResponse.enum' $J  # 57
+jq '.components.schemas.TransactionEventDto.properties.cardPreferenceOutcome.enum' $J  # 9
+jq '.components.schemas.MandateEventDto.properties.trigger.enum' $J       # 32 MMS triggers
+jq '.components.schemas.MandatePaymentEventDto.properties.paymentStatus.enum' $J  # 9
+jq '.components.schemas.DirectEntryEventDto.properties.status.enum' $J    # 7
+jq '.components.schemas.SmsDto.properties.type.enum, .components.schemas.EmailDto.properties.type.enum' $J
+jq '.components.securitySchemes, .security' $J                            # null null
+jq '[.. | objects | select(has("example") or has("examples"))] | length' $J   # 3 (no payload examples)
+```
