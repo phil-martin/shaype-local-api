@@ -499,8 +499,229 @@ Docs table [docs:rewards]: `200` = "The card is ACTIVE in PokitPal but the card 
 ---
 
 ## 2. Entities and fields
+
+### HayCard — "Details of a card" [spec]
+
+No `required` array on the schema: every field is nominally optional in responses. Only `renewedIntoCardId` and `voidDateTimeUtc` are marked `nullable: true`.
+
+| field | type | nullable | enum (verbatim) | description [spec] | example [page:create-card] |
+|---|---|---|---|---|---|
+| `cardHayId` | string (uuid) | – | | "Unique identifier (UUID) of the Card" | `3fa85f64-5717-4562-b3fc-2c963f66afa6` |
+| `accountHayId` | string (uuid) | – | | "Unique identifier (UUID) of the Account" | `3fa85f64-5717-4562-b3fc-2c963f66afa6` |
+| `customerHayId` | string (uuid) | – | | "Unique identifier (UUID) of the Customer (cardholder)" | `3fa85f64-5717-4562-b3fc-2c963f66afa6` |
+| `cardStatus` | string | – | `ACTIVE`, `AWAITING_ACTIVATION`, `BLOCKED`, `INACTIVE`, `EXPIRED` | "ACTIVE: Card is active and available for use; AWAITING_ACTIVATION: Card is yet to be activated and unable to be used; BLOCKED: Card has been blocked; EXPIRED: Card has expired; INACTIVE: Card has been cancelled / voided and can no longer be used" | `ACTIVE` |
+| `cardType` | string | – | `PHYSICAL`, `VIRTUAL` | "PHYSICAL: Physical card has been issued; VIRTUAL: Card is virtual only. No physical card has been issued" | `PHYSICAL` |
+| `blockedBy` | string | – (absent/null when not blocked [inferred]) | `CLIENT`, `PLATFORM` | "The type of entity that is responsible for the blocked card. CLIENT: The card was blocked by the Client. PLATFORM: The card was blocked by the Platform" | `CLIENT` |
+| `cardToken` | string | – | | "Public token of the Card, maximum 9 digits in length" | `"string"` |
+| `lastFourDigits` | string | – | | "Last four digits of the Card number, also known as primary account number (PAN)" | `"string"` |
+| `expiryDate` | string (date) | – | | "Expiry date of the Card (date of the last day of the expiry month and year)" | `2025-08-27` (example is not a month-end; treat the description as authoritative) |
+| `issuedDateTimeUtc` | string (date-time) | – | | "DateTime in UTC format when the Card was issued" | `2025-08-27T12:28:24.096Z` |
+| `voidDateTimeUtc` | string (date-time) | **yes** | | "DateTime in UTC format when the Card was cancelled / voided" | `2025-08-27T12:28:24.096Z` |
+| `renewedIntoCardId` | string (uuid) | **yes** | | "Unique ID of the new card, if this card has been renewed" | `3fa85f64-5717-4562-b3fc-2c963f66afa6` |
+| `deliveryMethod` | string | – | `STANDARD`, `REGISTERED`, `COURIER`, `EXPRESS` | "Card delivery method" | `STANDARD` |
+| `nameOnCard` | string | – | | "Cardholder name as printed on the Card" | `M SMITH` |
+| `nameOnCardLine2` | string | – | | "Additional line printed on the Card along side nameOnCard" | `Trading NAME` |
+
+Fields accepted at creation but **not** present on `HayCard`: `cardSubDesign`, `deliveryAddress`, `phoneNumber`, `email`, `firstName`, `lastName`, `title`, `pin`, `idempotencyKey` [spec]. The re-issue description says design, delivery address, phone number and PIN are copied to the replacement card [spec], so the local store must persist them even though no API reads them back.
+
+Operations: created by `createHayCard`, `reissueHayCard` (new card), `renewCard` (new card); read by `getCard`, plus cross-domain `getCardsForAccountId` (`GET /v0/accounts/{accountId}/cards` → `HayCard[]`) and `getCardsForCustomerId` (`GET /v0/customers/{customerHayId}/cards` → `HayCard[]`) [spec]; updated by `activateCard`, `blockCard`, `unblockCard`, `cancelCard`, `convertCard`, `reissueHayCard` (old card → INACTIVE), `renewCard` (old card `renewedIntoCardId`), `activateCard` of a renewal (old card → INACTIVE), platform expiry job, cross-domain `changeCardExpiryDate` (`expiryDate`).
+
+### CardPaymentPreferences — "Card payment preferences." [spec]
+
+Six booleans; full table under `getPaymentPreferences` (§1). Defaults [spec]: `cardEnabled=true`, `mobileWalletPaymentsEnabled=true`, others `false`. Created implicitly with the card; read by `getPaymentPreferences`; updated by `updatePaymentPreferences` (partial). `UpdatePaymentPreferencesRequestBody` has the identical six optional fields [spec].
+
+### CardPinStatus — "Status of the Card PIN" [spec]
+
+`enabled: boolean` — "False indicates the Card PIN is blocked". Read by `getCardPinStatus`; set true by `unblockCardPin`; set false by the processor after 3 wrong PIN entries [spec descriptions]. The PIN value itself is write-only (`createHayCard.pin`, `changeCardPin.newPin`) and copied on re-issue [spec].
+
+### CardCvvStatus — "Card CVV status." [spec]
+
+`cvvRemainingTries: integer (int32)` — "Number of remaining tries for the Card CVV. When the number reaches 0, the CVV is blocked." Read by `getCardCvvStatus`; reset by `unblockCardCvv`; decremented by processor CVV failures. Max 3 [inferred from "3 times"].
+
+### DigitalWalletDetails / ApiDigitalWallet [spec]
+
+`DigitalWalletDetails { primaryAccountIdentifier: string, wallets: ApiDigitalWallet[] }`; `ApiDigitalWallet { createdAt: date-time, digitalWalletStatus: string (documented value `ACTIVE_TOKEN`; no enum), expiresAt: date ("card expiry date"), reference: string, type: string ("APPLE, GOOGLE etc."; no enum) }`. Read by `getDigitalWalletDetails`. Created by device provisioning (outside this API), signalled by webhook `CARD_ADDED_TO_WALLET`; disabled by re-issue/cancel; carried over by renew; survive convert [docs:card-operations].
+
+### OemProvisioningData — "Card details required for wallet provisioning." [spec]
+
+`{ cardHolderName: string, cardToken: string, expiryDate: string, otp: string ("6 digits") }`. Read (and `otp` generated) by `getOemProvisioningData`.
+
+### CardRewardsStatusBody — "Card rewards status body" [spec]
+
+`{ status: enum [ACTIVE] — "Card is enrolled to rewards" }`. Request and response of `rewards`. Implies a per-card boolean "enrolled in PokitPal" the implementer must store [inferred].
+
+### Request-only value objects [spec]
+
+- `Address` (required `countryCodeIso`, `line1`; lengths in §1) — used by `createHayCard.deliveryAddress` (required), `convertCard.deliveryAddress`, `reissueHayCard.deliveryAddress`, `renewCard.deliveryAddress` (all optional).
+- `PhoneNumber` (`countryCodePrefix`, `numberAfterPrefix`, both required, minLength 1) — `createHayCard.phoneNumber`.
+- `BlockCardRequestBody { note? }`, `UnblockCardRequestBody { note! minLength 1 }`, `ChangeCardPinRequestBody { newPin! pattern \d{4} }`, `ConvertCardRequestBody { deliveryAddress? }`, `ReissueHayCardRequestBody { idempotencyKey!, cardType?, deliveryAddress?, deliveryMethod? }`, `RenewCardRequestBody { cardType?, deliveryAddress?, deliveryMethod? }`, `CreateHayCardRequestBody` (§1).
+
+### Webhook DTOs touching cards [webhook-spec]
+
+Envelope `NotificationDto` (POST `/api/hay/v0/communications/notification`, operationId `notifyNotification`): required `customerHayId` (uuid), `idempotencyKey` (uuid), `type`; optional `actionOwner` enum `CLIENT | PLATFORM`, `cardHayId` (uuid, "Unique identifier (UUID) of the Card associated with the event"), `productId` (uuid), `reminderType`, and one event-detail object per type:
+- `type = CARD_STATUS_CHANGE` → `cardStatusChangeEvent: CardStatusChangeEventDto { cardHayId: uuid, accountHayId: uuid, cardStatus: enum [ACTIVE, BLOCKED, EXPIRED, INACTIVE, AWAITING_ACTIVATION], cardLastFourDigits: string }` — "ACTIVE: Card has been activated; BLOCKED: Card has been blocked; EXPIRED: Card has been expired; INACTIVE: Card has been cancelled; AWAITING_ACTIVATION: Card is awaiting activation". Also present on `SmsDto.cardStatusChangeEvent`.
+- `type = CARD_ADDED_TO_WALLET` → `cardAdditionToWalletEvent: CardAdditionToWalletEventDto { cardHayId: uuid, cardLastFourDigits: string, walletType: enum [DEFAULT_WALLET, APPLE_WALLET, ANDROID_WALLET, SAMSUNG_WALLET], activationCode: string ("Payment-token activation code") }`. Docs example [docs:apple-and-google-pay-notifications]: `{"customerHayId":"e818093c-…","idempotencyKey":"7ed153c1-…","type":"CARD_ADDED_TO_WALLET","cardAdditionToWalletEvent":{"cardHayId":"b91826b8-…","cardLastFourDigits":"7927","walletType":"APPLE_WALLET"}}`.
+- `type = REMINDER`, `reminderType ∈ CARD_EXPIRY_MONTH_REMINDER | CARD_EXPIRY_2_WEEK_REMINDER | CARD_EXPIRY_DAY_REMINDER` → `cardExpiryReminderEvent: CardExpiryReminderEventDto { cardId: uuid, expirationMonth: int32, expirationYear: int32 }`.
+- `type = REMINDER`, wallet-provisioning reminders (top-level `cardHayId` + `reminderType`): `APPLE_PAY_ADD_TO_WALLET_REMINDER_30_DAYS`, `APPLE_PAY_ADD_TO_WALLET_REMINDER_60_DAYS`, `APPLE_PAY_ADD_TO_WALLET_REMINDER_90_DAYS`, `APPLE_PAY_REMINDER_24_HRS`, `APPLE_PAY_REMINDER_7_DAYS`, `APPLE_PAY_SPEND_REMINDER_7_DAYS`, `APPLE_PAY_SPEND_REMINDER_14_DAYS`, `GOOGLE_PAY_24_HRS_PARTIAL_PROVISIONING`, `GOOGLE_PAY_7_DAYS_PARTIAL_PROVISIONING`, `GOOGLE_PAY_7_DAYS_SPEND_REMINDER`, `GOOGLE_PAY_14_DAYS_SPEND_REMINDER`, `REMINDER_TO_PROVISION_DIGITAL_CARD` [webhook-spec enum; examples in docs:apple-and-google-pay-notifications, some carrying `emailAddress` and `customerDetails {customerHayId, firstName, lastName, preferredName}`].
+- Email channel (`EmailDto.type`): `CARD_PIN_CHANGE` → `cardPinChangeEvent: CardPinChangeEventDto { cardHayId: uuid, cardLastFourDigits: string }`; `CARD_ADDED_TO_WALLET` → `cardAdditionToWalletEvent`.
+- Transaction notifications (`type = TRANSACTION`, `transactionEvent: TransactionEventDto`) carry `cardHayId`, `cardPreferenceOutcome`, `cardProcessorResponse`, `cardUsageDetails { isMagneticStripePayment, isContactless, isCardPresent, isMobileWalletPayment, isAtmWithdrawal }` — transactions domain; listed here because they consume card state.
+
 ## 3. State machines
+
+### `HayCard.cardStatus` — values `ACTIVE`, `AWAITING_ACTIVATION`, `BLOCKED`, `INACTIVE`, `EXPIRED` [spec]
+
+Sources: lifecycle diagram [docs:card-lifecycle-stauts] (states drawn: Created{Virtual, Physical}, Activated, Frozen, Blocked, Cancelled, Replaced, Expired, Renewed), [docs:card-operations], [docs:card-creation].
+
+| from | to | via | source |
+|---|---|---|---|
+| (none) | `AWAITING_ACTIVATION` | `createHayCard` with `cardType=PHYSICAL` (or omitted) | [docs:card-creation] |
+| (none) | `ACTIVE` | `createHayCard` with `cardType=VIRTUAL` ("virtual cards are issued already active") | [docs:card-creation][diagram] |
+| (none) | `AWAITING_ACTIVATION` / `ACTIVE` | `reissueHayCard` → new card (PHYSICAL / VIRTUAL) | [docs:card-operations] |
+| (none) | `AWAITING_ACTIVATION` / `ACTIVE` | `renewCard` → new card (PHYSICAL / VIRTUAL) | [docs:card-operations] + [inferred for VIRTUAL] |
+| `ACTIVE` (cardType VIRTUAL) | `AWAITING_ACTIVATION` (cardType → PHYSICAL) | `convertCard` | [diagram][docs:card-operations "temporarily inactive during shipment"] |
+| `AWAITING_ACTIVATION` | `ACTIVE` | `activateCard` | [spec][docs:card-operations][diagram] |
+| `ACTIVE` | `BLOCKED` (`blockedBy=CLIENT`) | `blockCard` | [docs:card-operations][diagram]; `blockedBy` value [inferred] |
+| `ACTIVE` | `BLOCKED` (`blockedBy=PLATFORM`) | Shaype-side block (no client API) | [spec enum description] |
+| `BLOCKED` | `ACTIVE` | `unblockCard` | [docs:card-operations][diagram] |
+| `ACTIVE` | `INACTIVE` (terminal) | `cancelCard` | [docs:card-operations][diagram] |
+| `ACTIVE` | `INACTIVE` (terminal) | `reissueHayCard` on this (old) card | [docs:card-operations][diagram "replaceLostOrStolen"] |
+| `ACTIVE` | `INACTIVE` (terminal) | `activateCard` on the card named in this card's `renewedIntoCardId` | [docs:card-operations][diagram "Renewed: old card after activation of new card"] |
+| `ACTIVE` | `EXPIRED` | platform "scheduled job to retrieve expired cards" — no client API | [diagram] |
+| `ACTIVE` | `ACTIVE` (renew) | `renewCard` — old card unchanged, `renewedIntoCardId` set | [docs:card-operations][spec field] |
+
+Terminal states: `INACTIVE` ("final state and cannot be reverted" [docs:card-operations]). `EXPIRED` has no outgoing edge in the diagram [docs:card-lifecycle-stauts] — treat as terminal unless renewal from EXPIRED is later confirmed (§7).
+
+Undocumented transitions the implementer must decide (§7): `AWAITING_ACTIVATION → BLOCKED`, `AWAITING_ACTIVATION → INACTIVE` (cancel), `BLOCKED → INACTIVE` (cancel), `BLOCKED → EXPIRED`, `AWAITING_ACTIVATION → EXPIRED`, re-issue/renew from `BLOCKED`/`EXPIRED`/`AWAITING_ACTIVATION`, convert from non-ACTIVE.
+
+### `HayCard.cardType` — `PHYSICAL`, `VIRTUAL` [spec]
+
+| from | to | via | source |
+|---|---|---|---|
+| `VIRTUAL` | `PHYSICAL` | `convertCard` | [spec][docs:card-operations] |
+| `PHYSICAL` | `VIRTUAL` | **not possible** ("can only be achieved by creating a new card") | [docs:cards] |
+
+### Preferences "freeze" (`cardEnabled`) — not a `cardStatus` change [diagram]
+
+| from | to | via |
+|---|---|---|
+| `ACTIVE`, `cardEnabled=true` (Activated) | `ACTIVE`, `cardEnabled=false` (Frozen) | `updatePaymentPreferences {cardEnabled:false}` |
+| Frozen | Activated | `updatePaymentPreferences {cardEnabled:true}` |
+
+Diagram also annotates `cardEnabled` per lifecycle state: Physical-created `false`; Virtual-created `true`; Activated `true`; Frozen `false`; Blocked `false`; Cancelled `false`; Replaced `false`; Expired `false`; Renewed-old-card `true` [docs:card-lifecycle-stauts].
+
+### `CardPinStatus.enabled` — `true`/`false`
+
+| from | to | via | source |
+|---|---|---|---|
+| `true` | `false` | 3 incorrect PIN entries at the processor | [spec] |
+| `false` | `true` | `unblockCardPin` | [spec] |
+
+### `CardCvvStatus.cvvRemainingTries` — integer, blocked at 0
+
+| from | to | via | source |
+|---|---|---|---|
+| n > 0 | n − 1 | incorrect CVV at the processor | [spec] |
+| 0 (blocked) / any | 3 (max) | `unblockCardCvv` | [spec]; max value [inferred] |
+
+### `CardRewardsStatusBody.status` — only `ACTIVE` [spec]
+
+| from | to | via |
+|---|---|---|
+| not enrolled | `ACTIVE` (201) | `rewards` |
+| `ACTIVE` | `ACTIVE` (200) | `rewards` again |
+
+No un-enrol transition exists [spec].
+
+### `ApiDigitalWallet.digitalWalletStatus` — documented value `ACTIVE_TOKEN` only [spec]; no transitions documented.
+
+### `HayCard.blockedBy` — `CLIENT`, `PLATFORM` [spec]; set on block, presumably cleared on unblock [inferred].
+
 ## 4. Invariants and calculations
+
+- **IDs:** `cardHayId`, `accountHayId`/`accountId`, `customerHayId`, `renewedIntoCardId`, `idempotencyKey` are all `format: uuid` [spec]. Docs examples use v4-style UUIDs.
+- **`cardToken`:** "Public token of the Card, maximum 9 digits in length" [spec]. Preserved on renew ("new card created with same token") [diagram]; new on re-issue [inferred, since the PAN changes]; unchanged on convert [docs:card-operations]. Used by Utilities mock-transaction endpoints (`cardToken` field) [spec].
+- **`lastFourDigits`:** last 4 digits of the PAN [spec]; same on renew (same PAN) and convert; new on re-issue [docs:card-operations].
+- **`expiryDate`:** "date of the last day of the expiry month and year" [spec] — i.e. always a month-end date. Expiry period length (years from issue) is **not documented**. `OemProvisioningData.expiryDate` and `ApiDigitalWallet.expiresAt` equal the card expiry date [spec].
+- **Renew window:** allowed only "within 2 months of the expiry date of the card" [docs:card-operations] → `today >= expiryDate − 2 months` [inferred formalisation].
+- **Expiry reminders:** sent at 1 month, 2 weeks, 1 day before expiry (`CARD_EXPIRY_MONTH_REMINDER`, `CARD_EXPIRY_2_WEEK_REMINDER`, `CARD_EXPIRY_DAY_REMINDER`) [webhook-spec names; exact schedule inferred from the names].
+- **Expiry:** a platform scheduled job moves `ACTIVE` cards past `expiryDate` to `EXPIRED` [diagram]. Staging: no automatic path except asking Shaype or using `PATCH /v0/utils/cards/{cardId}/expiry-date` [docs:card-operations][spec].
+- **`nameOnCard` default** [docs:card-creation]: `len(firstName + " " + lastName) < 23` → `firstName + " " + lastName`; else `firstName[0] + " " + lastName`. Explicit `nameOnCard` (≤ 23 chars) overrides. Docs example shows upper-case `M SMITH` [page:create-card] — casing rule undocumented.
+- **`nameOnCardLine2`:** ≤ 23 chars; omitted → nothing printed [page:create-card].
+- **PIN:** create `pin` "typically 4 digits but supports 4-12 digits" (schema only enforces minLength 1) [spec]; `changeCardPin.newPin` pattern `\d{4}` [spec]. PIN copied from old card on re-issue [spec]. PIN blocked after 3 incorrect entries [spec].
+- **CVV:** 3 incorrect entries → blocked; `cvvRemainingTries` reaches 0 [spec].
+- **`otp`:** 6 digits, one-time [spec].
+- **Preference defaults:** `cardEnabled=true`, `mobileWalletPaymentsEnabled=true`, `cardNotPresentEnabled=false`, `cashWithdrawalEnabled=false`, `contactlessEnabled=false`, `magneticStripeEnabled=false` [spec]; overridable per client by CSM [docs:card-operations].
+- **Preference precedence:** `cardEnabled=false` overrides every other flag except `mobileWalletPaymentsEnabled` [docs:card-operations].
+- **Preference editability:** only when `cardStatus == ACTIVE` [docs:card-operations]; per-type/phase table in §1.
+- **Idempotency:** `createHayCard.idempotencyKey` and `reissueHayCard.idempotencyKey` are required UUIDs "used to recognise any subsequent retries" [spec]; replay behaviour undocumented. `rewards` is idempotent via 200-vs-201 [spec]. `renewCard` has no key [spec].
+- **Card ↔ account ↔ customer:** a card "belongs to a customer and is linked to an account (individual or joint)" [docs:cards]; exactly one `customerHayId` and one `accountHayId` per card [spec]. Multiple cards per customer/account allowed ("does not cancel any existing card") [docs:card-operations].
+- **Billing address ≠ delivery address:** billing/AVS address is the customer's stored address; delivery address is per-request [docs:card-creation].
+- **Timestamps:** `issuedDateTimeUtc`, `voidDateTimeUtc` are UTC `date-time` [spec]; `voidDateTimeUtc` set when cancelled/voided [spec description].
+- **Webhook delivery:** platform retries 18 times over up to 48 hours with exponential backoff on client responses 401, 403, 429, 5XX [docs:webhook-notification]; every notification carries an `idempotencyKey` for dedup [webhook-spec].
+- No balances, limits or monetary calculations live in this domain [spec]; card spend limits surface only as transaction outcomes (`REFUSED_DAILY_CARD_TRANSACTIONS_LIMIT_BREACHED`, `REFUSED_SINGLE_CARD_TRANSACTION_LIMIT_BREACHED` [webhook-spec]) in the transactions domain.
+
 ## 5. Cross-domain dependencies
+
+**Reads from other domains**
+- **Accounts:** `createHayCard.accountId` must reference an existing account; `HayCard.accountHayId` mirrors it [spec]. `HayAccount.status` enum is `PENDING_APPROVAL | APPROVED | ACTIVE | LOCKED | DORMANT | CLOSED | ACTIVE_IN_ARREARS` [spec]; **which statuses permit card creation is not documented** in the cards docs (§7). Account may be "individual or joint/business" [docs:card-creation].
+- **Customers:** `createHayCard.customerHayId` must reference an existing customer; the customer's stored address becomes the card's billing/AVS address on create, re-issue and renew [docs:card-creation]. `HayCustomer.status` enum is `ACTIVE | INACTIVE | REJECTED | BLOCKED | PENDING_APPROVAL | REFERRED` [spec]; permitted statuses for card creation undocumented. `firstName`/`lastName`/`email`/`phoneNumber`/`title` are re-supplied in the create-card request rather than read from the customer [spec].
+
+**Exposes to other domains**
+- **Accounts API:** `GET /v0/accounts/{accountId}/cards` (`getCardsForAccountId`) → `HayCard[]` [spec].
+- **Customers API:** `GET /v0/customers/{customerHayId}/cards` (`getCardsForCustomerId`) → `HayCard[]` [spec].
+- **Utilities API (staging mocks):** `PATCH /v0/utils/cards/{cardId}/expiry-date` (`changeCardExpiryDate`, body `ChangeCardExpiryDateRequestBody { expiryDate!: date, example "2027-09-30" }` → `GenericMessage`) mutates `HayCard.expiryDate` [spec]; mock transaction generators (`generateAuthHold`, `generateCardTransaction`, `generateHoldAndUpdateHoldTransactions`, `generateAtmTransaction`, `generateRefundTransaction`) take `cardToken` and `cardUsage ∈ MAGNETIC_STRIPE | CONTACTLESS | CARD_PRESENT` [spec] — they need card status/preferences to decide `cardPreferenceOutcome`.
+- **Click to Pay API:** `POST /v0/cards/{cardId}/ctp` (`enrolCard`, body `EnrolCardToClickToPayRequestBody { email?: email ≤255 }`), `DELETE /v0/cards/{cardId}/ctp` (`unenrolCard`) — both no-op success when already in the target state [spec]. Separate domain; not part of the "Cards API" tag.
+- **Transactions / Holds:** `AuthorisationHold.cardId`, `FinancialTransaction.cardId` [spec]; webhook `TransactionEventDto.cardHayId`, `cardPreferenceOutcome`, `cardProcessorResponse`, `cardUsageDetails` [webhook-spec]. Authorisation checks consume `cardStatus` (BLOCKED → `CARD_BLOCKED`; not ACTIVE → processor `CARD_IS_NOT_ACTIVE`/`EXPIRED_CARD` [webhook-spec enum names; mapping inferred]) and the six preference flags (→ `CARD_FROZEN`, `CARD_NOT_PRESENT_DISABLED`, `CASH_WITHDRAWAL_DISABLED`, `CONTACTLESS_DISABLED`, `MAGNETIC_STRIPE_PAYMENT_DISABLED`, `MOBILE_WALLET_PAYMENT_DISABLED`) with overall `outcome = REFUSED_CARD_PREFERENCE` [docs:payment-transaction-outcome][webhook-spec].
+- **External authorisation (Shaype → client):** `POST /holds` body `Hold { holdId!, accountId!, cardId!, customerId, amount!, merchantDetails, rawExternalProcessorRequest }` — `cardId` is the card's UUID, `customerId` "Identifier of the customer who owns the card" [ext-auth-spec]. The client-side authoriser therefore needs card → account/customer lookup.
+- **FX:** `searchConversions` "linked to a given card-spend transaction"; `FxRateEntry.cardMarginAdjustedBidRate` [spec] — no direct card-entity dependency.
+- **Notifications (Shaype → client):** `CARD_STATUS_CHANGE`, `CARD_ADDED_TO_WALLET`, `REMINDER` (card expiry + wallet-provisioning reminder types), email `CARD_PIN_CHANGE` [webhook-spec] — see §2.
+
 ## 6. Error catalogue
+
+No error message text is documented anywhere for the Cards API; `ErrorResponse.message`/`details` content is unknown [spec][docs]. Status codes declared per operation: `400`, `403`, `422`, `500`, `501` on all 19; `429` additionally on `rewards` (body `CardRewardsStatusBody`, not `ErrorResponse`) [spec].
+
+| condition | code | source |
+|---|---|---|
+| Malformed JSON / schema violation (missing required field, minLength/maxLength, `format: uuid`, enum membership, `newPin` not `\d{4}`) | `400` "Bad Request" **or** `422` "Unprocessable Content" — spec declares both, never says which | [spec] |
+| Unauthenticated / not permitted (e.g. `changeCardPin` without CSM-granted privilege; `rewards` without feature enabled) | `403` "Forbidden" | [spec] + [docs:card-operations][docs:rewards] (code inferred) |
+| `activateCard` on a card not in `AWAITING_ACTIVATION` | error, code undocumented (`422` fits) | [spec description] |
+| `createHayCard` with a `cardType` not agreed with Shaype | "an error will occur", code undocumented | [docs:card-creation] |
+| `convertCard` on a `PHYSICAL` card | error, code undocumented | [docs:card-operations] |
+| `updatePaymentPreferences` when `cardStatus != ACTIVE` | error, code undocumented | [docs:card-operations] |
+| `renewCard` earlier than 2 months before `expiryDate` | error, code undocumented | [docs:card-operations] |
+| `unblockCard` on a card not `BLOCKED`; `cancelCard`/`blockCard` on `INACTIVE` | error, code undocumented | [inferred] |
+| Unknown `cardId` | **undocumented** — no `404` declared; `400`/`422` are the only client-error options listed | [spec] |
+| Duplicate `idempotencyKey` on create/re-issue | **undocumented** — no `409` declared | [spec] |
+| `rewards` rate-limited | `429` "Too many requests" with `CardRewardsStatusBody` body | [spec] |
+| `rewards` already enrolled | `200` (not an error) "Card was already enrolled." | [spec][docs:rewards] |
+| Server failure / feature not implemented | `500` "Internal Server Error" / `501` "Not Implemented" | [spec] |
+
+Related non-API error vocabularies (transactions domain, for completeness): `cardPreferenceOutcome` values and `cardProcessorResponse` values such as `INCORRECT_PIN`, `REFUSED_CARD_BLOCKED`, `RESTRICTED_CARD`, `CAPTURE_CARD`, `EXPIRED_CARD`, `LOST_CARD_CAP`, `STOLEN_CARD_CAP`, `CARD_IS_NOT_ACTIVE`, `ALLOWED_PIN_RETRIES_EXCEEDED`, `ALLOWED_NUMBER_OF_PIN_TRIES_EXCEEDED`, `UNACCEPTABLE_PIN`, `PIN_VALIDATION_NOT_POSSIBLE`, `CVV_FAIL`, `CVV2_FAILURE`, `INVALID_CARD_NUMBER` [webhook-spec].
+
 ## 7. Open questions
+
+1. **Unknown `cardId`:** no `404` is declared on any operation. Decide: return `404` (pragmatic) or `422`/`400` (spec-literal).
+2. **400 vs 422 split:** the spec declares both on every operation with no conditions. Suggested split [inferred]: `400` for unparsable/structurally invalid bodies, `422` for semantically invalid (bad enum, wrong state, failed precondition).
+3. **Idempotency replay:** what `createHayCard`/`reissueHayCard` return when the same `idempotencyKey` is re-sent (same `HayCard` + 200? a `409`? and is the key scoped per client, per customer, or global?). Not documented. `renewCard` has no key at all.
+4. **Account/customer status preconditions:** which `HayAccount.status` / `HayCustomer.status` values allow card creation, re-issue, renew, activate. Cards docs are silent.
+5. **Undocumented status transitions:** block/cancel from `AWAITING_ACTIVATION`; cancel from `BLOCKED`; expiry of `BLOCKED`/`AWAITING_ACTIVATION` cards; re-issue/renew from `BLOCKED`, `EXPIRED`, `AWAITING_ACTIVATION`; convert from `BLOCKED`. The diagram only draws these operations from the Activated (`ACTIVE`) state.
+6. **Renew from `EXPIRED`:** diagram shows `EXPIRED` with no exit; docs say renew must be "within 2 months of the expiry date" (before or after?). Decide whether `EXPIRED` is terminal.
+7. **Renew into VIRTUAL:** no activation step exists, so when the old card becomes `INACTIVE` is undefined (immediately? never?).
+8. **Delivery address on re-issue/renew:** three conflicting statements — schema: "same ... delivery address" as the old card; card-creation doc: the customer's stored cardholder address is used; body: accepts an explicit `deliveryAddress`. Suggested [inferred]: explicit body value wins, else old card's delivery address.
+9. **Convert without `deliveryAddress`:** fallback address undefined.
+10. **Preference table contradictions:** `contactlessEnabled`/`magneticStripeEnabled` marked "NO" for physical cards even after activation; `mobileWalletPaymentsEnabled` "YES" before activation while "Card preferences can only be updated if the card is ACTIVE". Decide whether the table gates *which flags* may be set per type/phase, and how to reject (422?).
+11. **`cardEnabled` reported in non-ACTIVE states:** diagram shows `cardEnabled:false` for `AWAITING_ACTIVATION`/`BLOCKED`/`INACTIVE`/`EXPIRED` but `true` for the renewed old card. Is the stored flag mutated by status changes, or is the read value derived? Also: does activation restore a pre-existing `cardEnabled=false` (set on a virtual card before convert)?
+12. **`blockedBy` after unblock:** cleared to null, or left as last blocker? And may a client `unblockCard` a `PLATFORM`-blocked card?
+13. **Block/unblock/cancel repeated calls:** error or idempotent no-op? (Compare `enrolCard`/`unenrolCard` in Click to Pay which are explicitly no-op successes.)
+14. **PIN/CVV blocking triggers:** no B2B API decrements CVV tries or blocks the PIN; the local implementation needs a test-only hook (or Utilities-style mock) to simulate 3 failed entries. Also `unblockCardCvv`/`unblockCardPin` on an unblocked card: error or no-op?
+15. **PIN length mismatch:** create accepts 4–12 digits (description) with only `minLength: 1` enforced; change-PIN enforces exactly 4. Decide validation for create (`^\d{4,12}$` [inferred]).
+16. **`nameOnCard` default details:** "smaller than 23 characters combined" — is 23 exactly allowed? Upper-casing (example `M SMITH`)? Applied to `OemProvisioningData.cardHolderName` too?
+17. **Expiry period:** years from `issuedDateTimeUtc` to `expiryDate` undocumented (typical Visa 3–5 years). Also the `page:create-card` example `expiryDate` (`2025-08-27`) is not a month-end, contradicting the field description.
+18. **Wallet vocabulary:** `ApiDigitalWallet.type` ("APPLE, GOOGLE etc.") vs webhook `walletType` (`DEFAULT_WALLET|APPLE_WALLET|ANDROID_WALLET|SAMSUNG_WALLET`); `digitalWalletStatus` documents only `ACTIVE_TOKEN`. Pick one vocabulary and whether re-issue/cancel produces a second status value.
+19. **`primaryAccountIdentifier` format:** undocumented string from the wallet provider.
+20. **OEM provisioning encryption:** described as "encrypted" but fields are plain strings; scheme undocumented. Staging has no push-provisioning support.
+21. **Webhook emission points:** docs only explicitly document `CARD_ADDED_TO_WALLET` and the reminder types; `CARD_STATUS_CHANGE` on create/activate/block/unblock/cancel/convert/re-issue/renew/expiry is inferred from the enum. Decide which transitions emit, and `actionOwner` (`CLIENT` for API-driven, `PLATFORM` for expiry job) [inferred].
+22. **`GenericMessage.message` text:** no examples; pick a stable string per operation.
+23. **`rewards` 429 body:** declared as `CardRewardsStatusBody`, not `ErrorResponse` — decide whether to mirror this oddity.
+24. **Physical card with `cardType` omitted on `reissueHayCard`:** default is PHYSICAL even if the old card was VIRTUAL — confirm this is intended behaviour to replicate.
+25. **Design (`cardSubDesign`) unsupported values:** the schema enumerates all 100 sub-designs; unagreed designs presumably error like unagreed card types [inferred] — code undocumented.
