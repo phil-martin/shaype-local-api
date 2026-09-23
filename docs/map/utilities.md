@@ -726,12 +726,12 @@ Values: `RECEIVED`, `ACCEPTED`, `REJECTED`, `SUBMITTED`, `RETURNED`, `COMPLETE`,
 - **Balance deltas per mock** (abs(a) = absolute value of `amount`) [docs:simulates-card-transaction-on-staging; docs:card-transactions "Balance Update"; arithmetic inferred]:
   | event | totalBalance | heldBalance | availableBalance |
   |---|---|---|---|
-  | hold (auth) | 0 | +|a| | −|a| |
-  | hold increase (`updateHoldAmount` u<0) | 0 | +|u| | −|u| |
+  | hold (auth) | 0 | +abs(a) | −abs(a) |
+  | hold increase (`updateHoldAmount` u<0) | 0 | +abs(u) | −abs(u) |
   | hold decrease/reversal (u>0) | 0 | −u | +u |
   | settlement of hold h | −h | −h | 0 |
-  | ATM stand-in | −|a| | 0 | −|a| |
-  | refund | +|a| | 0 | +|a| |
+  | ATM stand-in | −abs(a) | 0 | −abs(a) |
+  | refund | +abs(a) | 0 | +abs(a) |
   | inbound credit (DE CREDIT, NPP v1/v2, RAP) | +amount | 0 | +amount |
   | inbound DE DEBIT / RAPAIN debit | −amount | 0 | −amount |
 - **Settlement amount** = current (updated) hold amount at settlement time: original hold + increases − decreases [docs samples: −9 → −19 → settle −19; −5 → +0.50 → settle −4.50].
