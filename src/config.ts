@@ -20,6 +20,12 @@ export interface Config {
   asyncDelayMs: number
   /** Risk level given to new accounts. Shaype defaults to HIGH (all limits 0) until the client sets LOW. */
   defaultRiskLevel: 'HIGH' | 'LOW'
+  /**
+   * Emit CUSTOMER_STATUS_UPDATED {INACTIVE} when the platform closes a customer (last account closed, group
+   * removal). Off by default: docs:account-closure lists only the account and card events for that cascade and
+   * says the customer's future notifications are cancelled. Client-driven INACTIVE always emits.
+   */
+  emitCustomerInactive: boolean
 }
 
 export const defaultConfig: Config = {
@@ -36,6 +42,7 @@ export const defaultConfig: Config = {
   webhookBackoffMs: 200,
   asyncDelayMs: 0,
   defaultRiskLevel: 'HIGH',
+  emitCustomerInactive: false,
 }
 
 export const CLI_OPTIONS = {
@@ -51,6 +58,7 @@ export const CLI_OPTIONS = {
   'webhook-backoff-ms': { type: 'string' },
   'async-delay-ms': { type: 'string' },
   'default-risk-level': { type: 'string' },
+  'emit-customer-inactive': { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
 } as const
 
@@ -70,6 +78,7 @@ Usage: shaype-local [options]
       --webhook-backoff-ms     first retry delay, doubling      (default 200)
       --async-delay-ms         delay for simulated async events (default 0)
       --default-risk-level     HIGH|LOW for new accounts       (SHAYPE_LOCAL_DEFAULT_RISK_LEVEL, default HIGH — Shaype's default; HIGH refuses all money movement until set LOW)
+      --emit-customer-inactive send CUSTOMER_STATUS_UPDATED {INACTIVE} for the platform closure cascade (SHAYPE_LOCAL_EMIT_CUSTOMER_INACTIVE, default off)
   -h, --help
 `
 
@@ -86,6 +95,7 @@ export function loadConfig(argv: string[] = [], env: NodeJS.ProcessEnv = {}): Co
     return n
   }
   const authEnv = env.SHAYPE_LOCAL_AUTH
+  const envTrue = (v: string | undefined): boolean => v !== undefined && ['true', '1', 'yes', 'on'].includes(v.toLowerCase())
   return {
     port: num('port', 'SHAYPE_LOCAL_PORT', defaultConfig.port),
     host: str('host', 'SHAYPE_LOCAL_HOST', defaultConfig.host),
@@ -100,6 +110,7 @@ export function loadConfig(argv: string[] = [], env: NodeJS.ProcessEnv = {}): Co
     webhookBackoffMs: num('webhook-backoff-ms', 'SHAYPE_LOCAL_WEBHOOK_BACKOFF_MS', defaultConfig.webhookBackoffMs),
     asyncDelayMs: num('async-delay-ms', 'SHAYPE_LOCAL_ASYNC_DELAY_MS', defaultConfig.asyncDelayMs),
     defaultRiskLevel: riskLevel(str('default-risk-level', 'SHAYPE_LOCAL_DEFAULT_RISK_LEVEL', defaultConfig.defaultRiskLevel)),
+    emitCustomerInactive: values['emit-customer-inactive'] === true || envTrue(env.SHAYPE_LOCAL_EMIT_CUSTOMER_INACTIVE),
     help: values.help === true,
   }
 }

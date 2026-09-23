@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { components } from '../src/contract/generated/b2b-types.js'
 import { startApp } from './helpers.js'
+import { buildServer } from '../src/server.js'
 import { assertValidNotification } from './webhook-schema.js'
 import type { BuiltServer } from '../src/server.js'
 
@@ -106,6 +107,23 @@ describe('createHayCustomer', () => {
     })
     expect(read).not.toHaveProperty('taxObligations')
     expect(built.ctx.services.customers.get(c.customerHayId!).taxObligations).toEqual([{ country: 'NZL', taxIdNumber: '123' }])
+  })
+
+  it('echoes an explicit customData: null (nullable field) on create and on read', async () => {
+    const c = await create({ emailTag: 'pending', customData: null })
+    expect(c).toHaveProperty('customData', null)
+    expect(await get(c.customerHayId!)).toHaveProperty('customData', null)
+  })
+
+  it('stores externalCustomerId and the deprecated journeyId (as identityVerificationCaseId) without echoing them', async () => {
+    const journeyId = randomUUID()
+    const c = await create({ emailTag: 'pending', journeyId, externalCustomerId: 'ext-123' })
+    for (const absent of ['externalCustomerId', 'journeyId', 'identityVerificationCaseId']) expect(c, absent).not.toHaveProperty(absent)
+    expect(await get(c.customerHayId!)).not.toHaveProperty('externalCustomerId')
+    expect(built.ctx.services.customers.get(c.customerHayId!)).toMatchObject({ externalCustomerId: 'ext-123', identityVerificationCaseId: journeyId })
+    const caseId = randomUUID()
+    const both = await create({ emailTag: 'pending', journeyId, identityVerificationCaseId: caseId })
+    expect(built.ctx.services.customers.get(both.customerHayId!).identityVerificationCaseId).toBe(caseId)
   })
 
   it('rejects schema violations with 400 and the ErrorResponse envelope', async () => {
@@ -223,6 +241,16 @@ describe('onboarding (asynchronous outcome)', () => {
     expect(events[1].customerStatusUpdatedEvent).toEqual({ customerStatus: 'REJECTED' })
   })
 
+  it('onlySanctionsCheck runs the platform outcome like full KYC: ACTIVE with ONBOARDING_PASSED', async () => {
+    const created = await create({ onlySanctionsCheck: true })
+    expect(created.status).toBe('PENDING_APPROVAL')
+    await flush()
+    const c = await get(created.customerHayId!)
+    expect(c.status).toBe('ACTIVE')
+    expect(c.approvedDateTimeUtc).toMatch(ISO_MICROS)
+    expect((await payloadsFor(c.customerHayId!)).map((e) => e.type)).toEqual(['ONBOARDING_PASSED', 'CUSTOMER_STATUS_UPDATED'])
+  })
+
   it('+pending and skipKyc leave the customer PENDING_APPROVAL for the client to activate', async () => {
     const pending = await create({ emailTag: 'pending' })
     const skip = await create({ skipKyc: true })
@@ -308,6 +336,22 @@ describe('changeHayCustomerStatus', () => {
     expect(events.map((e) => e.customerStatusUpdatedEvent.customerStatus)).toEqual(['INACTIVE'])
   })
 
+  it('ACTIVE -> INACTIVE and BLOCKED -> INACTIVE (client withdrawal) set statusReason CUSTOMER + closedDateTimeUtc and clear blockedBy', async () => {
+    const active = await createActive()
+    const closed = await setStatus(active.customerHayId!, 'INACTIVE')
+    expect(closed.statusCode, closed.body).toBe(200)
+    expect(closed.json()).toMatchObject({ status: 'INACTIVE', statusReason: 'CUSTOMER', closedDateTimeUtc: expect.stringMatching(ISO_MICROS), approvedDateTimeUtc: active.approvedDateTimeUtc })
+    const blocked = await createActive()
+    await app.inject({ method: 'POST', url: `/v0/customers/${blocked.customerHayId}/block`, payload: { note: 'x' } })
+    const closedBlocked = await setStatus(blocked.customerHayId!, 'INACTIVE')
+    expect(closedBlocked.statusCode, closedBlocked.body).toBe(200)
+    expect(closedBlocked.json()).toMatchObject({ status: 'INACTIVE', statusReason: 'CUSTOMER', closedDateTimeUtc: expect.stringMatching(ISO_MICROS) })
+    expect(closedBlocked.json()).not.toHaveProperty('blockedBy')
+    const events = (await payloadsFor(blocked.customerHayId!)).filter((e) => e.type === 'CUSTOMER_STATUS_UPDATED')
+    expect(events.map((e) => e.customerStatusUpdatedEvent.customerStatus)).toEqual(['ACTIVE', 'BLOCKED', 'INACTIVE'])
+    expect(events.at(-1).actionOwner).toBe('CLIENT')
+  })
+
   it('validates the enum (400) and the id (404)', async () => {
     const c = await create({ emailTag: 'pending' })
     expect((await setStatus(c.customerHayId!, 'CLOSED')).statusCode).toBe(400)
@@ -377,6 +421,56 @@ describe('blockCustomer / unblockCustomer', () => {
     const events = await payloadsFor(c.customerHayId!)
     expect(events.at(-1)).toMatchObject({ actionOwner: 'PLATFORM', customerStatusUpdatedEvent: { customerStatus: 'BLOCKED' } })
   })
+
+  it('a client may unblock a PLATFORM-blocked customer (-> ACTIVE, actionOwner CLIENT)', async () => {
+    const c = await createActive()
+    built.ctx.services.customers.setStatus(c.customerHayId!, 'BLOCKED', { actionOwner: 'PLATFORM' })
+    const res = await app.inject({ method: 'POST', url: `/v0/customers/${c.customerHayId}/unblock`, payload: { note: 'cleared' } })
+    expect(res.statusCode, res.body).toBe(200)
+    const read = await get(c.customerHayId!)
+    expect(read.status).toBe('ACTIVE')
+    expect(read).not.toHaveProperty('blockedBy')
+    expect((await payloadsFor(c.customerHayId!)).at(-1)).toMatchObject({ actionOwner: 'CLIENT', customerStatusUpdatedEvent: { customerStatus: 'ACTIVE' } })
+  })
+
+  it('blocks from PENDING_APPROVAL, REFERRED and REJECTED as well; unblock always lands on ACTIVE', async () => {
+    for (const from of ['PENDING_APPROVAL', 'REFERRED', 'REJECTED'] as const) {
+      const c = await create({ emailTag: 'pending' })
+      if (from !== 'PENDING_APPROVAL') expect((await app.inject({ method: 'PATCH', url: `/v0/customers/${c.customerHayId}/status`, payload: { newStatus: from } })).statusCode).toBe(200)
+      const block = await app.inject({ method: 'POST', url: `/v0/customers/${c.customerHayId}/block`, payload: { note: `from ${from}` } })
+      expect(block.statusCode, `${from}: ${block.body}`).toBe(200)
+      expect(await get(c.customerHayId!)).toMatchObject({ status: 'BLOCKED', blockedBy: 'CLIENT' })
+      const unblock = await app.inject({ method: 'POST', url: `/v0/customers/${c.customerHayId}/unblock`, payload: { note: 'x' } })
+      expect(unblock.statusCode, `${from}: ${unblock.body}`).toBe(200)
+      const read = await get(c.customerHayId!)
+      expect(read.status).toBe('ACTIVE')
+      expect(read.approvedDateTimeUtc).toMatch(ISO_MICROS)
+      expect(read).not.toHaveProperty('blockedBy')
+      const statuses = (await payloadsFor(c.customerHayId!)).map((e) => e.customerStatusUpdatedEvent.customerStatus)
+      expect(statuses, from).toEqual([...(from === 'PENDING_APPROVAL' ? [] : [from]), 'BLOCKED', 'ACTIVE'])
+    }
+  })
+
+  it('a block placed before the platform onboarding outcome arrives supersedes it: no ONBOARDING_* webhook, unblock lands on ACTIVE (asyncDelayMs > 0)', async () => {
+    const other = await startApp({ asyncDelayMs: 5_000 })
+    try {
+      const res = await other.app.inject({ method: 'POST', url: '/v0/customers/create', payload: customerBody({ emailTag: 'rejected' }) })
+      expect(res.statusCode, res.body).toBe(200)
+      const id = (res.json() as HayCustomer).customerHayId!
+      expect((await other.app.inject({ method: 'POST', url: `/v0/customers/${id}/block`, payload: { note: 'x' } })).statusCode).toBe(200)
+      expect((await other.app.inject({ method: 'GET', url: `/v0/customers/${id}` })).json()).toMatchObject({ status: 'BLOCKED', blockedBy: 'CLIENT' })
+      expect((await other.app.inject({ method: 'POST', url: `/v0/customers/${id}/unblock`, payload: { note: 'x' } })).statusCode).toBe(200)
+      // make the deferred outcome due on the virtual clock (runs it through tick) and settle
+      await other.app.inject({ method: 'POST', url: '/_admin/clock', payload: { advanceMs: 6_000 } })
+      await other.app.inject({ method: 'POST', url: '/_admin/flush' })
+      expect((await other.app.inject({ method: 'GET', url: `/v0/customers/${id}` })).json()).toMatchObject({ status: 'ACTIVE', approvedDateTimeUtc: expect.stringMatching(ISO_MICROS) })
+      const rows = (await other.app.inject({ method: 'GET', url: '/_admin/notifications?limit=1000' })).json() as { payload: any }[]
+      expect(rows.map((r) => r.payload.type)).toEqual(['CUSTOMER_STATUS_UPDATED', 'CUSTOMER_STATUS_UPDATED'])
+      expect(rows.map((r) => r.payload.customerStatusUpdatedEvent.customerStatus)).toEqual(['BLOCKED', 'ACTIVE'])
+    } finally {
+      await other.app.close()
+    }
+  })
 })
 
 describe('updateCustomer', () => {
@@ -401,13 +495,39 @@ describe('updateCustomer', () => {
     })
   })
 
-  it('flags only what changed and treats a same-value phone (with +) as unchanged', async () => {
+  it('flags only what changed: an email-only change reports emailAddressChanged alone', async () => {
     const c = await createActive()
+    const res = await app.inject({ method: 'PATCH', url: `/v0/customers/${c.customerHayId}`, payload: { email: `renamed${n}@example.com` } })
+    expect(res.statusCode).toBe(200)
+    const events = await payloadsFor(c.customerHayId!)
+    expect(events.at(-1).customerDetailsChangeEvent).toEqual({ phoneNumberChanged: false, customerNameChanged: false, emailAddressChanged: true, addressChanged: false })
+  })
+
+  it('a change outside the four flags (gender) and a same-value phone (with +) publish the domain event but no CUSTOMER_DETAILS_CHANGE webhook', async () => {
+    const c = await createActive()
+    const before = (await payloadsFor(c.customerHayId!)).length
+    const seen: any[] = []
+    const off = built.ctx.events.on('customer.detailsChanged', (e) => seen.push(e))
     const res = await app.inject({ method: 'PATCH', url: `/v0/customers/${c.customerHayId}`, payload: { gender: 'FEMALE', phoneNumber: { countryCodePrefix: '+61', numberAfterPrefix: c.phoneNumber!.numberAfterPrefix } } })
+    off()
     expect(res.statusCode).toBe(200)
     expect(res.json().customerDetails.gender).toBe('FEMALE')
-    const events = await payloadsFor(c.customerHayId!)
-    expect(events.at(-1).customerDetailsChangeEvent).toEqual({ phoneNumberChanged: false, customerNameChanged: false, emailAddressChanged: false, addressChanged: false })
+    expect(res.json().lastUpdatedDateTimeUtc).toMatch(ISO_MICROS)
+    expect(seen).toHaveLength(1)
+    expect(seen[0].changes).toEqual({ phoneNumberChanged: false, customerNameChanged: false, emailAddressChanged: false, addressChanged: false })
+    expect((await payloadsFor(c.customerHayId!)).length).toBe(before)
+  })
+
+  it('taxObligations: [] is a no-op on a customer without any and clears an existing list', async () => {
+    const none = await createActive()
+    const noop = await app.inject({ method: 'PATCH', url: `/v0/customers/${none.customerHayId}`, payload: { taxObligations: [] } })
+    expect(noop.statusCode).toBe(200)
+    expect(noop.json()).toEqual(none)
+    const some = await createActive({ taxObligations: [{ country: 'NZL', taxIdNumber: '1' }] })
+    const cleared = await app.inject({ method: 'PATCH', url: `/v0/customers/${some.customerHayId}`, payload: { taxObligations: [] } })
+    expect(cleared.statusCode).toBe(200)
+    expect(cleared.json().lastUpdatedDateTimeUtc).toMatch(ISO_MICROS)
+    expect(built.ctx.services.customers.get(some.customerHayId!).taxObligations).toBeUndefined()
   })
 
   it('a no-op PATCH returns 200 without a webhook', async () => {
@@ -427,17 +547,24 @@ describe('updateCustomer', () => {
     expect(u).toMatchObject({ identityDocumentType: 'PASSPORT', identityDocumentNumber: 'P2', identityDocumentIssuingCountry: 'NZL' })
     expect(u).not.toHaveProperty('identityDocumentCardNumber')
     expect(u).not.toHaveProperty('identityDocumentRegion')
-    expect(built.ctx.services.customers.get(c.customerHayId!).taxObligations).toEqual([])
+    expect(built.ctx.services.customers.get(c.customerHayId!).taxObligations).toBeUndefined()
     const invalid = await app.inject({ method: 'PATCH', url: `/v0/customers/${c.customerHayId}`, payload: { documentData: { identityDocumentType: 'PASSPORT' } } })
     expect(invalid.statusCode).toBe(400)
   })
 
-  it('re-runs the uniqueness rules against other live customers', async () => {
-    const a = await createActive()
+  it('re-runs every uniqueness rule (email, phone, name + DOB, identity document) against other live customers', async () => {
+    const a = await createActive({ identityDocumentType: 'PASSPORT', identityDocumentNumber: 'UPD-A1', customerDetails: { firstName: 'Grace', lastName: 'Hopper', dateOfBirth: '1906-12-09' } })
     const b = await createActive()
-    const res = await app.inject({ method: 'PATCH', url: `/v0/customers/${b.customerHayId}`, payload: { email: a.email!.toUpperCase() } })
-    expect(res.statusCode).toBe(422)
-    expect(res.json().message).toMatch(/^DUPLICATE_CUSTOMER: /)
+    const expectDuplicate = async (payload: Record<string, unknown>) => {
+      const res = await app.inject({ method: 'PATCH', url: `/v0/customers/${b.customerHayId}`, payload })
+      expect(res.statusCode, res.body).toBe(422)
+      expect(res.json().message).toMatch(/^DUPLICATE_CUSTOMER: /)
+    }
+    await expectDuplicate({ email: a.email!.toUpperCase() })
+    await expectDuplicate({ phoneNumber: { countryCodePrefix: '+61', numberAfterPrefix: a.phoneNumber!.numberAfterPrefix } })
+    await expectDuplicate({ firstName: 'grace', lastName: 'HOPPER', dateOfBirth: '1906-12-09' })
+    await expectDuplicate({ documentData: { identityDocumentType: 'PASSPORT', identityDocumentNumber: 'UPD-A1', identityDocumentIssuingCountry: 'AUS' } })
+    expect(await get(b.customerHayId!)).toEqual(b)
     const self = await app.inject({ method: 'PATCH', url: `/v0/customers/${b.customerHayId}`, payload: { email: b.email!.toUpperCase() } })
     expect(self.statusCode).toBe(200)
   })
@@ -625,7 +752,7 @@ describe('ctx.services.customers (API for other domains)', () => {
     expect(svc.toResponse(svc.get(active.customerHayId!))).toEqual(await get(active.customerHayId!))
   })
 
-  it('markInactive (account-closure cascade) stores the closure reason, sets closedDateTimeUtc and emits CUSTOMER_STATUS_UPDATED INACTIVE (PLATFORM)', async () => {
+  it('markInactive (account-closure cascade) stores the closure reason, sets closedDateTimeUtc and publishes customer.statusChanged; the INACTIVE webhook is off by default', async () => {
     const svc = built.ctx.services.customers
     const c = await createActive()
     const seen: any[] = []
@@ -637,8 +764,27 @@ describe('ctx.services.customers (API for other domains)', () => {
     expect(seen).toHaveLength(1)
     expect(seen[0]).toMatchObject({ previousStatus: 'ACTIVE', actionOwner: 'PLATFORM', customer: { status: 'INACTIVE' } })
     const events = await payloadsFor(c.customerHayId!)
-    expect(events.at(-1)).toEqual({ customerHayId: c.customerHayId, idempotencyKey: expect.any(String), type: 'CUSTOMER_STATUS_UPDATED', actionOwner: 'PLATFORM', customerStatusUpdatedEvent: { customerStatus: 'INACTIVE' } })
+    expect(events.map((e) => e.type)).toEqual(['ONBOARDING_PASSED', 'CUSTOMER_STATUS_UPDATED'])
+    expect(events.at(-1).customerStatusUpdatedEvent).toEqual({ customerStatus: 'ACTIVE' })
     expect((await get(c.customerHayId!))).toMatchObject({ status: 'INACTIVE', statusReason: 'DECEASED' })
+  })
+
+  it('emits CUSTOMER_STATUS_UPDATED INACTIVE (PLATFORM) for the closure cascade when emitCustomerInactive is on', async () => {
+    const other = await startApp({ emitCustomerInactive: true })
+    try {
+      const res = await other.app.inject({ method: 'POST', url: '/v0/customers/create', payload: customerBody() })
+      expect(res.statusCode, res.body).toBe(200)
+      const id = (res.json() as HayCustomer).customerHayId!
+      await other.app.inject({ method: 'POST', url: '/_admin/flush' })
+      other.ctx.services.customers.markInactive(id, 'DECEASED')
+      await other.app.inject({ method: 'POST', url: '/_admin/flush' })
+      const rows = (await other.app.inject({ method: 'GET', url: '/_admin/notifications?limit=1000' })).json() as { payload: any }[]
+      const last = rows.at(-1)!.payload
+      expect(last).toEqual({ customerHayId: id, idempotencyKey: expect.any(String), type: 'CUSTOMER_STATUS_UPDATED', actionOwner: 'PLATFORM', customerStatusUpdatedEvent: { customerStatus: 'INACTIVE' } })
+      assertValidNotification(last, 'v0')
+    } finally {
+      await other.app.close()
+    }
   })
 
   it('setStatus is a no-op for the same status and refuses to leave INACTIVE', async () => {
@@ -670,12 +816,23 @@ describe('webhook contract', () => {
     const res = await app.inject({ method: 'GET', url: '/_admin/notifications?limit=1000' })
     const rows = res.json() as { version: string; type: string; payload: unknown }[]
     expect([...new Set(rows.map((r) => r.type))].sort()).toEqual(['CUSTOMER_DETAILS_CHANGE', 'CUSTOMER_STATUS_UPDATED', 'ONBOARDING_FAILED', 'ONBOARDING_PASSED'])
-    expect(rows).toHaveLength(10)
+    expect(rows).toHaveLength(9) // the closure-cascade INACTIVE webhook is behind emitCustomerInactive (off)
     for (const r of rows) {
       expect(r.version).toBe('v0')
       assertValidNotification(r.payload, 'v0')
     }
     // the validator itself rejects a malformed envelope
     expect(() => assertValidNotification({ customerHayId: 'nope', idempotencyKey: randomUUID(), type: 'CUSTOMER_STATUS_UPDATED', customerStatusUpdatedEvent: { customerStatus: 'CLOSED' } })).toThrow(/does not match/)
+  })
+})
+
+describe('dependency shapes (deps.ts)', () => {
+  it('refuses to start when a registered accounts/cards service lacks a method customers calls', async () => {
+    const bad = await buildServer({ logLevel: 'silent', auth: false })
+    const services = bad.ctx.services as unknown as Record<string, unknown>
+    services.accounts = { create: () => ({}) }
+    services.cards = {}
+    await expect(bad.app.ready()).rejects.toThrow(/accounts\.listForHolder[\s\S]*cards\.listForCustomer/)
+    await bad.app.close()
   })
 })

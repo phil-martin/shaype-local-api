@@ -10,7 +10,7 @@ import { badRequest, notFound, unprocessable } from '../../lib/errors.js'
 import { stableHash } from '../../lib/idempotency.js'
 import { uuid } from '../../lib/ids.js'
 import type { OnboardingFailedState, CustomerDetailsChanges } from './events.js'
-import { normalizePhone, type BlockedBy, type Customer, type CustomerRepo, type CustomerStatus, type Page, type SearchFilters, type StatusReason } from './repo.js'
+import { normalizePhone, type BlockedBy, type Customer, type CustomerRepo, type CustomerStatus, type Page, type SearchFilters, type StatusReason, type TaxObligation } from './repo.js'
 
 export type HayCustomer = components['schemas']['HayCustomer']
 export type CreateCustomerInput = components['schemas']['CreateHayCustomerRequestBody']
@@ -107,7 +107,7 @@ export class CustomersService {
       phoneNumber: normalizePhone(input.phoneNumber),
       address: { ...input.address },
       customerDetails: { ...input.customerDetails, gender: input.customerDetails.gender ?? 'OTHER' },
-      customData: input.customData === null ? undefined : (input.customData as Record<string, unknown> | undefined),
+      customData: input.customData as Record<string, unknown> | null | undefined, // explicit null is kept and echoed (nullable field)
       externalCustomerId: input.externalCustomerId,
       deviceId: 'NOT_SPECIFIED',
       identityDocument: {
@@ -121,7 +121,7 @@ export class CustomersService {
       identityVerificationCaseId: input.identityVerificationCaseId ?? input.journeyId ?? undefined,
       skipKyc: input.skipKyc === true,
       onlySanctionsCheck: input.onlySanctionsCheck === true,
-      taxObligations: input.taxObligations,
+      taxObligations: taxList(input.taxObligations),
       createdAt: now,
     })
     this.assertUnique(c)
@@ -157,7 +157,10 @@ export class CustomersService {
     this.transition(c, to, { actionOwner: 'PLATFORM' })
   }
 
-  /** updateCustomer: only supplied fields change; address / phoneNumber / documentData replace as a whole; taxObligations replaces the list. */
+  /**
+   * updateCustomer: only supplied fields change; address / phoneNumber / documentData replace as a whole;
+   * taxObligations replaces the list ([] clears it). No effective change -> no save, no event.
+   */
   update(id: string, input: UpdateCustomerInput): Customer {
     const before = this.get(id)
     if (before.status === 'INACTIVE') throw unprocessable(`INVALID_STATE: Customer ${id} is INACTIVE and cannot be updated`)
@@ -184,7 +187,7 @@ export class CustomersService {
         region: doc.identityDocumentRegion,
       })
     }
-    if (input.taxObligations !== undefined) next.taxObligations = input.taxObligations.map((t) => ({ ...t }))
+    if (input.taxObligations !== undefined) next.taxObligations = taxList(input.taxObligations)
     if (same(before, next)) return before
 
     const changes: CustomerDetailsChanges = {
@@ -272,4 +275,9 @@ export function emailTags(email: string): Set<string> {
 
 function same(a: unknown, b: unknown): boolean {
   return stableHash(compact(a)) === stableHash(compact(b))
+}
+
+/** Tax obligations are stored in one form only: a non-empty list or absent. */
+function taxList(list: TaxObligation[] | undefined): TaxObligation[] | undefined {
+  return list && list.length ? list.map((t) => ({ ...t })) : undefined
 }
