@@ -298,3 +298,124 @@ Conventions common to every operation in this domain [spec]:
   - Removing a customer who is not a member, or unknown ids: undefined [open].
   - Whether the removal is synchronous or the side effects are asynchronous (account closure's customer-status update is described as asynchronous in docs:account-closure) is not stated [open].
 - **Webhooks:** none stated explicitly for this operation. By consequence of the side effects, the client may receive `CARD_STATUS_CHANGE` ("The status of a card has changed") and `CUSTOMER_STATUS_UPDATED` ("Customer's status has been updated") notifications, both defined in `NotificationDto.type` [webhooks] — [inferred].
+
+## 2. Entities and fields
+
+No `required` arrays exist on any response schema in this domain; nullability is never declared (`nullable` appears only on `CreateHayAccountForGroupRequestBody.customData` and the `type` query param) — treat every response field as optional/omittable [spec]. No examples exist in the spec for these schemas except the one 422 body on createHayAccountForGroup [spec].
+
+### HayGroup — "Details of a Group" [spec]
+| field | type | enum / constraints | description |
+|---|---|---|---|
+| `groupHayId` | string uuid | — | "Unique identifier (UUID) of the Group" |
+| `groupName` | string | — | "Name of the Group, if not provided a generic name associated with the client will be generated" |
+| `groupType` | string | `["PERSONAL","BUSINESS"]` | "BUSINESS: Non-individual / joint entity; PERSONAL: Joint account entity (default if no option selected)" |
+| `customerHayIds` | array of string uuid | — | "Unique identifiers (UUID) of the Customer(s) associated to this Group" |
+| `businessIdentifiers` | `BusinessIdentifiers` | — | "Identifiers issued by the government to the entity represented by this Group" |
+
+Created by: createHayGroup. Read by: getHayJointAccountByGroupHayId (as `HayJointAccount`). Updated by: updateGroup (name/type/identifiers), addCustomersToGroup, removeCustomerFromGroup (membership). No delete/close operation exists for a group [spec]. No status field [spec].
+
+### HayJointAccount — "Details of a joint or business account." [spec]
+| field | type | enum | description |
+|---|---|---|---|
+| `groupHayId` | string uuid | — | "Unique identifier (UUID) of the Group" |
+| `name` | string | — | "Name of the Group, ..." (same semantics as `HayGroup.groupName`; different property name) |
+| `groupType` | string | `["PERSONAL","BUSINESS"]` | as HayGroup |
+| `customerHayIds` | array of string uuid | — | as HayGroup |
+| `businessIdentifiers` | `BusinessIdentifiers` | — | as HayGroup |
+| `hayAccount` | `HayAccount` | — | the group's account |
+
+Returned by: getHayJointAccountByGroupHayId, createHayAccountForGroup, addCustomersToGroup, removeCustomerFromGroup. It is a projection of Group + Account, not a separately stored entity [inferred].
+
+### BusinessIdentifiers [spec]
+| field | type | constraints | description |
+|---|---|---|---|
+| `businessNumber` | string | minLength 11, maxLength 11 | "Australian Business Number (ABN)" |
+| `companyNumber` | string | minLength 9, maxLength 9 | "Australian Company Number (ACN)" |
+| `registeredBodyNumber` | string | minLength 9, maxLength 9 | "Australian Registered Body Number (ARBN)" |
+| `registeredSchemeNumber` | string | minLength 9, maxLength 9 | "Australian Registered Scheme Number (ARSN)" |
+No required fields; no pattern (digits-only not enforced by schema) [spec]. Written by createHayGroup, updateGroup (whole-object replace).
+
+### HayAccount (one-level expansion; owned by Accounts domain) — "Details of an account" [spec]
+Only `customData` is required. Fields: `accountHayId` uuid; `accountHolderId` uuid "Unique identifier (UUID) of the account holder"; `accountHolderType` enum `["CUSTOMER","GROUP"]` ("CUSTOMER: The account holder is a Customer, accountHolderId contains a Customer ID; GROUP: The account holder is a Group, accountHolderId contains a Group ID"); `accountNumber` string "Account number, 5-9 digits in length"; `bsb` string "6 digits in length"; `currency` ISO-4217 enum; `productId` uuid; `parentAccountId` uuid nullable; `customData` object nullable; `status` enum `["PENDING_APPROVAL","APPROVED","ACTIVE","LOCKED","DORMANT","CLOSED","ACTIVE_IN_ARREARS"]`; `blockedBy` enum `["CLIENT","PLATFORM"]`; `creationDateTimeUtc`, `closedDateTimeUtc` date-time; balances (all number, 2dp): `availableBalance` ("Total balance available for use on Account. Funds that are held, locked and allocated to a Stack will not be available."), `heldBalance`, `lockedBalance`, `overdraftBalance`, `overdraftLimit`, `technicalOverdraftBalance`, **`stacksBalance`** ("Total value current held against any Stack(s) on the Account. Positive value to 2 decimal places."), `totalBalance` ("Total value of all funds on the Account (this amount will also include unused overdraft limit and Stacks, held and locked value)."); `homeCurrencyBalanceEquivalent` object (`availableBalance`, `currency`, `heldBalance`, `totalBalance` — its `totalBalance` also "including ... Stacks").
+
+Touched by this domain: created by createHayAccountForGroup (holder type GROUP); `stacksBalance`/`availableBalance` moved by accountToStackTransfer, stackToAccountTransfer, closeStack; read via getHayJointAccountByGroupHayId.
+
+### HayStack — "Details of a stack used to save or ring-fence money separately from the main account." [spec]
+| field | type | enum / constraints | description |
+|---|---|---|---|
+| `stackHayId` | string uuid | — | "Unique identifier (UUID) of the Stack" |
+| `accountHayId` | string uuid | — | "Unique identifier (UUID) of the Account" |
+| `name` | string | 1..20 on write; unique per account; no emojis [docs:stack] | "Name of the Stack" |
+| `imageUrl` | string | — | "URL of image representing the Stack goal embedded in app" |
+| `targetAmount` | number | ≥ 0 on write; ≤ account "total limit" [docs:stack] | "Target balance value set on Stack" |
+| `balance` | number | — | "Total balance available for use on Stack" |
+| `status` | string | `["OPEN","CLOSED"]` | "OPEN: Stack is active and in use; CLOSED: Stack is inactive and can no longer be used" |
+| `createdAtUtc` | string date-time | — | "DateTime in UTC format when the Stack was created" |
+| `closedAtUtc` | string date-time | — | "DateTime in UTC format when the Stack was closed" |
+
+Created by createStack (not returned). Read by getAllStacks, embedded in `HayStackTransaction.stack`. Updated by updateStack (name/imageUrl/targetAmount), accountToStackTransfer / stackToAccountTransfer / stackToStackTransfer (`balance`), closeStack (`status`, `closedAtUtc`, `balance`→0).
+
+### Stack (alternate projection returned only by updateStack) [spec]
+Same fields as HayStack but the identifier is **`hayId`** instead of `stackHayId`, and no descriptions: `accountHayId` uuid, `balance` number, `closedAtUtc` date-time, `createdAtUtc` date-time, `hayId` uuid, `imageUrl` string, `name` string, `status` enum `["OPEN","CLOSED"]`, `targetAmount` number. Implementer: serialise the same record under both shapes [inferred].
+
+### HayStackTransaction — "Details of a stack transaction." [spec]
+| field | type | enum | description |
+|---|---|---|---|
+| `hayId` | string uuid | — | "Unique identifier (UUID) of the Transaction" |
+| `accountHayId` | string uuid | — | "Unique identifier (UUID) of the Account" |
+| `stackHayId` | string uuid | — | "Unique identifier (UUID) of the Stack" |
+| `stack` | `HayStack` | — | embedded stack snapshot/details |
+| `amount` | number | — | "Value of the Transaction, to 2 decimal places" (sign convention not stated [open]) |
+| `customerId` | string uuid | — | "Unique identifier (UUID) of the Customer (initiator of the transfer)" |
+| `notes` | string | — | "Transaction description" (populated from request `description` [inferred]) |
+| `counterpartTransactionId` | string uuid | — | "Unique identifier (UUID) of the counterpart transaction (Stack to Stack transactions)" |
+| `originId` | string uuid | — | "Additional identifier applied to Transaction related to origin of the request" |
+| `originType` | string | `["CUSTOMER","SCHEDULED_PAYMENT","HAAS_OPERATIONS","OPERATIONS","MANDATE_PAYMENT","DIRECT_DEBIT","TRANSACTION"]` | "CUSTOMER: Transaction initiated by a customer; SCHEDULED_PAYMENT: Transaction initiated by a schedule; HAAS_OPERATIONS: Transaction initiated by Client Operations team; OPERATIONS: Transaction initiated by Shaype Operations team; MANDATE_PAYMENT: Transaction initiated by mandate; DIRECT_DEBIT: Transaction initiated by direct debit; TRANSACTION: Transaction initiated by transaction" |
+| `type` | string | `["STANDARD","ROUND_UP"]` | "STANDARD: Movement of fund to, from or between stacks triggered by customer or ops; ROUND_UP: Account to Stack transfer triggered by RoundUp functionality" |
+| `transactionTimeUtc` | string date-time | — | "DateTime in UTC format when the Transaction was initiated" |
+
+Created by accountToStackTransfer, stackToAccountTransfer (one each), stackToStackTransfer (two, cross-linked), possibly closeStack sweep [open], and the platform RoundUp feature (`ROUND_UP`, no API) [spec]. Read by getAllStackTransactions, getTransactionsForStack. Never updated or deleted [inferred; "soft deletion" keeps history — docs:stack].
+
+### StackTransactionResponse — "Stack Transaction outcome details" [spec]
+`outcome` enum `["ACCEPTED","INTERNAL_ERROR","REFUSED_INSUFFICIENT_FUNDS","UNKNOWN"]` ("Transaction outcome"); `transactionId` uuid ("Unique identifier (UUID) of the Transaction"). Returned by accountToStackTransfer, stackToAccountTransfer.
+
+### StackToStackTransactionOutcome — "Stack to Stack Transaction outcome details" [spec]
+`outcome` (same enum as above); `withdrawalTransactionId` uuid ("Withdrawal (source stack to account) Transaction"); `depositTransactionId` uuid ("Deposit (account to destination stack) Transaction"). Returned by stackToStackTransfer.
+
+### UpdateStackResponse [spec]
+`error` enum `["OPEN_STACKS_LIMIT_REACHED","TOTAL_STACKS_LIMIT_REACHED","STACK_NAME_ALREADY_IN_USE"]`; `stack` (`Stack`). Returned by updateStack.
+
+### ErrorResponse — "An error response." [spec]
+`details` string "Error details"; `message` string "Error description"; `status` string "HTTP response status"; `traceId` string "TraceID that can be used by HAY for troubleshooting the request". Example values [spec, createHayAccountForGroup 422]: `message` = `"PERMISSION_DENIED: Account cannot be created for group with id f64f41eb-41f4-4619-9fc4-68d292aeb0f9, all members of the group should have an ACTIVE status"`, `details` = `"Please refer to the API documentation or contact Shaype for more info with the traceId."`, `status` = `"422"` (a string), `traceId` = `"b24daeb7-4242-4ff1-ba50-9825d5deedd8"`.
+
+### Cross-domain entities read/written here (for status enums see §3)
+- `HayCustomer.status` enum `["ACTIVE","INACTIVE","REJECTED","BLOCKED","PENDING_APPROVAL","REFERRED"]` — read by createHayAccountForGroup (must be ACTIVE), written to `INACTIVE` by removeCustomerFromGroup [spec enum; docs:customer-removal].
+- Cards: cancelled by removeCustomerFromGroup [docs:customer-removal]; card status enum lives in the Cards domain.
+- `AccountBalancesDto` (webhook payload inside `TransactionEventDto.accountBalances`) has `stacksBalance: CurrencyAmount` alongside `totalBalance`, `heldBalance`, `lockedBalance`, `availableBalance` [webhooks].
+- External authorisation `Account.balance`: "Balance of the Account immediately before this transaction was applied. Money held in stacks is not included" [ext-auth]; `AccountHolder.type` enum `["CUSTOMER","GROUP"]` with `id` = "the Group when type is GROUP"; `Customer` object "Set when the account holder is a customer, or when a group account transaction was triggered by one." [ext-auth].
+
+## 3. State machines
+
+### HayStack.status — `["OPEN","CLOSED"]` [spec]
+| from | to | via | notes |
+|---|---|---|---|
+| (none) | `OPEN` | createStack | initial state [inferred from "This endpoint is used to close an open stack" — docs:stack] |
+| `OPEN` | `CLOSED` | closeStack | sets `closedAtUtc`; sweeps `balance` to account [docs:stack] |
+| `CLOSED` | — | — | **terminal**: "Closed stack can't be open again" [docs:stack] |
+
+Only `OPEN` stacks may receive/send transfers or be updated [inferred; docs say CLOSED "can no longer be used" — spec enum description].
+
+### HayGroup — no status enum [spec]
+A group has no lifecycle state; the only mutable dimensions are membership (`customerHayIds`) and descriptive fields. There is no close/delete operation. Membership invariant: at least one member at all times (removal of the final member is rejected) [docs:customer-removal].
+
+### Outcome enums (single-shot results, not state machines) [spec]
+`StackTransactionResponse.outcome` / `StackToStackTransactionOutcome.outcome`: `["ACCEPTED","INTERNAL_ERROR","REFUSED_INSUFFICIENT_FUNDS","UNKNOWN"]`. A transfer is either applied (`ACCEPTED`) or not; no pending state exists for stack movements [inferred].
+
+### Cross-domain transitions caused by this domain
+| entity | from | to | via | condition |
+|---|---|---|---|---|
+| `HayCustomer.status` | `ACTIVE` (or any non-INACTIVE) | `INACTIVE` | removeCustomerFromGroup | after removal the customer "is linked only to accounts with a Closed status" [docs:customer-removal] |
+| `HayAccount.status` | (none) | `APPROVED` | createHayAccountForGroup | "Accounts created through this API are automatically set as APPROVED" [spec HayAccount.status]; later `APPROVED → ACTIVE` happens on first transaction [docs:account-status] — whether a stack transfer counts as that first "deposit or withdrawal" is undefined [open] |
+| Card status | (active states) | cancelled | removeCustomerFromGroup | for cards the customer holds on accounts held by the group [docs:customer-removal] |
+
+Customer status values for reference [spec HayCustomer.status]: `ACTIVE` "Customer is active", `BLOCKED` "Customer is blocked", `INACTIVE` "Customer is not active (closed)", `PENDING_APPROVAL` "Customer is awaiting approval", `REFERRED` "Customer is referred for further KYC checks", `REJECTED` "Customer has been rejected". Account status values [spec HayAccount.status]: `PENDING_APPROVAL`, `APPROVED`, `ACTIVE`, `LOCKED`, `DORMANT`, `CLOSED`, `ACTIVE_IN_ARREARS` (`CLOSED` "is a final status" [docs:account-status]).
