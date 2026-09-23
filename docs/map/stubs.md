@@ -557,3 +557,147 @@ See Conventions.
 ### Webhook DTOs `[webhook-spec]`
 - `NotificationDtoV1` ("Details of event the v1 notification"), `required: ["idempotencyKey","type"]`: `idempotencyKey` uuid ("Idempotency key (UUID) to uniquely represent this request and prevent duplication."); `type` enum `["BATCH_COMPLETED","PERK_ORDER_UPDATE"]`; `createdTimeUtc` date-time; `actionOwner` enum `["CLIENT","PLATFORM"]` ("**CLIENT**: Client executed an action which triggered the event. **PLATFORM**: Shaype executed an action which triggered the event."); `eventDetails` oneOf `BatchCompletedEventDto` | `PerkOrderUpdateEventDto`, discriminated by `EventDetailsDto.eventType` (same enum).
 - `PerkOrderUpdateEventDto` ("Details of the **Perk Order Update** event; provided when the type is `PERK_ORDER_UPDATE`."): `orderExternalId` uuid; `status` enum `["COMPLETED","DECLINED","REVERSED"]` ("Final order status."); `pinCode`; `pinSerial`; `confirmedTimeUtc` date-time; `redemption: RedemptionDto { usageInfo: string[], terms: string, validity: ValidityDto { unit: string (example "DAY"), quantity: int32 (example 365, "-1 unlimited, null unknown") } }`.
+
+## 3. State machines
+
+This domain exposes very few status fields. Everything below that is not `[spec]`/`[webhook-spec]` is implicit lifecycle the stub must model internally.
+
+### Perk order `status` (`OrderSummary.status` — free string; final values from `PerkOrderUpdateEventDto.status` `[webhook-spec]`)
+Values documented: `COMPLETED`, `DECLINED`, `REVERSED` ("Final order status.") [webhook-spec]. The initial (non-final) value written by `createOrder` is **not documented anywhere**; `OrderSummary.statusClass` ("Order status class", example `COMPLETED`) is a second free string whose relationship to `status` is undocumented.
+
+| from | to | via |
+|---|---|---|
+| — | *(initial, undocumented)* | `createOrder` (201) [spec] |
+| *(initial)* | `COMPLETED` | platform; `PERK_ORDER_UPDATE` webhook, `confirmedTimeUtc`/`pinCode`/`pinSerial`/`redemption` populated; `OrderSummary.confirmedAt` set [webhook-spec][inferred mapping] |
+| *(initial)* | `DECLINED` | platform; `PERK_ORDER_UPDATE` webhook [webhook-spec] |
+| `COMPLETED` | `REVERSED` | platform; `PERK_ORDER_UPDATE` webhook [webhook-spec]; that it follows `COMPLETED` is [inferred] |
+
+Terminal: `DECLINED`, `REVERSED`; `COMPLETED` is "final" per the webhook but can still be reversed [inferred]. No client operation changes an order's status [spec].
+
+### Liquidity threshold `active` (`LiquidityThreshold.active`, boolean `[spec]`)
+
+| from | to | via |
+|---|---|---|
+| — | `true` / `false` | `createLiquidityThreshold` (`active` in body; default when omitted undocumented) [spec] |
+| `true` | `false` | `updateLiquidityThreshold` `{ "active": false }` — "the threshold will not be checked and won't raise an alert" [spec] |
+| `false` | `true` | `updateLiquidityThreshold` `{ "active": true }` [spec] |
+
+No terminal state; no delete operation exists [spec].
+
+### FX quote (implicit; no status field)
+
+| from | to | via |
+|---|---|---|
+| — | ISSUED | `generateConversionQuote` [spec] |
+| ISSUED | EXECUTED | `executeConversion` with `outcome: ACCEPTED` before `expiresAtUtc` [spec][docs:quote-expiration-observability] |
+| ISSUED | EXPIRED | clock passes `expiresAtUtc`; a later `executeConversion` yields `REFUSED_QUOTE_EXPIRED` [spec][docs:margins-and-quote-locking] |
+| ISSUED | ISSUED | `executeConversion` refused for another reason (`REFUSED_*`) — whether the quote stays executable is unspecified [inferred: yes, until expiry] |
+
+Terminal: EXECUTED (a quote books once [docs:margins-and-quote-locking]), EXPIRED.
+
+### FX conversion (`ConversionExecuteResponse.outcome` — terminal at creation)
+`outcome` is set once by `executeConversion` and never changes; manual conversions "cannot be cancelled, reversed, or amended once confirmed" [docs:multi-currency-wallets-feature-guide]. Composite-auth conversions are "unwound" on hold reversal by booking further conversions, not by mutating the original [docs:multi-currency-card-authorisation]. `LiquidityConversion.status` / `depositStatus` are Currency Cloud strings (only `awaiting_funds` shown) and are not enumerated [spec].
+
+### Click to Pay enrolment (internal flag on the card; never exposed `[docs:click-to-pay]`)
+
+| from | to | via |
+|---|---|---|
+| NOT_ENROLLED | ENROLLED | `enrolCard` (Manual mode) [spec]; card creation / one-off migration (Auto mode) [docs:click-to-pay] |
+| ENROLLED | ENROLLED | `enrolCard` again — "no-op success" (email in body may still update the C2P registration) [spec] |
+| ENROLLED | NOT_ENROLLED | `unenrolCard` [spec]; `unenrolCustomer` (all the customer's cards) [spec]; card → `inactive`/`expired` (platform) [docs:click-to-pay] |
+| NOT_ENROLLED | NOT_ENROLLED | `unenrolCard` / `unenrolCustomer` — "no-op success" [spec] |
+
+Customer-level: registered with C2P when their first card enrols; removed by `unenrolCustomer` [spec]. No terminal state.
+
+## 4. Invariants and calculations
+
+**FX quote maths** [docs:margins-and-quote-locking] — margin is "a percentage added to the live market rate to produce the rate the customer is quoted. It adjusts the rate the customer receives; it is not a separate charge." Worked example (AUD→USD, `fixedSide: BUY`, `amount: 300`, margin 1%, market 0.70460): quoted rate 0.69755; sell amount 430.08 AUD (vs. 425.77 AUD at market; 4.31 AUD difference). From these figures: `quotedRate = marketRate × (1 − margin/100)` with the rate expressed as buy-currency per unit of sell-currency (0.70460 × 0.99 = 0.69755) [inferred from the example]; `sellAmount = buyAmount / quotedRate` when `BUY` is fixed (300 / 0.69755 = 430.08); `buyAmount = sellAmount × quotedRate` when `SELL` is fixed [inferred]. Margin source: `marginPercentage` on the request if present, else the client's configured default [spec][docs]. `getConversion` exposes both: `quoteUnadjustedRate` (market) and `quoteMarginAdjustedRate`; "The margin percentile equates to the difference between these two values" [docs:multi-currency]. `conversionRate` ("Conversion rate executed") — for a locked quote this equals the margin-adjusted rate [inferred]. Amounts are to 2 decimal places (`CurrencyAmount.amount`) [spec]; rounding mode unspecified [inferred: half-up].
+
+**Quote expiry** — `expiresAtUtc` = quote-recorded timestamp + client-configured expiration window (set via CSM; can differ per environment) [docs:quote-expiration-observability][docs:multi-currency]; execution "received by Shaype before `expiresAtUtc`" is honoured at exactly the quoted amounts [docs:quote-expiration-observability]; the window has no documented default.
+
+**Conversion ledger effect** — `executeConversion` (ACCEPTED): debit `sellAccountId` by `sellAmount`, credit the buy account by `buyAmount`, "the exact amounts from the quote" [docs:multi-currency-wallets-feature-guide]; two `FinancialTransaction`s are created (`debitTransactionId`, `creditTransactionId`) [spec]; balance definitions (`availableBalance`, `heldBalance`, stacks) are the accounts domain's; "Currency Account Available Balance … is the operational figure used when the customer initiates a manual currency conversion" [docs:multi-currency-wallets-feature-guide]. Nothing moves at quote time [inferred]. Max-balance limit on the buy Currency Account is enforced on execution [docs:multi-currency].
+
+**Indicative rates** — three rates per pair: `bidRate` (naked), `cardMarginAdjustedBidRate`, `walletMarginAdjustedBidRate` [spec]; from a cache "refreshed periodically (currently every 30 minutes)" [docs:multi-currency-card-authorisation], stamped as `lastRefreshedAtUtc` [spec]; pair = `sellCurrency + buyCurrency`, 6 uppercase chars, e.g. `AUDGBP` [spec]; duplicates de-duplicated; currently AUD pairs only [docs:indicative-rates-api].
+
+**FX-provider minimum** [docs:minimum-conversion-rounding-logic] — Currency Cloud rejects conversions below a 1 GBP-equivalent floor (`conversion_below_limit`); the platform retries at the minimum that clears "adds a 1% buffer to absorb rounding"; the *customer* ledger keeps the original amounts and the surplus stays in the liquidity account, flagged with marker `CCW0003`. Worked example: USD 1.00 spend, AUD→USD sell ≈1.44 AUD (0.75 GBP equiv) rejected → retry sell 1.94 AUD at 0.7076 → treasury −1.94 AUD / +1.37 USD, customer −1.44 AUD / +1.00 USD, +0.37 USD surplus. Only relevant if the stub models liquidity balances alongside composite auth.
+
+**Liquidity thresholds** [docs:liquidity-monitoring-and-alerting-1] — per type: 0–10 thresholds; `percent` integer 1–100; `amount` positive whole number ≥ 1 and ≤ the channel's limit (`TOTAL_DAILY_NET_NON_SCHEME`: Non-Scheme Float Account Cash Balance + Non-Scheme CM Liquidity Account Cash Balance; `TOTAL_DAILY_OUTBOUND_BPAY`: `BPAY_DAILY_LIMIT`; `TOTAL_DAILY_INBOUND_DIRECT_DEBIT`: `DIRECT_DEBIT_PER_DAY`; `TOTAL_DAILY_NET_VISA`: `CARD_PAYMENTS_DAILY`); defaults: 50%, 75%, 90% per channel, enabled. Trigger conditions (verbatim):
+
+| Threshold Type | Amount ($) Trigger Condition | Percentage (%) Trigger Condition |
+|---|---|---|
+| TOTAL_DAILY_NET_NON_SCHEME | If **amount ($) + Total Non-Scheme Running Balance** <= 0 | If (Non-Scheme Float Account Cash Balance + Non-Scheme CM Liquidity Account Cash Balance) × **percentage (%) + Total Non-Scheme Running Balance** <= 0 |
+| TOTAL_DAILY_OUTBOUND_BPAY | If **amount ($) + Total Outbound BPAY Running Balance** <= 0 | If BPAY_DAILY_LIMIT × **percentage (%) + Total Outbound BPAY Running Balance** <= 0 |
+| TOTAL_DAILY_INBOUND_DIRECT_DEBIT | If **amount ($) + Total Inbound Direct Debit Running Balance** <= 0 | If DIRECT_DEBIT_PER_DAY × **percentage (%) + Total Inbound Direct Debit Running Balance** <= 0 |
+| TOTAL_DAILY_NET_VISA | If **amount ($) + Total Scheme Running Balance** <= 0 | If CARD_PAYMENTS_DAILY × **percentage (%) + Total Scheme Running Balance** <= 0 |
+
+The "`+ Running Balance <= 0`" form implies running balances are **negative as the day's exposure grows** [inferred]. Breach ⇒ email alert (not a webhook) [docs]. How these running balances relate to `ClientLiquidity.*.total` and the `inbound`/`outbound` split is not stated.
+
+**Perk order amounts** — fixed products: `MonetaryValue.amount` set, `min`/`max` null; ranged products: `min`/`max` set, `amount` null [spec]; for ranged products the caller supplies `calculationMode` (`SOURCE_AMOUNT` | `DESTINATION_AMOUNT`) and the corresponding `source`/`destination` `Money` [spec]; the amount must fall in `[min, max]` of that side [inferred]. `getOrders`: default window = last 24h; explicit `fromDate`/`toDate` window ≤ 24h; `externalId` filter bypasses the window; `offset % limit == 0`; `limit` ∈ [1,100] default 20 [spec].
+
+**ID and format rules** [spec] — every id in this domain is a UUID (`cardId`, `customerId`, `conversionId`, `quoteId`, `thresholdId`, `sellAccountId`, `buyAccountId`, `debitTransactionId`, `creditTransactionId`, `transactionId`, operator/product `id`, `operatorId`, `productId`, `externalId`, `purchaserId`, `idempotencyKey`, threshold `id`); `idempotencyKey` and threshold `id` and order `externalId` are **client-generated**; MCC `code` is a 4-digit int32 (ISO 18245); mobile numbers match `^\+[1-9][0-9]{6,14}$` (E.164); countries are ISO 3166-1 alpha-3; `LiquidityConversion.shortReference` example `20260821-ABCDEF` (date + 6 chars [inferred]); `currencyPair` = 6 uppercase letters.
+
+**Date handling** [spec] — `getClientLiquidity.date` and `conversionDate` are `format: date` (`YYYY-MM-DD`); quote/conversion timestamps are `date-time` UTC (`…Utc` suffix); `getOrders.fromDate`/`toDate` and `OrderSummary.createdAt`/`confirmedAt` are untyped strings described as ISO 8601; `ExchangeExternalTokenResponse.accessExpiresUtc` is an int64 (unit unspecified).
+
+## 5. Cross-domain dependencies
+
+- **Accounts** — `generateConversionQuote.sellAccountId` must be an existing, funded account of the customer; the buy side is the customer's account in `buyCurrency` (Home Currency Account = AUD parent; Currency Accounts = children with `HayAccount.parentAccountId`) [docs:multi-currency-wallets-feature-guide][spec]; `executeConversion` debits/credits those two accounts and their balances must reflect it in `getHayAccount` ("validate the balance adjustments via GET Account by ID") [docs:multi-currency-wallets-conversions]; `HayAccount.homeCurrencyBalanceEquivalent` is computed "using margin adjusted cached rates" — the same rate cache as `getFxRates` [docs][inferred]; a blocked account cannot convert ("place a block on the Currency Account via Block Account to prevent that account being used for card spend or conversions") [docs:multi-currency] → `REFUSED_ACCOUNT_BLOCKED` / `REFUSED_RECIPIENT_ACCOUNT_BLOCKED` [inferred mapping]; closed accounts → `REFUSED_ACCOUNT_CLOSED` / `REFUSED_RECIPIENT_ACCOUNT_CLOSED` [inferred]; max-balance limit → `REFUSED_MAX_BALANCE_EXCEEDED` [docs:multi-currency][inferred]; `blockAccount` cascades to FX child accounts [spec, accounts domain]; **Products**: `CreateAccountRequestBody.productId` (required) and `HayAccount.productId` reference the ids `getAllProducts` is documented to return [docs:product]; multi-currency is a product feature; `CreateAccountRequestBody.fx` (`AccountFxDataRequest { childAccounts, compliance: FxComplianceDataRequest }`) is how FX child accounts are opened [spec].
+- **Transactions / holds** — each accepted conversion creates two `FinancialTransaction`s (`debitTransactionId`, `creditTransactionId`) [spec]; channel enum values exist for them: `CURRENCY_CLOUD_CLIENT_CONVERSION_IN` / `_OUT` (client/customer-initiated) and `CURRENCY_CLOUD_CARD_CONVERSION_IN` / `_OUT` (composite card authorisation) on `FinancialTransaction.transactionChannel` and `AuthorisationHold.transactionChannel` [spec]; the webhook `TransactionEventDto.transactionType` has `CONVERSION_IN` ("Currency conversion buy (credit)") and `CONVERSION_OUT` ("Currency conversion sell (debit)") [webhook-spec]; `searchConversions.transactionId` is a **card-spend** transaction id from the transactions domain [spec]; `getClientLiquidity` aggregates the day's transactions by channel family (BPAY, direct entry credit/debit, NPP, HaaS transfers, scheme domestic/international) [spec field names][inferred mapping].
+- **Cards** — `enrolCard`/`unenrolCard` key on `cardId` [spec]; a card entering `inactive`/`expired` must trigger the unenrol path; lost/stolen replacement unenrols the old card and (Auto mode) enrols the replacement [docs:click-to-pay]; composite card authorisation (cards/holds domain) creates conversions that `getConversion`/`searchConversions` must return, fixed side `BUY`, using the card margin and cached rates, linked on hold create/increase/settle [docs:multi-currency-card-authorisation]; `HayCard` carries no C2P field [spec].
+- **Customers** — `unenrolCustomer` keys on `customerId` and cascades to all the customer's cards [spec]; customer name/email/phone updates propagate to C2P for customers with ≥1 enrolled card, billing address does not [docs:click-to-pay]; the `email` in `enrolCard` is never written to `HayCustomer.email` [spec].
+- **Transaction rules / merchant data** — MCCs from `getAllMerchantCategoryCodes` are referenced by `RuleDetails.merchantCategoryCode` ("Blocked Merchant Category Code (MCC) as four digit code as per ISO 18245 (required for Rule type: MERCHANT_CODE_BLOCK).") on `ExternalAddTransactionRuleRequest`/`ExternalTransactionRuleResponse`, by `MerchantDetails.merchantCategoryCode` / `ExternalMerchantDetails.merchantCategoryCode` on transactions [spec], and by `Merchant.merchantCategoryCode` (string, 1–4 chars) in the client-facing authorisation callback [ext-auth-spec].
+- **Limits (client configuration)** — threshold maxima reference the client limits `BPAY_DAILY_LIMIT`, `DIRECT_DEBIT_PER_DAY`, `CARD_PAYMENTS_DAILY` and the non-scheme float/liquidity cash balances [docs:liquidity-monitoring-and-alerting-1]; the four `REFUSED_TOTAL_*_DAILY_LIMIT_BREACHED` conversion outcomes mirror the four threshold types [spec].
+- **Webhooks** — `PERK_ORDER_UPDATE` on `POST /api/hay/v1/communications/notification` (`NotificationDtoV1`) finalises perk orders [webhook-spec]; conversion balance movements surface as transaction notifications with `CONVERSION_IN`/`CONVERSION_OUT` [webhook-spec][docs]; liquidity threshold breaches are emails, not webhooks [docs].
+- **External authorisation callback** — contains nothing about FX, perks, liquidity, C2P or tokens (verified) [ext-auth-spec]; no source says conversions or perk orders are authorised via the client's callback.
+- **GraphQL APIs** — the Tokens API mints credentials for them; they are entirely outside this spec [spec tag description].
+
+## 6. Error catalogue
+
+No message text for any error in this domain appears in the spec or the docs; every declared error body is `ErrorResponse { details, message, status, traceId }` [spec]. Statuses marked [inferred] are the implementer's choice within the declared set.
+
+| # | Operation(s) | Condition | Status / code | Source |
+|---|---|---|---|---|
+| 1 | all 27 | declared error responses | `400`, `403`, `422`, `500`, `501` → `ErrorResponse` | [spec] |
+| 2 | `getOperatorById`, `getProductById` | unknown `id` | `404` (declared body schema is `OperatorSummary`/`ProductSummary` — quirk; use `ErrorResponse` [inferred]) | [spec] |
+| 3 | `getConversion`, `updateLiquidityThreshold`, `enrolCard`, `unenrolCard`, `unenrolCustomer` | unknown path id | not declared; `404` `ErrorResponse` [inferred] | — |
+| 4 | any POST/PUT | missing required body field, `minLength`/`minimum`/`maximum`/`pattern`/enum violation, body absent where required | `400` [inferred] | [spec constraints] |
+| 5 | `generateConversionQuote`, `createLiquidityConversion`, `getLiquidityDetailedRates` | `amount <= 0` (`exclusiveMinimum`) | `400` [inferred] | [spec] |
+| 6 | `generateConversionQuote` | client not entitled ("requires agreement"), or not a multi-currency product | `403`/`422` [inferred]; on execute the outcome `REFUSED_CAPABILITY_NOT_ENABLED` exists | [spec] |
+| 7 | `executeConversion` | quote expired | `200` with `outcome: REFUSED_QUOTE_EXPIRED` [spec enum; HTTP status inferred] | [spec][docs:margins-and-quote-locking] |
+| 8 | `executeConversion` | insufficient funds / blocked / closed / limit / max balance / fraud / customer preference / not verified / capability | `200` + `REFUSED_INSUFFICIENT_FUNDS`, `REFUSED_ACCOUNT_BLOCKED`, `REFUSED_RECIPIENT_ACCOUNT_BLOCKED`, `REFUSED_ACCOUNT_CLOSED`, `REFUSED_RECIPIENT_ACCOUNT_CLOSED`, `REFUSED_LIMIT_BREACH`, `REFUSED_DAILY_TRANSFERS_OUT_LIMIT_BREACHED`, `REFUSED_MAX_BALANCE_EXCEEDED`, `REFUSED_TOTAL_INBOUND_DIRECT_DEBIT_DAILY_LIMIT_BREACHED`, `REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED`, `REFUSED_TOTAL_NET_VISA_DAILY_LIMIT_BREACHED`, `REFUSED_TOTAL_NON_SCHEME_DAILY_LIMIT_BREACHED`, `REFUSED_FRAUD`, `REFUSED_CUSTOMER_PREFERENCE`, `REFUSED_SENDER_ACCOUNT_NOT_VERIFIED`, `REFUSED_CAPABILITY_NOT_ENABLED`, `REFUSED_INVALID_PAY_ID`, `INTERNAL_ERROR`, `UNKNOWN` (enum shared with transfers; which apply to FX is unspecified) | [spec] |
+| 9 | `executeConversion` | unknown `quoteId`, or quote already executed | not declared; `422` [inferred] | — |
+| 10 | `getFxRates` | malformed pair / unknown currency / unsupported currency (non-AUD pair today) | `200` with `failures[].reason` = `MALFORMED_PAIR` / `UNKNOWN_CURRENCY` / `CURRENCY_NOT_SUPPORTED` | [spec][docs:indicative-rates-api] |
+| 11 | `getLiquidityBalances`, `createLiquidityConversion`, `getLiquidityDetailedRates` | multi-currency wallets not enabled for client | `403`/`422` [inferred] | [spec] |
+| 12 | `createLiquidityConversion` | below Currency Cloud minimum (`conversion_below_limit`) | `422` [inferred]; the platform marker `CCW0003` identifies rounded-up composite-auth cases | [docs:minimum-conversion-rounding-logic] |
+| 13 | `createLiquidityThreshold`, `updateLiquidityThreshold` | `percental=true` without `percent`; `percental=false` without `amount`; `percent` ∉ [1,100]; `amount` < 1 or not whole or > channel limit | `400`/`422` [inferred] | [spec][docs:liquidity-monitoring-and-alerting-1] |
+| 14 | `createLiquidityThreshold` | more than 10 thresholds for a `type`; duplicate `id` | `422` [inferred] (no `409` declared) | [docs][spec] |
+| 15 | `getOrders` | `fromDate`/`toDate` window > 24h; `offset` not a multiple of `limit`; `limit` ∉ [1,100] | `400` [inferred] | [spec] |
+| 16 | `createOrder` | duplicate `externalId`; unknown `productId`; missing a required field combination per `required*Fields`; ranged product without `calculationMode`/amount, or amount outside `[min,max]` | `422` [inferred] (no `409` declared) | [spec] |
+| 17 | `lookupOperators` | `mobileNumber` fails E.164 pattern | `400` [inferred] | [spec] |
+| 18 | `enrolCard` | client C2P disabled or in Auto mode; card in terminal state | `403`/`422` [inferred] | [docs:click-to-pay] |
+| 19 | `exchangeExternalToken`, `elevateExternalToken` | invalid/unknown external token | `403` [inferred] | — |
+| 20 | Perk order (async) | provider declines/reverses | webhook `PERK_ORDER_UPDATE` `status: DECLINED` / `REVERSED` — no reason field | [webhook-spec] |
+
+## 7. Open questions
+
+1. **`GET /v1/products` shape** — spec returns the perk `ProductSummary[]`; docs say it returns the client's banking products whose `productId` feeds `createAccount`. Decide: (a) follow the spec literally (perk products), (b) return banking products with at least `id`+`name` (fits `ProductSummary`'s property names, leaving perk-only fields absent), or (c) both. Test code integrating with Shaype will almost certainly call it for (b).
+2. **Perk order initial `status`/`statusClass`** — undocumented free strings; only `COMPLETED`/`DECLINED`/`REVERSED` are known. Choose an initial value (and whether the stub auto-completes orders and fires `PERK_ORDER_UPDATE`, with what delay).
+3. **How a perk order is funded** — no `accountId`/`customerId` on `CreateOrderRequestBody`; `debitPartyIdentifier` is an operator-side identifier. Whether a Shaype account is debited (and which) is unspecified; the stub must decide whether to touch balances at all.
+4. **`perkType` filtering** — none of `CountrySummary`, `OperatorSummary`, `ProductSummary` carries `perkType`; the `perkSubType` → `perkType` grouping is unspecified.
+5. **404 bodies** — declared with `OperatorSummary`/`ProductSummary` schemas; and no 404 at all on `getConversion`, `updateLiquidityThreshold`, the three C2P operations.
+6. **HTTP status for `REFUSED_*` conversion outcomes** — 200 with `outcome`, or 4xx? Also whether a refused quote remains executable, and whether a `quoteId` can be executed twice with different `idempotencyKey`s.
+7. **Idempotency replay semantics** — `idempotencyKey` on quote/execute/liquidity-conversion "recognise[s] any subsequent retries"; response on replay (same body vs. error) and on key reuse with a different body are unspecified.
+8. **Quote-time balance checks** — is `sellAccountId` balance checked at quote time ("must be funded before requesting a quote") or only at execution (`REFUSED_INSUFFICIENT_FUNDS`)?
+9. **Buy-account resolution** — no `buyAccountId` in the request; if the customer has no Currency Account in `buyCurrency` the behaviour (auto-create vs refuse, and with which outcome) is unspecified.
+10. **Quote expiry default** and **default margin** — both "configured via CSM"; no numeric defaults anywhere. Also the exact rounding of `quotedRate` (5 dp in the example) and amounts (2 dp).
+11. **Conversion webhooks** — docs disagree over time (none → per-account transaction events); `TransactionEventDto` has no `conversionId` field despite the docs saying it is included. Decide whether the stub emits `CONVERSION_IN`/`CONVERSION_OUT` transaction events and where `conversionId` goes.
+12. **`getClientLiquidity`** — default `date`, timezone/day boundary, sign convention, and the formula for every `total` (sum vs. net of `inbound`/`outbound`); mapping of transaction channels to `haas`/`npp`/`directEntry`/`bpay`/`scheme.domestic`/`scheme.international`.
+13. **`LiquidityThreshold.external`** — undocumented boolean absent from both request bodies.
+14. **Threshold defaults** — are the 12 platform-default thresholds (50/75/90% × 4 types) pre-seeded and listable/updatable? Do defaults for omitted `active`/`percental` exist? Is `type` really immutable (docs say updatable, body has no `type`)?
+15. **`updateLiquidityThreshold` PUT semantics** — partial (omitted fields unchanged) vs full replace; the `amount` description is a copy-paste of `percent`'s.
+16. **`getFxRates.currencyPairs` serialisation** — comma-separated single param (description) vs repeated params (OpenAPI default for an un-styled array query param).
+17. **`getOrders` edge cases** — one of `fromDate`/`toDate` supplied alone; `externalId` plus a window; `productType` accepted values (untyped).
+18. **`getLiquidityBalances` / liquidity conversions** — whether the stub keeps a real per-target multi-currency treasury ledger (updated by `createLiquidityConversion` and composite-auth conversions, including the 1 GBP-minimum surplus) or returns canned data.
+19. **Tokens** — validation of `externalAccessToken`/`externalStepUpToken`, token format/lifetime, unit of `accessExpiresUtc` (epoch s vs ms), and whether `elevate` requires a prior `exchange`.
+20. **Click to Pay** — behaviour for Disabled/Auto-mode clients calling the manual endpoints; whether terminal-state cards can be enrolled; whether the stub should model the enrolment flag at all (nothing reads it back except the no-op semantics).
+21. **MCC seed data** — the ISO 18245 list is not supplied; the stub needs a source.
+22. **`GenericMessage.message` text** for the three C2P responses — undocumented.
