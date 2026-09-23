@@ -18,6 +18,8 @@ export interface Config {
   webhookBackoffMs: number
   /** Milliseconds of simulated processing before async events (card settlement etc.) fire. 0 = immediate. */
   asyncDelayMs: number
+  /** Risk level given to new accounts. Shaype defaults to HIGH (all limits 0) until the client sets LOW. */
+  defaultRiskLevel: 'HIGH' | 'LOW'
 }
 
 export const defaultConfig: Config = {
@@ -33,6 +35,7 @@ export const defaultConfig: Config = {
   webhookMaxAttempts: 5,
   webhookBackoffMs: 200,
   asyncDelayMs: 0,
+  defaultRiskLevel: 'HIGH',
 }
 
 export const CLI_OPTIONS = {
@@ -47,6 +50,7 @@ export const CLI_OPTIONS = {
   'webhook-max-attempts': { type: 'string' },
   'webhook-backoff-ms': { type: 'string' },
   'async-delay-ms': { type: 'string' },
+  'default-risk-level': { type: 'string' },
   help: { type: 'boolean', short: 'h' },
 } as const
 
@@ -65,6 +69,7 @@ Usage: shaype-local [options]
       --webhook-max-attempts   delivery attempts before giving up (default 5)
       --webhook-backoff-ms     first retry delay, doubling      (default 200)
       --async-delay-ms         delay for simulated async events (default 0)
+      --default-risk-level     HIGH|LOW for new accounts       (SHAYPE_LOCAL_DEFAULT_RISK_LEVEL, default HIGH — Shaype's default; HIGH refuses all money movement until set LOW)
   -h, --help
 `
 
@@ -94,6 +99,13 @@ export function loadConfig(argv: string[] = [], env: NodeJS.ProcessEnv = {}): Co
     webhookMaxAttempts: num('webhook-max-attempts', 'SHAYPE_LOCAL_WEBHOOK_MAX_ATTEMPTS', defaultConfig.webhookMaxAttempts),
     webhookBackoffMs: num('webhook-backoff-ms', 'SHAYPE_LOCAL_WEBHOOK_BACKOFF_MS', defaultConfig.webhookBackoffMs),
     asyncDelayMs: num('async-delay-ms', 'SHAYPE_LOCAL_ASYNC_DELAY_MS', defaultConfig.asyncDelayMs),
+    defaultRiskLevel: riskLevel(str('default-risk-level', 'SHAYPE_LOCAL_DEFAULT_RISK_LEVEL', defaultConfig.defaultRiskLevel)),
     help: values.help === true,
   }
+}
+
+function riskLevel(v: string): 'HIGH' | 'LOW' {
+  const u = v.toUpperCase()
+  if (u !== 'HIGH' && u !== 'LOW') throw new Error(`--default-risk-level must be HIGH or LOW, got ${v}`)
+  return u
 }

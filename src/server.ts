@@ -11,6 +11,7 @@ import { openDatabase } from './db/index.js'
 import { DomainEvents } from './events/bus.js'
 import { WebhookDispatcher } from './events/webhooks.js'
 import { Clock } from './lib/clock.js'
+import { Scheduler } from './lib/scheduler.js'
 import { ApiError, errorBody } from './lib/errors.js'
 import { registerStubs } from './stubs/index.js'
 import { registerDomains } from './domains/index.js'
@@ -44,7 +45,8 @@ export async function buildServer(overrides: Partial<Config> = {}, deps: { fetch
   const db = openDatabase(config.db)
   const events = new DomainEvents()
   const webhooks = new WebhookDispatcher(db, config, clock, app.log, deps.fetch)
-  const ctx: AppContext = { config, db, clock, log: app.log, events, webhooks, handled: new Set() }
+  const scheduler = new Scheduler(clock, config.asyncDelayMs, app.log)
+  const ctx: AppContext = { config, db, clock, log: app.log, events, webhooks, scheduler, services: {} as AppContext['services'], handled: new Set() }
   const tokens = new TokenService(clock, config.tokenTtlSeconds)
 
   for (const s of requestComponents) app.addSchema(s)
@@ -68,6 +70,10 @@ export async function buildServer(overrides: Partial<Config> = {}, deps: { fetch
   })
 
   registerAuthHook(app, ctx, tokens)
+  app.addHook('onRequest', async (req) => {
+    if (req.url.startsWith('/_admin/')) return
+    await scheduler.tick()
+  })
   registerAuthRoutes(app, ctx, tokens)
   registerDomains(app, ctx)
   const stubbed = registerStubs(app, ctx)
@@ -77,6 +83,7 @@ export async function buildServer(overrides: Partial<Config> = {}, deps: { fetch
   if (missing.length) throw new Error(`Operations without a route: ${missing.map((m) => m.operationId).join(', ')}`)
 
   app.addHook('onClose', async () => {
+    scheduler.cancelAll()
     webhooks.close()
     db.close()
   })

@@ -26,10 +26,19 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext, extra
   }))
 
   app.post('/_admin/reset', async () => {
+    ctx.scheduler.cancelAll()
     ctx.webhooks.close()
     resetDatabase(ctx.db)
     ctx.clock.reset()
     return { status: 'ok' }
+  })
+
+  /** Wait for deferred work and webhook deliveries to settle (tests call this before asserting). */
+  app.post('/_admin/flush', async () => {
+    await ctx.scheduler.tick()
+    await ctx.scheduler.waitForIdle()
+    await ctx.webhooks.waitForIdle()
+    return { status: 'idle' }
   })
 
   app.get('/_admin/clock', async () => ({ now: isoUtc(ctx.clock.now()), frozen: ctx.clock.isFrozen }))
@@ -41,6 +50,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext, extra
     if (b.set) ctx.clock.set(b.set)
     if (b.freeze) ctx.clock.freeze(b.freeze)
     if (b.advanceMs) ctx.clock.advance(b.advanceMs)
+    await ctx.scheduler.tick()
     return { now: isoUtc(ctx.clock.now()), frozen: ctx.clock.isFrozen }
   })
 
