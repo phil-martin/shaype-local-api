@@ -476,3 +476,129 @@ Whether expired rules are reported as `disabled: true` is [open].
 |---|---|---|
 | any | `INACTIVE` | `closeAccount` (async, all linked cards; processor status "voided") [docs:account-closure] |
 `blockAccount` does **not** change card status per any source; `LOCKED` blocks transactions at the account level [docs:account-status].
+
+## 4. Invariants and calculations
+
+### Balances
+- Spec sign convention [spec HayAccount]: `heldBalance`, `lockedBalance`, `stacksBalance`, `overdraftLimit`, `overdraftBalance` are **positive** values; `totalBalance`, `availableBalance`, `technicalOverdraftBalance` are signed. Docs sign convention [docs:account-balances]: Account Balance ≥ 0; Held Balance ≤ 0; Overdraft Balance ≤ 0; Technical Overdraft Balance ≤ 0; Stack Balance ≥ 0; Available and Total ≥ 0 "with exceptional of negative if a technical overdraft is applied". The API returns the spec convention (positives); the docs formulas use signed values.
+- Docs formulas, verbatim [docs:account-balances]:
+  - **Available Balance** = Account Balance + (Overdraft Limit + Overdraft Balance) + Technical Overdraft Balance + Held Balance + Stacks balance
+  - **Total Balance** = Total Available Balance + (Overdraft Limit + Overdraft Balance) + Technical Overdraft Balance + Stacks Balance
+  (The second is circular as written and the "+ Stacks balance" in the first contradicts the spec statement that stack funds are not available. Treat these as sign-convention-dependent prose, not implementable as written.)
+- Recommended implementable model, consistent with the spec descriptions and every webhook/sample observed [inferred]:
+  - `ledger` = sum of settled postings (cash actually on deposit, may be negative when overdrawn).
+  - `totalBalance` = `ledger` + `overdraftLimit` (spec: total "will also include unused overdraft limit and Stacks, held and locked value").
+  - `overdraftBalance` = max(0, min(−`ledger`, `overdraftLimit`)); `technicalOverdraftBalance` = max(0, −`ledger` − `overdraftLimit`) (spec: "negative position beyond the total deposits / overdraft limit").
+  - `availableBalance` = `totalBalance` − `heldBalance` − `lockedBalance` − `stacksBalance` (spec: "Funds that are held, locked and allocated to a Stack will not be available"). Check: webhook sample total 999.58, held/locked/stacks 0 → available 999.58 [docs:account-rules]; sample 3144.69 after +2000 credit [docs:payments].
+  - Status `ACTIVE_IN_ARREARS` iff `technicalOverdraftBalance > 0` (or overdraft past expiry) [docs:account-status].
+- Stack funds count toward `MAX_BALANCE`; internal account↔stack moves are not counted in daily transfer limits; card/outbound payments never draw down stacks — insufficient main balance fails even if stacks hold funds [docs:stack]. Closing a stack returns its funds to the main balance [docs:stack].
+- External-auth `Account.balance` "Money held in stacks is not included" [ext-auth-spec] — consistent with the model above.
+- Closure requires `totalBalance == 0` and `heldBalance == 0` [docs:account-closure]; the spec enum implies stacks, locked, overdraft, technical overdraft must also be zero [spec ClosureCheckerError].
+
+### Limits
+- Effective limit = account-level limit if set, else product-level limit [docs:account-limits]. Account-level ≤ product-level, enforced on set [docs:account-limits].
+- Daily limits: rolling 24 h window; sum of matching transactions in the past 24 h + current transaction must not exceed the limit [docs:account-limits].
+- Per-transaction limits: `SINGLE_CARD_TRANSACTION`, `PAYMENT_TO_ACCOUNT_NUMBER` [spec descriptions]. Yearly: `TOTAL_SPEND_PER_YEAR` [spec].
+- Risk level `HIGH` ⇒ every limit evaluates to 0 ⇒ every inbound and outbound movement refused [docs:account-limits, docs:accounts-overview].
+- Multi-currency aggregation: convert every hierarchy member's balance/transactions to the home currency at the margin-free cached rate, then compare with the limit; aggregated types listed under setAccountLimit; a limit "can be breached at the aggregate level even though no single account exceeds it on its own" [docs:limits-1]. Example: MAX_BALANCE 600 AUD, parent 400 AUD + child 65 USD (=100 AUD) → +80 AUD accepted (580), +150 AUD refused `REFUSED_MAX_BALANCE_EXCEEDED` (650) [docs:limits-1].
+- Limit breach on a transfer surfaces as `outcome: LIMIT_BREACH` / `detailedOutcome: REFUSED_DAILY_ATM_WITHDRAWAL_LIMIT_BREACHED` in the docs example [docs:account-limits] (field names as shown there; the B2B `TransactionOutcome` only has `outcome`).
+- External-auth mode: platform checks `ATM_WITHDRAWAL_PER_DAY`, `TOP_UP_PER_DAY`, `CARD_PAYMENTS_DAILY`, `PAYMENT_TO_ACCOUNT_NUMBER`, `SINGLE_CARD_TRANSACTION`, `TOTAL_SPEND_PER_YEAR` before calling the client [docs:external-authorisation-and-balance].
+
+### Identifiers and formats
+- `accountHayId`, `accountHolderId`, `productId`, `parentAccountId`, rule `id`, `holdHayId`, `transactionId`, all idempotency keys: UUID strings [spec].
+- `accountNumber`: stored/returned "5-9 digits" [spec HayAccount]; client-supplied on create must match `^[1-9][0-9]{7,8}$` (8–9 digits, no leading zero) [spec]; search accepts `[\d]{5,9}` [spec]; platform-assigned sample `66090672` (8 digits) [docs:sample-requests-responses]. Uniqueness across the client is [inferred].
+- `bsb`: 6 digits [spec]; platform-assigned, sample `636220` [docs:sample-requests-responses]. A "Shaype BSB" identifies internal recipients for ACCOUNT transfers [docs:payments].
+- `currency`: ISO 4217 3-letter; domestic = `AUD` only; one account per currency per parent [docs:multi-currency…, docs:bulk-account-opening].
+- Amounts: JSON numbers "to 2 decimal places" [spec]; webhook samples show more precision (`999.5800000000`) [docs:account-rules].
+- Dates: `*DateTimeUtc` are RFC 3339 UTC with microseconds in samples (`2024-03-12T23:54:30.491966Z`); `expiryDate` on cards is a date [spec].
+- `reason` (risk level) 1–128 chars; `note` (block/unblock) ≥ 1 char; transfer `description` 1–255; `reference` 0–35; names 1–140 [spec].
+- Rule `blockedMerchantIds` entries ≤ 15 alphanumeric; MCC 4-digit ISO 18245 integers [spec].
+
+### Derived / defaulted fields
+- On create: `status = APPROVED` [spec] (see conflict), risk level `HIGH` [docs:accounts-overview], all balances 0, `currency` defaults `AUD` [inferred], `bsb`/`accountNumber` assigned [docs:sample-requests-responses], `creationDateTimeUtc = now`, `customData` from request or null.
+- `closedDateTimeUtc` set on `CLOSED` [inferred from field]. `blockedBy` set on block (`CLIENT` for API calls) and cleared on unblock [inferred].
+- `homeCurrencyBalanceEquivalent` computed from cached FX rates for FX children [docs:limits-1 aggregation rule, inferred for this field].
+- `ExternalTransactionRuleResponse.expiresAtUtc = createdAt + expiresIn` seconds [inferred].
+- `effectiveLimit = accountLimit ?? productLimit` [docs:account-limits].
+
+## 5. Cross-domain dependencies
+
+Reads from other domains:
+- **Customers**: `createAccount` requires the holder customer to exist and be `ACTIVE` [docs:customer-status-flow]. `makeTransferV1.senderCustomerHayId` must be a customer (holder or group member) [inferred]. Customer `status` enum (spec `HayCustomer`): `ACTIVE`, `BLOCKED`, `INACTIVE`, `PENDING_APPROVAL`, `REFERRED`, `REJECTED`.
+- **Groups**: `accountHolderType = GROUP` requires an existing `groupHayId`; group members all have equal access; any member can close [docs:groups]. `HayJointAccount` (Groups API) wraps a `HayAccount` with `groupHayId`, `groupType` `PERSONAL` | `BUSINESS`, `customerHayIds`, `name`, `businessIdentifiers` [spec].
+- **Products**: `productId` must be a configured product; product-level limits (`productLimit` per type, incl. `MAX_BALANCE`, `OVERDRAFT_PRODUCT_LIMIT`) and the overdraft facility flag come from product config [docs:product, docs:account-limits].
+- **Cards**: `getCardsForAccountId` reads cards by `accountHayId`; `getPendingHolds` reads holds created by card authorisations. `CreateHayCardRequestBody.accountId` links a card to an account (card creation lives in the Cards API) [spec].
+- **Transactions / payments**: balances and `APPROVED→ACTIVE`, `ACTIVE↔ACTIVE_IN_ARREARS` transitions are driven by postings; `makeTransferV1` itself creates a transaction (`transactionId`) and emits `TRANSACTION` webhooks [docs:payments]. Limit and rule evaluation happens on every authorisation using this domain's limits, risk level and rules.
+- **Stacks**: `stacksBalance` aggregates the account's stacks; stacks endpoints are `/v0/accounts/{accountId}/stacks…` (Stacks API) [spec paths]. `MIN_STACK_BALANCE` limit type.
+- **Direct Entry / PayTo / PayID / BPAY / Scheduled Payments**: closure checks in-flight outbound direct debits and, on success, cancels PayTo mandates, deregisters PayIDs, cancels scheduled payments [docs:account-closure]. FX child accounts are disabled for outbound DD, BPAY, PayID registration and PayTo mandates [docs:multi-currency…]. Related paths keyed by `accountId`: `/v1/accounts/{accountId}/payids…`, `/v1/accounts/{accountId}/bpay-billers`, `/v1/accounts/{accountId}/payments/bpay`, `/v0/accounts/{accountId}/scheduledPayments…` [spec].
+- **FX engine**: supported-currency set (30 for an AUD wallet), cached margin-free rates for aggregation and `homeCurrencyBalanceEquivalent` [docs:bulk-account-opening, docs:limits-1].
+
+Writes to other domains:
+- `blockAccount` (default style) → customer(s) `BLOCKED`; also blocks child accounts [spec].
+- `closeAccount` → cards `INACTIVE`, PayIDs deleted, PayTo mandates cancelled, scheduled payments cancelled, scheduled notifications cancelled, customer `INACTIVE` (if last account) with closure `reason` stored on the customer [docs:account-closure, spec].
+- `makeTransferV1` → creates a transaction; INTERNAL transfers credit the recipient account [docs:payments].
+- All state changes → webhook notifications (`ACCOUNT_STATUS_CHANGE`, `CUSTOMER_STATUS_UPDATED`, `CARD_STATUS_CHANGE`, `TRANSACTION`) [webhook-spec, docs:account-closure, docs:payments].
+
+Listing endpoints outside this tag that return `HayAccount`: `GET /v0/customers/{customerHayId}/accounts` (`getAccountsForCustomerId`, includes FX children) [spec, docs:bulk-account-opening].
+
+## 6. Error catalogue
+
+HTTP-level (every operation) [spec]: `400 Bad Request`, `403 Forbidden`, `422 Unprocessable Content` (closeAccount says "Unprocessable Entity"), `500 Internal Server Error`, `501 Not Implemented` → `ErrorResponse { details, message, status, traceId }`. No message texts are given for these in the spec.
+
+Documented condition → response:
+
+| condition | status | body / message | source |
+|---|---|---|---|
+| closeAccount: held balance non-zero | 422 [inferred code] | `CloseAccountResponse` `result: FAILURE`, `description: "Account closure failed. Check errors for more details."`, error `type: ACCOUNT_BALANCE_HELD`, `errorMessage: "Account has 17.78 held balance."` | docs:account-closure |
+| closeAccount: total balance non-zero | 422 | error `type: ACCOUNT_BALANCE_TOTAL`, `"Account has 17.78 total balance."` | docs:account-closure |
+| closeAccount: in-flight outbound direct debits | 422 | error `type: INFLIGHT_OUTBOUND_DIRECT_DEBITS`, `"Account has 1 inflight outbound direct entries: [87225f75-9e63-4aa4-9594-8cea4d96e1c1]"` | docs:account-closure |
+| closeAccount: stacks / locked / overdraft / technical overdraft non-zero; child account not closed | 422 | error `type` ∈ `ACCOUNT_BALANCE_STACKS`, `ACCOUNT_BALANCE_LOCKED`, `ACCOUNT_BALANCE_OVERDRAFT`, `ACCOUNT_BALANCE_TECHNICAL_OVERDRAFT`, `CHILD_ACCOUNT_STATUS` (no message text documented) | spec enum |
+| closeAccount: multiple failures | 422 | all errors listed together in `errors[]` | docs:account-closure |
+| blockAccount: one or more accounts in scope could not be blocked | 422 | `BlockAccountResponse { failedAccounts: [uuid…], message }` | spec |
+| blockAccount: account blocked but customer not (permission issue) | 200 | `BlockAccountResponse` (reported as success) | spec |
+| createAccount: `fx.childAccounts` present without `initMode` | 422 | `fx.childAccounts.initMode must not be null` | docs:bulk-account-opening |
+| createAccount: `initMode: CUSTOM` without `currencies` | 422 | `INVALID_ARGUMENT: fx.childAccounts.currencies is mandatory when initMode is CUSTOM` | docs:bulk-account-opening |
+| createAccount: `initMode: ALL` with `currencies` | 422 | `INVALID_ARGUMENT: fx.childAccounts.currencies must not be provided when initMode is ALL` | docs:bulk-account-opening |
+| createAccount: `initMode: NONE` with `currencies` | 422 | `INVALID_ARGUMENT: fx.childAccounts.currencies must not be provided when initMode is NONE` | docs:bulk-account-opening |
+| createAccount: `currencies: []` | 422 | `fx.childAccounts.currencies size must be between 1 and 2147483647` | docs:bulk-account-opening |
+| createAccount: non-ISO-4217 currency code | 422 | `Could not read JSON: Invalid currency value 'ABC'. Known currency values are: […]` | docs:bulk-account-opening |
+| createAccount: customer not `ACTIVE` | 4xx [inferred] | not documented | docs:customer-status-flow (rule only) |
+| createAccount: FX currency without `parentAccountId` | 4xx [inferred] | "it is mandatory to provide an appropriate parent `accountId`" | docs:multi-currency… |
+| makeTransferV1 from an FX child with non-INTERNAL type | rejected (code not given) | "the call will be rejected" | docs:multi-currency… |
+| setAccountLimit / updateMaxBalanceLimit / updateOverdraftLimit above product limit | 422 [inferred] | "cannot exceed … applied to the Product" | spec descriptions |
+| schema violations (missing required, `minLength`, `pattern`, `exclusiveMinimum`, enum) | 400 or 422 [open which] | `ErrorResponse` | spec |
+| unknown `accountId` / `ruleId` | not declared (no 404) | [open] | spec |
+
+Transaction outcomes (returned as HTTP 200 `TransactionOutcome.outcome` from makeTransferV0/V1, and as `transactionEvent.outcome` in webhooks) with documented meaning [docs:payment-transaction-outcome]:
+`ACCEPTED` accepted for processing; `REFUSED_CARD_PREFERENCE`; `REFUSED_FRAUD`; `REFUSED_MAX_BALANCE_EXCEEDED` would exceed `MAX_BALANCE`; `REFUSED_NOT_ENOUGH_FUNDS` would breach `MIN_BALANCE`; `INTERNAL_ERROR`; `REFUSED_ANNUAL_SPENDING_LIMIT_BREACHED`; `REFUSED_DAILY_ATM_WITHDRAWAL_LIMIT_BREACHED`; `REFUSED_DAILY_TOP_UP_LIMIT_BREACHED`; `REFUSED_ACCOUNT_BLOCKED` account is blocked; `REFUSED_ACCOUNT_CLOSED`; `REFUSED_RECIPIENT_ACCOUNT_BLOCKED` (Shaype-to-Shaype); `REFUSED_RECIPIENT_ACCOUNT_CLOSED`; `REFUSED_DAILY_DIRECT_DEBIT_LIMIT_BREACHED`; `REFUSED_DAILY_TRANSFERS_OUT_LIMIT_BREACHED`; `REFUSED_RULES` account rule matched; `REFUSED_TOTAL_INBOUND_DIRECT_DEBIT_DAILY_LIMIT_BREACHED`; `REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED`; `REFUSED_TOTAL_NET_VISA_DAILY_LIMIT_BREACHED` "client scheme transactions are currently blocked"; `REFUSED_TOTAL_NON_SCHEME_DAILY_LIMIT_BREACHED`; `REFUSED_BPAY_INVALID_BILLER_CODE`; `REFUSED_BPAY_INVALID_REFERENCE`; `REFUSED_BPAY_INVALID_PAYMENT`; `REFUSED_BPAY_REJECTED`; `REFUSED_DAILY_CARD_TRANSACTIONS_LIMIT_BREACHED`; `REFUSED_SINGLE_CARD_TRANSACTION_LIMIT_BREACHED`; `REFUSED_SANCTIONS`; `REFUSED_UNABLE_TO_VALIDATE`; `REFUSED_INSUFFICIENT_DATA`. Not currently in use: `REFUSED_ACCOUNT_PREFERENCE`, `REFUSED_DAILY_LIMIT_EXCEEDED`, `REFUSED_AML`, `REFUSED_ACCOUNT_NOT_FOUND_FOR_CARD_TOKEN`, `REFUSED_UNDETERMINED_BALANCE_FOR_ACCOUNT`, `REFUSED_ACCOUNT_NOT_FOUND_FOR_CURRENCY`, `REFUSED_UNDETERMINED_SPENDING_FOR_ACCOUNT`, `REFUSED_UNDETERMINED_TOP_UPS_FOR_ACCOUNT`, `REFUSED_UNDETERMINED_ATM_WITHDRAWALS_FOR_ACCOUNT`. B2B-spec-only values with no docs entry: `REFUSED_LIMIT_BREACH`, `REFUSED_CUSTOMER_PREFERENCE`, `REFUSED_INSUFFICIENT_FUNDS`, `REFUSED_INVALID_PAY_ID`, `UNKNOWN`, `REFUSED_SENDER_ACCOUNT_NOT_VERIFIED`, `REFUSED_CAPABILITY_NOT_ENABLED`, `REFUSED_QUOTE_EXPIRED` [spec].
+
+## 7. Open questions
+
+1. **Initial status on create**: spec says `APPROVED`; docs sample response shows `PENDING_APPROVAL`. Decide (recommend `APPROVED`, transition to `ACTIVE` on first posting).
+2. **Unknown account / rule IDs**: no 404 declared anywhere. Choose 400 vs 422 `ErrorResponse` (and message text) for not-found and for accounts belonging to another client (403?).
+3. **400 vs 422 split** for schema/validation failures: spec lists both on every op with no rule. The only documented validation failures use 422 (bulk-account-opening).
+4. **`LOCKED` vs `BLOCKED`**: `HayAccount.status` has `LOCKED`; webhook `accountStatus` has `BLOCKED` and no `LOCKED`. Implement the mapping; decide whether `GET` ever returns `BLOCKED`.
+5. **Unblock semantics**: does `unblockAccount` restore the previous status (`APPROVED`) or always `ACTIVE` (docs say ACTIVE)? Does it unblock the customer(s) and child accounts blocked by `ACCOUNT_AND_CUSTOMER` / cascade? Can a `PLATFORM`-blocked account be unblocked by the client? Result when the account is not `LOCKED` (e.g. `CLOSED`)?
+6. **Block scope details**: does blocking cascade to a parent when a child is targeted? What `message` text is returned? Is the customer block partial-failure message distinguishable?
+7. **Close of an already-CLOSED account**: 202 SUCCESS (idempotent) or 422? Which HTTP code carries `result: FAILURE` (assumed 422). Is `description` on success documented anywhere (no)?
+8. **Closure async timing**: how long after 202 do cards go `INACTIVE` and the customer `INACTIVE`; for a local mock, immediate vs delayed emission of `CARD_STATUS_CHANGE` / `CUSTOMER_STATUS_UPDATED`.
+9. **Balance formulas / sign conventions**: docs formulas are not internally consistent with the spec descriptions (stacks in "available"; held sign). The section-4 model is inferred; confirm `technicalOverdraftBalance` sign (spec says "Value to 2 decimal places", docs say ≤ 0).
+10. **Overdraft**: is `overdraftLimit: 0` allowed (remove overdraft)? Is there an overdraft expiry date and where is it stored? Does lowering below the drawn amount immediately set `ACTIVE_IN_ARREARS`?
+11. **`updateMaxBalanceLimit` vs `setAccountLimit(MAX_BALANCE)`**: same storage? Same product cap? Which wins if both are called?
+12. **`getAccountLimits` shape when no account override**: `accountLimit` null / 0 / absent / equal to product; does risk level `HIGH` show as `effectiveLimit: 0`? Are the 5 non-settable types still listed (with product values)?
+13. **Deleting a non-settable limit type** (`MIN_BALANCE`, `MIN_STACK_BALANCE`, `OVERDRAFT_PRODUCT_LIMIT`, `CARD_TOP_UP_PER_DAY`, `BPAY_TOP_UP_PER_DAY`) via `deleteAccountLimit`: no-op, `success:false`, or error?
+14. **Limit-type aliases** in docs:limits-1 (`SINGLE_CARD_TRANSACTION_LIMIT`, `CARD_TRANSACTIONS_PER_DAY`, `TRANSFERS_OUT_PER_DAY`, `BPAY_PER_DAY`) — no spec enum equivalent for `TRANSFERS_OUT_PER_DAY` (outcome `REFUSED_DAILY_TRANSFERS_OUT_LIMIT_BREACHED` exists). Decide whether a hidden daily transfers-out limit exists at product level.
+15. **Daily window**: rolling 24 h (explicit rule) vs "until the next calendar day" (example text) — implement rolling 24 h.
+16. **Risk level interplay**: while `HIGH`, are custom account limits preserved and re-applied on `LOW`? Does `changeAccountRiskLevel` emit any webhook?
+17. **Custom data**: `createAccountCustomData` merge vs replace; size limits; key restrictions; is `customData` returned by `searchAccounts` / `getAccountsForCustomerId` without `expand`?
+18. **`expand` query**: are other values accepted (comma-separated list)? Behaviour for unknown values (ignore vs 400)?
+19. **Search**: exact match only; does it return `CLOSED` accounts and FX children; is the `accountNumber` pattern anchored (5–9 digits exactly)?
+20. **Rules**: does `disableRule` hard-delete or set `disabled: true` (naming says disable); are disabled/expired rules returned by `getAccountRules` / `getAccountRuleById`; what does `rule` (opaque object) contain; is rule name unique per account; can a rule be added to a `CLOSED` account; are product-wide rules (`ownerId` = client reference) visible via `getAccountRules`?
+21. **CoP opt-out**: no read-back field, no documented effect. Decide storage + whether to surface on `HayAccount`.
+22. **Transfer idempotency**: `idempotencyKey` optional — behaviour on omitted key (always new) and on reuse with a different body (409? not declared).
+23. **Transfer refusals**: confirm all `REFUSED_*` outcomes come back as HTTP 200 `TransactionOutcome` (no 4xx). Which outcome for an FX-child sender with non-INTERNAL type (`REFUSED_CAPABILITY_NOT_ENABLED` assumed). Which outcome when risk level is `HIGH` (`REFUSED_LIMIT_BREACH` assumed).
+24. **Group accounts**: "A group should have a single account" — enforce on create (422) or allow? Does `blockAccount` default style block every group member?
+25. **Multi-currency**: which 30 currencies the FX engine supports (needed for `initMode: ALL` and the "valid but unsupported" 422); child accounts' `accountNumber`/`bsb` (do FX children get one?); does closing a parent require children `CLOSED` first (`CHILD_ACCOUNT_STATUS`) or cascade; is `homeCurrencyBalanceEquivalent` present on AUD accounts.
+26. **`DORMANT`**: inactivity period and whether any client operation can trigger/clear it — nothing documented.
+27. **Webhook emission set** for this domain: only closure names `ACCOUNT_STATUS_CHANGE` + `CARD_STATUS_CHANGE`; block/unblock/create/arrears emissions are inferred. Decide which to emit locally and the `actionOwner` (`CLIENT` for API-driven changes).
+28. **Deprecated v0 create endpoints** (`POST /v0/customers/{id}/account`, `POST /v0/groups/{id}/account`) still in the spec — implement as aliases of `createAccount` or omit.
