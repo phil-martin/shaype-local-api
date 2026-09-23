@@ -229,3 +229,220 @@ Operation count for tag "Customers API": **11** (verified with the `ops.json` fi
   - Always lands on `ACTIVE` (not the pre-block status) [docs:customer-creation-1]. Clears `blockedBy` `[inferred]`.
   - Whether a client may unblock a customer with `blockedBy: PLATFORM` is unstated; the Accounts `blockAccount` schema mentions "customer not blocked due to permission issues", implying permission gating exists on the customer side `[inferred, open]`.
   - Webhook: `CUSTOMER_STATUS_UPDATED`, `customerStatus: "ACTIVE"`, `actionOwner: "CLIENT"` [docs:customer-creation-1][webhook-spec].
+
+## 2. Entities and fields
+
+### HayCustomer — "Details of a customer" [spec]
+
+No `required` list on the schema (every field may be absent). Property names verbatim. "Nullable" = `nullable: true` in the schema; otherwise absence is the only documented way a value is missing.
+
+| field | type | nullable | enum (verbatim) | description / example | set by |
+|---|---|---|---|---|---|
+| `customerHayId` | string (uuid) | — | | "Unique identifier (UUID) of the Customer"; e.g. `d177961c-68a6-45fa-af8d-d571d274b111` [docs:sample-requests-responses] | platform on `createHayCustomer` |
+| `status` | string | — | `["ACTIVE","INACTIVE","REJECTED","BLOCKED","PENDING_APPROVAL","REFERRED"]` | "Current Customer status" — ACTIVE: Customer is active; BLOCKED: Customer is blocked; INACTIVE: Customer is not active (closed); PENDING_APPROVAL: Customer is awaiting approval; REFERRED: Customer is referred for further KYC checks; REJECTED: Customer has been rejected | create (`PENDING_APPROVAL`), `changeHayCustomerStatus`, `blockCustomer` (`BLOCKED`), `unblockCustomer` (`ACTIVE`), platform KYC (`ACTIVE`/`REFERRED`/`REJECTED`), Accounts `closeAccount`/`blockAccount`, Groups `removeCustomerFromGroup` |
+| `statusReason` | string | — | `["SUSPICIOUS","DECEASED","CUSTOMER","OPERATIONAL"]` | "INACTIVE status reason" — SUSPICIOUS: concerns about their account conduct; DECEASED: confirmation received that they are deceased; CUSTOMER: customer request; OPERATIONAL: operational request | Accounts `closeAccount.reason` when the closure makes the customer INACTIVE [spec] |
+| `blockedBy` | string | — | `["CLIENT","PLATFORM"]` | "The type of entity that is responsible for the blocked customer" | `blockCustomer` (CLIENT `[inferred]`), platform |
+| `tier` | string | — | `["FOUNDER","STANDARD","PREMIUM"]` | "will be STANDARD unless additional tiers have been agreed"; sample `STANDARD` | create (`customerTier`) |
+| `email` | string | — | | sample `hello123@gmail.com` | create, `updateCustomer` |
+| `phoneNumber` | `PhoneNumber` | — | | sample `{"countryCodePrefix":"61","numberAfterPrefix":"43740788666"}` | create, `updateCustomer` (whole replace) |
+| `address` | `Address` | — | | sample `{"line1":"395 Bourke St","townOrCity":"Melbourne","administrativeRegion":"VIC","postcode":"3000","countryCodeIso":"AUS"}` | create, `updateCustomer` (whole replace) |
+| `customerDetails` | `CustomerDetails` | — | | sample `{"firstName":"John","middleName":"Bryan","lastName":"Smith","dateOfBirth":"1996-02-25","gender":"OTHER"}` | create, `updateCustomer` (flat fields) |
+| `customData` | object | yes | | "Custom data associated with customer"; e.g. `{"external_id":"359916f3-10d2-437e-a0f0-ea83ac8fd9c2"}` [docs:custom-data-for-customer-creation] | create only (no update op in this domain) |
+| `clientReference` | string | — | | "Client reference associated with customer". Not settable by any request body in this domain `[spec]` — origin unknown `[open]` | ? |
+| `deviceId` | string | — | | "Customer's device ID, typically UUID though format controlled by mobile OS"; sample `NOT_SPECIFIED` | platform / mobile app (no B2B op sets it) |
+| `deviceOs` | string | — | `["IOS","ANDROID"]` | "Customer's device operating system (if a mobile app is available)" | platform / mobile app |
+| `firebaseToken` | string | — | | "Customer's device firebase token (if a mobile app is available)" | platform / mobile app; echoed in webhooks as `firebaseDeviceToken` [webhook-spec] |
+| `identityDocumentType` | string | — | `["DRIVING_LICENSE","PASSPORT"]` | | create, `updateCustomer.documentData` |
+| `identityDocumentNumber` | string | — | | | create, `updateCustomer.documentData` |
+| `identityDocumentCardNumber` | string | — | | "Between 6 to 10 characters ... numeric or alphanumeric" | create, `updateCustomer.documentData` |
+| `identityDocumentExpiry` | string (date) | — | | ISO-8601 `YYYY-MM-DD`, example `2030-06-15` | create, `updateCustomer.documentData` |
+| `identityDocumentIssuingCountry` | string | — | | "three-letter ISO country code" | create, `updateCustomer.documentData` |
+| `identityDocumentRegion` | string | — | (pattern on request: `NSW\|QLD\|SA\|TAS\|VIC\|WA\|ACT\|NT`) | "one of: NSW, QLD, SA, TAS, VIC, WA, ACT, NT. (uppercase only)" | create, `updateCustomer.documentData` |
+| `creationDateTimeUtc` | string (date-time) | — | | sample `2024-03-12T22:59:48.357089Z` (microsecond precision, `Z`) | platform on create |
+| `approvedDateTimeUtc` | string (date-time) | — | | "when the customer has been approved" | platform when status → ACTIVE `[inferred]` |
+| `closedDateTimeUtc` | string (date-time) | — | | "when the Customer was closed" | platform when status → INACTIVE `[inferred]` |
+| `lastUpdatedDateTimeUtc` | string (date-time) | — | | "when the Customer was last updated" | platform on any update `[inferred]` |
+
+Fields present in the create request but **absent from HayCustomer**: `externalCustomerId`, `idempotencyKey`, `identityVerificationCaseId`, `journeyId`, `onlySanctionsCheck`, `skipKyc`, `taxObligations` (tax obligations are writable via create/update but never returned) [spec]. Fields in `HayCustomer` absent from the docs sample responses: `approvedDateTimeUtc`, `blockedBy`, `clientReference`, `closedDateTimeUtc`, `customData`, `deviceOs`, `firebaseToken`, `identityDocument*`, `lastUpdatedDateTimeUtc`, `statusReason` — the samples omit rather than null them [docs:sample-requests-responses].
+
+Read by: `getAllCustomers`, `searchCustomers`, `getHayCustomerById`; returned by `createHayCustomer`, `updateCustomer`, `changeHayCustomerStatus`.
+
+### CustomerDetails — "Personal details of a customer" [spec]
+
+`required: ["dateOfBirth","firstName","lastName"]`. `dateOfBirth` string(date) `YYYY-MM-DD`; `firstName` string minLength 1; `gender` string (no enum; prose: MALE / FEMALE / OTHER); `lastName` string minLength 1; `middleName` string; `preferredName` string; `title` string. Sample `title: "Mr."`, `preferredName: "Test Test"` [docs:flexible-kyc-checks].
+
+### Address — "Address of the Customer" [spec]
+
+`required: ["countryCodeIso","line1"]`. `administrativeRegion` 1–3 chars; `countryCodeIso` exactly 3 chars; `line1`, `line2`, `townOrCity` 0–120 chars; `postcode` 0–10 chars. The flexible-KYC sample request also sends `line3`, `line4`, `line5` (not in the schema) [docs:flexible-kyc-checks] — treat as ignored extras `[inferred]`. Same schema is reused as `CreateHayCardRequestBody.deliveryAddress` [spec].
+
+### PhoneNumber — "Phone number of the Customer" [spec]
+
+`required: ["countryCodePrefix","numberAfterPrefix"]`, both string minLength 1. Samples: `"+61"`/`"61"` and `"43740788666"`, `"5883924545"`.
+
+### TaxObligation [spec]
+
+No required list. `country` string (ISO 3166 alpha-3); `noTaxIdNumberReason` enum `["NOT_APPLICABLE","NOT_ISSUED","DISCLOSURE_NOT_REQUIRED"]`; `taxIdNumber` string ("Must NOT provide Australian Tax File Number (TFN)"). Write-only (never returned) [spec].
+
+### DocumentData (request-only, `updateCustomer`) [spec]
+
+`required: ["identityDocumentIssuingCountry","identityDocumentNumber","identityDocumentType"]`; other fields as on the create request. "When provided will be updated as a whole, setting the not provided fields to null."
+
+### GenericMessage [spec]
+
+`{ message: string }` — returned by `blockCustomer`, `unblockCustomer` (also by Accounts `unblockAccount`, Click-to-Pay `unenrolCustomer`). Text undocumented for customer ops; the only documented example of the shape is Accounts `{"message": "Risk level changed successfully."}` [docs:sample-requests-responses].
+
+### ErrorResponse [spec]
+
+`{ details: string, message: string, status: string (HTTP code as string), traceId: string }`. See §6 for known messages.
+
+### HayAccount — returned by `createHayAccount`, `getAccountsForCustomerId` (owned by the Accounts domain; listed here because this domain returns it) [spec]
+
+`required: ["customData"]` (the only required property!). Fields: `accountHayId` uuid; `accountHolderId` uuid; `accountHolderType` enum `["CUSTOMER","GROUP"]`; `accountNumber` string "5-9 digits" (v1 create request says "8-9 digits"); `availableBalance` number; `blockedBy` enum `["CLIENT","PLATFORM"]`; `bsb` string 6 digits; `closedDateTimeUtc` date-time; `creationDateTimeUtc` date-time; `currency` ISO-4217 enum (168 codes incl. `AUD`); `customData` object nullable; `heldBalance` number; `homeCurrencyBalanceEquivalent` object `{ availableBalance, currency, heldBalance, totalBalance }`; `lockedBalance` number; `overdraftBalance` number; `overdraftLimit` number; `parentAccountId` uuid nullable ("Only present for child (e.g. non-AUD FX) accounts"); `productId` uuid; `stacksBalance` number; `status` enum `["PENDING_APPROVAL","APPROVED","ACTIVE","LOCKED","DORMANT","CLOSED","ACTIVE_IN_ARREARS"]`; `technicalOverdraftBalance` number; `totalBalance` number. Sample [docs:sample-requests-responses]: `{"accountHayId":"7bd7479d-787a-9876-8a11-d8424f1ea078","accountHolderId":"997d394b-e22f-0000-a69d-0b209671baab","accountHolderType":"CUSTOMER","productId":"997d394b-e22f-8467-a69d-0b209671brre","accountNumber":"66090672","bsb":"636220","currency":"AUD","status":"PENDING_APPROVAL","totalBalance":0,"heldBalance":0,"availableBalance":0,"lockedBalance":0,"stacksBalance":0,"technicalOverdraftBalance":0,"creationDateTimeUtc":"2024-03-12T23:54:30.491966Z","overdraftBalance":0,"overdraftLimit":0}`.
+
+### HayCard — returned by `getCardsForCustomerId` (owned by the Cards domain) [spec]
+
+No required list. `accountHayId` uuid; `blockedBy` enum `["CLIENT","PLATFORM"]`; `cardHayId` uuid; `cardStatus` enum `["ACTIVE","AWAITING_ACTIVATION","BLOCKED","INACTIVE","EXPIRED"]`; `cardToken` string "maximum 9 digits"; `cardType` enum `["PHYSICAL","VIRTUAL"]`; `customerHayId` uuid ("cardholder"); `deliveryMethod` enum `["STANDARD","REGISTERED","COURIER","EXPRESS"]`; `expiryDate` date ("last day of the expiry month and year"); `issuedDateTimeUtc` date-time; `lastFourDigits` string; `nameOnCard` string; `nameOnCardLine2` string; `renewedIntoCardId` uuid nullable; `voidDateTimeUtc` date-time nullable.
+
+### Webhook payload `NotificationDto` (Shaype → client `POST {clientBase}/api/hay/v0/communications/notification`) — customer-relevant subset [webhook-spec]
+
+`required: ["customerHayId","idempotencyKey","type"]`. `customerHayId` uuid; `idempotencyKey` uuid ("prevent duplication"); `type` enum (full, verbatim) `["ACCOUNT_STATUS_CHANGE","CUSTOMER_STATUS_UPDATED","CARD_ADDED_TO_WALLET","CARD_STATUS_CHANGE","CUSTOMER_DETAILS_CHANGE","ONBOARDING_PASSED","ONBOARDING_FAILED","REMINDER","SCHEDULED_PAYMENT","TRANSACTION","DIRECT_ENTRY","MANDATE","MANDATE_DUE_PAYMENT","MANDATE_PAYMENT","APPLE_PAY_REWARD_FOR_CUSTOMER","MANDATE_ACTION_EXPIRATION","DELEGATED_OTP_NOTIFICATION"]`; `firebaseDeviceToken` string; `actionOwner` enum `["CLIENT","PLATFORM"]`; `cardHayId` uuid nullable; `productId` uuid; event sub-objects:
+- `customerStatusUpdatedEvent` (`CustomerStatusUpdatedEventDto`): `{ customerStatus: enum ["ACTIVE","INACTIVE","REJECTED","BLOCKED","PENDING_APPROVAL","REFERRED"] }`.
+- `customerDetailsChangeEvent` (`CustomerDetailsChangeEventDto`): `{ phoneNumberChanged: boolean, customerNameChanged: boolean, emailAddressChanged: boolean, addressChanged: boolean }`.
+- `onboardingFailedEvent` (`OnboardingFailedEventDto`): `{ state: enum ["DOCUMENT_SCAN","SANCTIONS_SCAN","KYC_AML_SCAN","DUPLICATE_CHECK"], submissionFailure: boolean }` (docs sample uses `isSubmissionFailure`).
+- `accountStatusChangeEvent`: `{ accountHayId, accountStatus }` (per docs sample; Accounts domain).
+- `ONBOARDING_PASSED` carries no sub-object; docs sample: `{"customerHayId":"...","idempotencyKey":"...","type":"ONBOARDING_PASSED","firebaseDeviceToken":"..."}` [docs:customer-creation-1].
+Client must answer 200; Shaype retries on 401/403/429/5XX, 18 times over up to 48 h with exponential backoff [docs:webhook-notification].
+
+### External-authorisation `Customer` object (Shaype → client, `POST /transactions` in `external-balance.yaml`) [ext-auth-spec][docs:account-and-customer-context-in-external-authorisation]
+
+`customer` (nullable): `{ id: uuid, details: { dateOfBirth, firstName, lastName, middleName }, address: { administrativeRegion, countryCodeIso, line1, line2, postcode, townOrCity }, tenure_days: int32 }`. Sent when the account holder type is `CUSTOMER`, or for a customer-initiated outbound payment (bank account / PayID / BPAY) from a group account; omitted for other group-account transactions. `address.line2` "is present only where one is held".
+
+## 3. State machines
+
+### Customer `status` (HayCustomer.status / newStatus / customerStatus) — values verbatim [spec]
+
+`ACTIVE`, `INACTIVE`, `REJECTED`, `BLOCKED`, `PENDING_APPROVAL`, `REFERRED`.
+
+Descriptions [docs:customer-status-flow]:
+- `PENDING_APPROVAL` — initial state on entering onboarding; "It can be 'Withdrawn' by the client at this stage".
+- `REFERRED` — evaluation concluded and the customer failed one or more steps (invalid ID, PEP flag); "Shaype would look to resolve dispute with the customer."
+- `REJECTED` — "Shaype cannot open an account for the user as a result of the information provided."
+- `ACTIVE` — "Active customer allows for an account to be created."
+- `BLOCKED` — client-managed; "does not impact the account or cards and transactions are still allowed."
+- `INACTIVE` — "Customer record is closed and can no longer access accounts or create new ones, unless successfully completing the process of re-onboarding." Re-onboarding = a **new** customer record with a new `customerHayId`; the old record stays INACTIVE for audit [docs:account-closure].
+
+The only transition diagram is an image (not machine-readable). Transitions that the text/spec actually state:
+
+| from | to | via | source |
+|---|---|---|---|
+| (none) | `PENDING_APPROVAL` | `createHayCustomer` | [docs:customer-creation-1][docs:sample-requests-responses] |
+| `PENDING_APPROVAL` | `ACTIVE` | platform, on successful Shaype KYC (`ONBOARDING_PASSED`) | [docs:customer-creation-1] |
+| `PENDING_APPROVAL` | `ACTIVE` | `changeHayCustomerStatus {newStatus: ACTIVE}` (client KYC / `skipKyc`) | [docs:customer-creation-1] |
+| `PENDING_APPROVAL` | `REFERRED` | platform, KYC check failed (incl. reduced KYC) | [docs:customer-status-flow][docs:flexible-kyc-checks] |
+| `PENDING_APPROVAL` | `REJECTED` | platform, onboarding evaluation concluded negatively | [docs:customer-status-flow] |
+| `PENDING_APPROVAL` | "Withdrawn" (target status not named; `INACTIVE` or `REJECTED` `[inferred]`) | client (`changeHayCustomerStatus`) | [docs:customer-status-flow] |
+| `REFERRED` | `ACTIVE` / `REJECTED` | Shaype operations resolving the referral (KYC API `approveAmlKycCheck` exists) | `[inferred]` from [docs:customer-status-flow] |
+| `ACTIVE` | `BLOCKED` | `blockCustomer` | [docs:customer-creation-1] |
+| `ACTIVE` | `BLOCKED` | Accounts `blockAccount` with `accountBlockStyle` absent or `ACCOUNT_AND_CUSTOMER` ("Both the account and customer(s) owning it will be blocked") | [spec BlockAccountRequestBody] |
+| `BLOCKED` | `ACTIVE` | `unblockCustomer` ("will change the customer status to ACTIVE") | [docs:customer-creation-1] |
+| any with open accounts | `INACTIVE` | Accounts `closeAccount` closing the customer's last non-CLOSED account ("Closing all the accounts for a customer ... will also change the customer status to INACTIVE"); `statusReason` ← `reason` | [docs:customer-status-flow][docs:account-closure][spec CloseAccountRequestBody] |
+| any | `INACTIVE` | Groups `removeCustomerFromGroup` when the customer is then "linked only to accounts with a Closed status" | [docs:customer-removal] |
+| any | any enum value | `changeHayCustomerStatus` — schema permits all six `newStatus` values; no matrix of legal from→to pairs is published | [spec] `[open, §7]` |
+
+Terminal states: `INACTIVE` is effectively terminal ("unless successfully completing the process of re-onboarding", which creates a new record) [docs:customer-status-flow][docs:account-closure]. `REJECTED` is not explicitly terminal; nothing documents leaving it. `[inferred]` for the local implementation: treat `INACTIVE` and `REJECTED` as terminal for platform-driven changes, but let `changeHayCustomerStatus` set any enum value unless the implementer decides otherwise (§7).
+
+### `statusReason` (INACTIVE reason) [spec]
+
+Values `SUSPICIOUS`, `DECEASED`, `CUSTOMER`, `OPERATIONAL`. Not a state machine; written once when the customer becomes INACTIVE through account closure. Affects duplicate checks: SUSPICIOUS/DECEASED → still included; CUSTOMER/OPERATIONAL → excluded [docs:account-closure].
+
+### `blockedBy` [spec]
+
+`CLIENT` | `PLATFORM`. Set when status becomes `BLOCKED`; meaningful only while BLOCKED `[inferred]`.
+
+### Related status enums this domain returns but does not own
+
+- Account `status`: `PENDING_APPROVAL`, `APPROVED`, `ACTIVE`, `LOCKED`, `DORMANT`, `CLOSED`, `ACTIVE_IN_ARREARS` [spec]. Block → `LOCKED`; unblock → `ACTIVE`; close → `CLOSED` (final) [docs:accounts-overview][docs:account-status].
+- Card `cardStatus`: `ACTIVE`, `AWAITING_ACTIVATION`, `BLOCKED`, `INACTIVE`, `EXPIRED` [spec]. Physical cards start `AWAITING_ACTIVATION`, virtual start `ACTIVE`; account closure → all linked cards `INACTIVE` [docs:cards][docs:account-closure].
+
+## 4. Invariants and calculations
+
+- **Identity**: `customerHayId` is a platform-generated UUID; the same value is accepted as `customerHayId` (accounts/cards sub-resources, `CreateHayCardRequestBody.customerHayId`, `HayGroup.customerHayIds`) and as `customerId` (GET/PATCH/block/status/unblock paths, `RemoveCustomerFromGroupRequestBody.customerId`, Stacks/Holds/Transactions `customerId`) [spec].
+- **One customer per client per identity**: uniqueness (per client) over each of `email`, `phoneNumber`, (`identityDocumentType`,`identityDocumentNumber`), (`firstName`,`lastName`,`dateOfBirth`) among customers not excluded as INACTIVE [docs:customer-creation-1][docs:account-closure]. Exclusion rule: `status == INACTIVE && statusReason in {CUSTOMER, OPERATIONAL, (none)}` → excluded; `statusReason in {SUSPICIOUS, DECEASED}` → included `[inferred]` composition of the two docs pages (the docs only enumerate the four reasons; an INACTIVE customer with no reason is unaddressed).
+- **Customer ↔ accounts**: "There must always be at least one Customer created to allow the generation of an Account" [docs:customers]; a customer can own many personal accounts (one-to-many) [docs:account]; an account can be created only while the customer is `ACTIVE` [docs:customer-status-flow]; group accounts require **all** members `ACTIVE` [spec 422 example on group account creation]. Customer becomes `INACTIVE` exactly when every account it is linked to is `CLOSED` (evaluated asynchronously after `closeAccount`, and on `removeCustomerFromGroup`) [docs:account-closure][docs:customer-removal]. Worked example: accounts {ACTIVE, ACTIVE} close one → customer stays ACTIVE; accounts {ACTIVE, CLOSED} close the ACTIVE one → customer INACTIVE [docs:account-closure].
+- **Customer ↔ cards**: a card belongs to exactly one customer and one account [docs:cards]; cardholder (AVS) address = the customer's stored `address` at card creation/replacement/renewal [docs:card-creation]; default `nameOnCard` = `firstName + " " + lastName` if that is shorter than 23 characters, else `firstName[0] + " " + lastName` [docs:card-creation].
+- **Customer ↔ PayID**: a name change via `updateCustomer` propagates to PayIDs of linked accounts unless `skipPayIdUpdate: true` (default `false`) [spec].
+- **Dates**: `dateOfBirth`, `identityDocumentExpiry` are `YYYY-MM-DD`; `*DateTimeUtc` are ISO-8601 UTC with `Z`, samples at microsecond precision (`2024-03-12T22:59:48.357089Z`) [spec][docs:sample-requests-responses]. `tenure_days` (external auth) = whole days between customer creation date and the transaction date; created today ⇒ `0` [docs:account-and-customer-context-in-external-authorisation].
+- **String constraints** [spec]: `externalCustomerId` ≤ 64; `identityDocumentCardNumber` `^[a-zA-Z0-9]{6,10}$`; `identityDocumentRegion` matches `NSW|QLD|SA|TAS|VIC|WA|ACT|NT` (unanchored in the spec — `[inferred]`: anchor it and accept only the eight uppercase codes, per the prose "uppercase only"); `Address.countryCodeIso` length 3; `Address.administrativeRegion` 1–3; `Address.line1/line2/townOrCity` ≤ 120; `Address.postcode` ≤ 10; `email`, `firstName`, `lastName`, `countryCodePrefix`, `numberAfterPrefix`, `note` minLength 1; `searchCustomers.limit` 1–1000.
+- **Address validity** [docs:international-address]: `countryCodeIso == "AUS"` → Australian mandatory rules (list not in text); otherwise `line1` + valid `countryCodeIso` suffice; `administrativeRegion` if present must be a valid ISO 3166-2 subdivision for that country.
+- **Phone normalisation**: sample strips leading `+` from `countryCodePrefix` on storage/return `[inferred]` from [docs:sample-requests-responses].
+- **Defaults observed in samples** `[inferred]`: `gender` → `"OTHER"` when omitted; `deviceId` → `"NOT_SPECIFIED"` when no mobile app has registered a device; `tier` mirrors `customerTier`.
+- **Balances** (on `HayAccount`, for completeness — Accounts domain owns the maths) [spec descriptions]: `availableBalance` = "Total balance available for use ... Funds that are held, locked and allocated to a Stack will not be available"; `totalBalance` = "Total value of all funds on the Account (this amount will also include unused overdraft limit and Stacks, held and locked value)"; `heldBalance`, `lockedBalance`, `stacksBalance`, `overdraftBalance`, `overdraftLimit`, `technicalOverdraftBalance` all "Positive value to 2 decimal places" (technicalOverdraft: "Value to 2 decimal places"). A new account has every balance `0` [docs:sample-requests-responses]. No explicit formula is published; `availableBalance = totalBalance − heldBalance − lockedBalance − stacksBalance` is the natural reading `[inferred]`.
+- **Pagination**: `offset`/`limit` are required on both list endpoints; no maximum is stated for `getAllCustomers` [spec].
+- **Idempotency**: `idempotencyKey` (UUID) is required on `createHayCustomer` and `createHayAccount` and "used to recognise any subsequent retries" [spec]; what a retry returns is unstated (§7). Webhook `idempotencyKey` is the client-side dedupe key [webhook-spec].
+
+## 5. Cross-domain dependencies
+
+What this domain **reads/writes elsewhere**:
+- **Accounts**: `createHayAccount` creates a `HayAccount` (deprecated path; canonical is `POST /v1/accounts` with `accountHolderType: CUSTOMER`); `getAccountsForCustomerId` reads accounts by holder. `updateCustomer` (name) touches PayIDs on the customer's accounts [spec].
+- **Cards**: `getCardsForCustomerId` reads `HayCard` by `customerHayId`. The customer's `address`, `firstName`/`lastName`, `email`, `phoneNumber` feed card creation defaults [docs:card-creation] (`CreateHayCardRequestBody` also takes them explicitly, `required: accountId, customerHayId, deliveryAddress, email, firstName, idempotencyKey, lastName, phoneNumber, pin` [spec]).
+- **PayID**: name updates cascade unless `skipPayIdUpdate` [spec].
+- **Webhooks**: emits `CUSTOMER_STATUS_UPDATED`, `CUSTOMER_DETAILS_CHANGE`, `ONBOARDING_PASSED`, `ONBOARDING_FAILED`, and (via account creation) `ACCOUNT_STATUS_CHANGE` [docs:customer-creation-1][webhook-spec].
+
+What **other domains read/write on customers**:
+- **Accounts `createAccount` / `createHayAccount`**: require customer `ACTIVE` (422 `PERMISSION_DENIED ... status is currently BLOCKED`) [spec][docs:customer-status-flow]. Group account creation requires all members ACTIVE: 422 `PERMISSION_DENIED: Account cannot be created for group with id <id>, all members of the group should have an ACTIVE status` [spec].
+- **Accounts `blockAccount`** (`POST /v0/accounts/{accountId}/block`, summary "Block Account and Customer"): "Blocks the account (and by default its owning customer(s))"; `accountBlockStyle` enum `ACCOUNT_ONLY` | `ACCOUNT_AND_CUSTOMER` (default when absent; deprecated, to be removed); "It returns SUCCESS in case of partial success (Account blocked, but customer not blocked due to permission issues)"; idempotent [spec]. ⇒ customer `BLOCKED`, `blockedBy` per actor `[inferred]`.
+- **Accounts `unblockAccount`**: account → `ACTIVE` [docs:accounts-overview]; whether it also unblocks the customer is unstated `[open]`.
+- **Accounts `closeAccount`** (`POST /v0/accounts/{accountId}/close`, 202 `CloseAccountResponse {result: SUCCESS|FAILURE, description, errors[]}`): asynchronously, if all the customer's linked accounts are then CLOSED → customer `INACTIVE`, `closedDateTimeUtc` set `[inferred]`, `statusReason` ← `reason` (`SUSPICIOUS|DECEASED|CUSTOMER|OPERATIONAL`, optional), all future notifications for the customer cancelled, linked cards → `INACTIVE` [docs:account-closure][spec].
+- **Groups**: `createHayGroup` / `addCustomersToGroup` take `customerHayIds[]`; `removeCustomerFromGroup` takes `customerId`, cancels the customer's cards on group accounts, re-evaluates INACTIVE, and rejects removing the last member [docs:customer-removal][docs:groups][spec]. Group members need not hold cards to access the group account [docs:groups].
+- **KYC API**: `createCase` (`POST /v1/kyc/identity-verification/cases`) returns `scanCase.id` used as `identityVerificationCaseId`; platform drives `PENDING_APPROVAL → ACTIVE/REFERRED/REJECTED` and emits `ONBOARDING_*` [docs:customer-creation-1][docs:sample-requests-responses]. `approveAmlKycCheck` exists in the KYC tag (not read in detail).
+- **Click to Pay**: `DELETE /v0/customers/{customerId}/ctp` (`unenrolCustomer`) lives under the customers path but is tagged "Click to Pay API" — **not** one of the 11 ops here [spec].
+- **Stacks / Holds / Transactions / Scheduled Payments**: carry `customerId`/`customerHayId` references (`AccountToStackTransferRequestBody`, `StackToAccountTransferRequestBody`, `StackToStackTransferRequestBody`, `AuthorisationHold`, `FinancialTransaction`, `HayStackTransaction`, `HayScheduledPayment`, `HayArchivedScheduledPayment`, `ExternalCase`, `ExternalCounterpartDetails`) [spec] — read-only references to `customerHayId`.
+- **External authorisation** (Shaype → client): sends `customer { id, details, address, tenure_days }` snapshot with non-scheme transactions; `Hold.customerId` on card holds [ext-auth-spec].
+
+## 6. Error catalogue
+
+Declared on **every** one of the 11 operations [spec]: `400 Bad Request`, `403 Forbidden`, `422 Unprocessable Content` (createHayAccount: "Unprocessable Entity"), `500 Internal Server Error`, `501 Not Implemented`; body `ErrorResponse`. No 404/409 declared anywhere in the domain.
+
+| condition | status | message / shape | source |
+|---|---|---|---|
+| Create account for a customer whose status is not ACTIVE (example: BLOCKED) | 422 | `PERMISSION_DENIED: Account cannot be created for customer with id <customerHayId> as their status is currently BLOCKED`; `details: "Please refer to the API documentation or contact Shaype for more info with the traceId."`; `status: "422"`; `traceId: <uuid>` | [spec createHayAccount 422 example "Not enough permissions"] |
+| Create account for a group with a non-ACTIVE member | 422 | `PERMISSION_DENIED: Account cannot be created for group with id <groupHayId>, all members of the group should have an ACTIVE status` | [spec, Groups/Accounts 422 example] |
+| Duplicate customer (email / phone / docType+docNumber / firstName+lastName+DOB) | unstated ("customer creation will fail") | unstated; async `ONBOARDING_FAILED` with `state: DUPLICATE_CHECK` exists for the KYC path | [docs:customer-creation-1][webhook-spec] |
+| `skipKyc` and `onlySanctionsCheck` both true | unstated | "This flag cannot be used at the same time as ..." | [spec] |
+| Missing required body field / minLength / pattern / enum violation (e.g. `note` empty, `newStatus` not in enum, `identityDocumentCardNumber` not `^[a-zA-Z0-9]{6,10}$`) | 400 `[inferred]` | unstated | [spec constraints] |
+| Missing required query `offset`/`limit`; `searchCustomers.limit` outside 1–1000 | 400 `[inferred]` | unstated | [spec] |
+| Non-UUID path id | 400 `[inferred]` | unstated | [spec format uuid] |
+| Unknown customer id | unstated (no 404 declared; 400 or 422 `[inferred]`) | unstated | [spec] |
+| Address fails country-specific mandatory rules / bad `administrativeRegion` | unstated (400 or 422 `[inferred]`) | unstated | [docs:international-address] |
+| Unblock a customer that is not BLOCKED; block an INACTIVE customer; illegal status transition | unstated | unstated | — |
+| Not authorised for the client / permission gating (e.g. platform-blocked customer) | 403 `[inferred]` (declared on every op) | unstated | [spec] |
+| Webhook delivery: client responds 401/403/429/5XX | Shaype retries 18 times over ≤48 h (exponential backoff) | — | [docs:webhook-notification] |
+| Webhook endpoint contract (client side) | 200 Success / 403 Unauthorised / 422 Invalid Input / 500 Internal error | — | [webhook-spec] |
+
+## 7. Open questions
+
+Decisions the implementer must make (nothing in spec/docs settles them):
+
+1. **HTTP code for unknown `customerId`/`customerHayId`** — no 404 declared on any op. Choose 404 (REST-natural) or 422/400 (spec-declared).
+2. **Legal `changeHayCustomerStatus` transitions** — schema allows all six values (incl. `BLOCKED`, which the prose omits). Decide: free-set, or enforce the documented graph (PENDING_APPROVAL→ACTIVE/REFERRED/REJECTED/INACTIVE, REFERRED→ACTIVE/REJECTED, ACTIVE↔BLOCKED, →INACTIVE) and what error (422?) an illegal transition returns. Also whether same-status is a no-op 200 or an error, and whether a `CUSTOMER_STATUS_UPDATED` webhook fires on a no-op.
+3. **What "Withdrawn" means** for a PENDING_APPROVAL customer — which target status (`INACTIVE`? `REJECTED`?).
+4. **Duplicate-check failure code and message** on `createHayCustomer` (sync 4xx vs. async `ONBOARDING_FAILED`), and whether duplicate checks re-run on `updateCustomer`.
+5. **Idempotent retry semantics** for `idempotencyKey` on create customer/account: return the original resource (200) vs. conflict (409 is not declared). Key scope (per client? global?) and TTL.
+6. **`createHayAccount` product** — legacy body has no `productId`/`currency`; pick a default product (e.g. the client's single/first product, `AUD`). Initial account status: `APPROVED` (spec prose) vs `PENDING_APPROVAL` (docs sample).
+7. **Australian address mandatory set** — only in an image; `[inferred]` `line1`, `townOrCity`, `administrativeRegion`, `postcode`, `countryCodeIso`. Whether `administrativeRegion` for AUS must be one of the 8 state codes.
+8. **`searchCustomers` semantics** — AND vs OR across criteria; exact vs prefix/case-insensitive match on names/email; whether `{}` returns everything; `customerIds` combined with other criteria; sort order and stability of `offset` paging for both list ops.
+9. **Which accounts `getAccountsForCustomerId` returns** — personal only, or also GROUP accounts the customer is a member of; include CLOSED?
+10. **Which cards `getCardsForCustomerId` returns** — include INACTIVE/EXPIRED/voided cards?
+11. **`blockCustomer` preconditions** — allowed from which statuses; `blockedBy` value; whether a client may `unblockCustomer` a `PLATFORM`-blocked customer; whether `note` is persisted/exposed; `GenericMessage.message` text for block/unblock.
+12. **Whether Accounts `unblockAccount` also unblocks the owning customer** when it was blocked via `ACCOUNT_AND_CUSTOMER`.
+13. **Timing of INACTIVE via account closure** — documented as asynchronous; the local implementation must decide sync vs. deferred, and whether `closedDateTimeUtc`/`statusReason` are set at that moment.
+14. **`clientReference`** — appears on `HayCustomer` but no request sets it; leave null or map from `externalCustomerId`?
+15. **`gender`** — free string in schema; enforce `MALE|FEMALE|OTHER`? default `OTHER` when omitted (as in the sample)?
+16. **Phone/prefix normalisation** — strip leading `+`? validate mobile-ness? (docs require mobile).
+17. **Response field presence** — samples omit unset fields (no explicit `null`s); decide omit-vs-null policy, especially for `customData` (schema `nullable`).
+18. **`identityDocumentRegion` regex anchoring** — spec pattern is unanchored; anchor it?
+19. **`skipKyc` given as the string `"true"`** in the docs sample — accept string booleans or reject with 400?
+20. **KYC simulation** — with `skipKyc: false` the real platform moves status asynchronously; the local server needs a policy (auto-activate immediately, stay PENDING_APPROVAL until a test hook, or emit `ONBOARDING_PASSED`/`FAILED` on demand) and must decide whether `identityVerificationCaseId` is validated against KYC `createCase`.
+21. **Which fields `updateCustomer` may touch for INACTIVE/REJECTED customers**, and whether `CUSTOMER_DETAILS_CHANGE` fires when nothing effectively changed.
+22. **`tier` mutability** — no op updates `tier` after creation; confirm immutable.
+23. **Auth/403** — the spec carries no security scheme; decide how the local server scopes customers per client (all four duplicate-check rules are "under a single client").
