@@ -434,3 +434,342 @@ Operation count for tag "PayTo API": **22** (verified with the `ops.json` filter
   - Pure lookup, no state change, no webhook.
   - Non-6-digit path → 400 `[inferred]` (pattern violation).
   - Staging fixture: BSB `000000` ("000 000" in the docs) returns `{"supported": false}`; "For the debtor, any BSB can be used when creating a mandate" — createMandate does **not** enforce this check [docs:payto-staging-testing-suite].
+
+## 2. Entities and fields
+
+All field names, types, `required` flags and enums are verbatim from `[spec]` unless labelled. Example values are from `[docs:payto-staging-testing-suite]` (the spec has no examples).
+
+### Mandate (`GetMandateResponseBody`)
+
+"Details of a mandate." `required: ["debtorDetails","mandateId","paymentTerms","registrationDateTime","status","validityStartDate"]`. Created by createMandate; read by getMandate (and, as a summary, getMandates / getMandateIdsByInitiator); updated by amendMandateByInitiator, amendMandateByPayer, amendMandatePaymentTerms (after Payer accept), suspend/release/cancel (both roles), resolveMandateByPayer/Initiator, and MMS events (expiry).
+
+| field | type | required | enum / notes | example |
+|---|---|---|---|---|
+| `mandateId` | string (uuid) | yes | "Unique identifier of a mandate." UUID v1 | `1212c423-262b-11ee-844d-95ee6a0c000c` |
+| `creditorDetails` | `GetMandateCreditorDetailsDto` | no | | |
+| `debtorDetails` | `GetMandateDebtorDetailsDto` | yes | | |
+| `description` | string | no | "Mandate description." (≤140 on create) | `"Pending-Amend/Port-PMTI/Port-DEBT, Debtor-BBAN, Creditor-BBAN, Payment-Monthly/BALN/Amount/first/last"` |
+| `paymentTerms` | `GetPaymentTermsDto` | yes | | |
+| `purposeCode` | string | no | enum `["MORTGAGE","UTILITY","LOAN","DEPENDANT","GAMBLING","RETAIL","SALARY","PERSONAL","GOVERNMENT","PENSION","TAX","OTHER"]` (required on create, optional here) | `"RETAIL"` |
+| `registrationDateTime` | string (date-time) | yes | "When the mandate was registered." | `"2021-02-25T09:25:52.556Z"` |
+| `status` | string | yes | enum `["CREATED","ACTIVE","SUSPENDED","CANCELLED"]` | `"CREATED"` |
+| `transferArrangement` | string | no | "Indication of future transfer date, conditions of sale and requirement to hold funds." | `"Transfer arrangement test"` |
+| `validityEndDate` | string (date) | no | | `"2025-05-25"` |
+| `validityStartDate` | string (date) | yes | | `"2020-10-06"` |
+
+Not exposed by getMandate but present in the request: `idempotencyKey`, `resolutionRequestedBy` [spec]. Not exposed anywhere as a plain field: the MMS "cx" extended status (only inside amendment action details, see `cxMandateStatus`).
+
+`GetMandateCreditorDetailsDto` — "Describes creditor account details." `required: ["accountId"]`:
+
+| field | type | required | enum / notes | example |
+|---|---|---|---|---|
+| `accountId` | string (uuid) | yes | "The identifier of the creditor account." | `596fb54d-2b88-4245-a793-08a5f7a6d6d4` |
+| `partyReference` | string | no | | `"Creditor party reference"` |
+| `partyType` | string | no | enum `["ORGANISATION","PERSON"]` | `"PERSON"` |
+| `ultimatePartyName` | string | no | "Creditor's ultimate party name. Optional, overrides platform creditor's name" | `"JOE BLOGGS"` |
+
+Note: the alias fields accepted on create (`accountAliasIdentification`, `accountAliasType`) are **not** echoed back here [spec].
+
+`GetMandateDebtorDetailsDto` — "Describes debtor account details." No required fields:
+
+| field | type | enum / notes | example |
+|---|---|---|---|
+| `accountId` | string (uuid) | "The identifier of the debtor account." | `fd33a68c-4fc2-4cfa-a16a-e65d9709ac51` |
+| `accountNumber` | string | "BSB ... 6 digits ... combined with account number, 5-9 digits" (11–15 chars) | `"8020016999999"` |
+| `partyName` | string | | `"JOHN MAXIMILLIAN DOE"` |
+| `partyReference` | string | | `"Debtor party reference"` |
+| `partyType` | string | enum `["ORGANISATION","PERSON"]` | `"PERSON"` |
+| `ultimatePartyName` | string | | `"JOHN DOE"` |
+
+### PaymentTerms (`GetPaymentTermsDto`; create shape `CreatePaymentTermsDto`; summary `GetPaymentTermsSummaryDto`)
+
+`GetPaymentTermsDto` — "Describes how payments for a mandate should happen." `required: ["frequency"]` (create requires `frequency` **and** `type`):
+
+| field | type | enum / notes | example |
+|---|---|---|---|
+| `amount` | `CurrencyAmount` | fixed per-payment amount | `{"amount":500.00,"currency":"AUD"}` |
+| `countPerPeriod` | string | "Qualifies the frequency in terms of the number of instructions to be created and processed during the specified period." | `"10"` |
+| `firstPayment` | `PaymentDto` | `{amount: CurrencyAmount, date: string(date)}` | `{"amount":{"amount":500.00,"currency":"AUD"},"date":"2020-10-07"}` |
+| `frequency` | string | enum `["ADHOC","DAILY","FORTNIGHTLY","INTRA_DAY","SEMI_ANNUAL","MONTHLY","QUARTERLY","WEEKLY","ANNUAL"]` | `"ADHOC"` |
+| `lastPayment` | `PaymentDto` | | `{"amount":{"amount":900.00,"currency":"AUD"},"date":"2024-10-06"}` |
+| `maximumAmount` | `CurrencyAmount` | per-instruction cap | `{"amount":900.00,"currency":"AUD"}` |
+| `pointInTime` | string | "Qualifies payment frequency" (create: exactly 2 chars; MMS: `^[0-9]{2}$`) | `"09"` |
+| `type` | string | enum `["BALLOON","FIXED","USAGE_BASED","VARIABLE"]` | `"FIXED"` |
+
+`GetPaymentTermsSummaryDto` (in getMandates rows) — `required: ["frequency"]`; fields `amount`, `frequency`, `maximumAmount` only.
+
+`CurrencyAmount` — `required: ["amount","currency"]`; `amount` number "to 2 decimal places"; `currency` 160-value ISO-4217 enum. `CurrencyAmountDto` (MMS/actions variant) — `amount` **string** `^(?=.{1,19}$)[0-9]{0,18}(?:\.[0-9]{0,2})?$`, `currency` string `^[A-Z]{3}$` [spec].
+
+### MandateSummary (`GetMandateSummaryDto`)
+
+Rows of getMandates. `required: ["mandateId","paymentTerms","purposeCode","status"]`; fields `debtorAccountId` (uuid, "if determined"), `description`, `mandateId`, `paymentTerms` (`GetPaymentTermsSummaryDto`), `purposeCode` (12-value enum), `status` (`CREATED|ACTIVE|SUSPENDED|CANCELLED`), `validityEndDate` [spec].
+
+### PaymentInstruction (`PaymentInstruction`, `GetMandatePaymentStatusResponseBody`, `MakeAdhocPaymentResponseBody`)
+
+Created by makeAdhocPayment (adhoc) or by Shaype's scheduler (non-ADHOC); read by getMandatePaymentStatus, searchPaymentsInstructions; status advanced by NPP/MMS callbacks (not by any client operation).
+
+| field (search) | field (status) | field (adhoc resp.) | type | notes |
+|---|---|---|---|---|
+| `id` | path `instructionId` | `instructionId` | string | 35-char NPP instruction id, e.g. `ANNCAU22XXXI20230801000000000079280` (§4) |
+| — | — | `mandateId` | uuid | |
+| `amount` | — | — | number | `1.28` |
+| `creationDateTime` | — | — | date-time | `"2023-11-29T12:33:59.833Z"` |
+| `endToEndId` | — | (request `endToEndId`) | string | `"NET-1724"`; default `"Not provided"` |
+| `transactionStatus` | `transactionStatus` | `transactionStatus` | enum | `["RECEIVED","UNDELIVERED","SENT","STORE_AND_FORWARD","ACCEPTED_FOR_CLEARANCE","SETTLEMENT_ABORTED","ACCEPTED_AND_SETTLED","REJECTED","PENDING"]` |
+| `transactionStatusReasonCode` | `transactionStatusReasonCode` | — | string | e.g. `"AB01"` |
+| — | — | `transactionStatusDisplay` | string | `"Sent"`, `"Store & Forward"`, `"Received"`, `"Rejected"` |
+| — | — | `statusIsFinal` | boolean | |
+| — | — | `message` | string | `"Adhoc payment executed successfully."` |
+
+### MandateAction (`GetMandateActionsActionDto`)
+
+"Details of an action performed on a mandate." Returned by getMandateActionsByInitiator / getMandateActionsByPayer. Created implicitly by createMandate (CREATE), amendMandateByInitiator / amendMandateByPayer / amendMandatePaymentTerms (AMEND), suspend/release/cancel (STATUS_CHANGE); PORT actions are MMS-originated (no client operation) [inferred from types]. `required: ["actionIdentification","creationEvent","mandateIdentification","notificationPriority","status","type"]`.
+
+| field | type | required | enum / constraints (verbatim; comma-joined enums split) | notes |
+|---|---|---|---|---|
+| `actionIdentification` | string (uuid v1 pattern) | yes | | "ID of the action performed." |
+| `mandateIdentification` | string (uuid v1 pattern) | yes | | |
+| `type` | string | yes | `AMEND`, `CREATE`, `PORT`, `STATUS_CHANGE` | |
+| `status` | string | yes | `COMPLETED`, `DECLINED`, `PENDING`, `RECALLED`, `TIMED_OUT` | "COMPLETED: A bilateral action that has been confirmed / A unilateral action has been performed / A port that has been finalised. DECLINED: Action has been declined. PENDING: A bilateral action that is waiting to be confirmed / A porting action that has been initiated and is waiting to be finalised. RECALLED: Action has been recalled. TIMED_OUT: Action was created bilaterally and has now timed out." |
+| `bilateral` | boolean | no | | "only be present for mandate creation and amendment actions" |
+| `notificationPriority` | string | yes | `NORMAL`, `UNATTENDED` | "NORMAL: ... requires a synchronous response ... Attended mode. UNATTENDED: ... asynchronous response ... Unattended mode." |
+| `creationEvent` | `GetMandateActionsCreationEventDto` | yes | | |
+| `resolutionEvent` | `GetMandateActionsResolutionEventDto` | no | | present once resolved [inferred] |
+| `details` | `GetMandateActionsDetailsDto` | no | exactly one of `creation`, `amendment`, `porting`, `statusChange` | "Depending on the type of action, only one of the following fields will be present" |
+| `expiryTime` | string (ISO UTC datetime pattern) | no | | "For a bilateral mandate creation or amendment action, or for a porting action, ... the timestamp at which the action will expire if no resolution is provided." |
+| `resolutionRequestedBy` | string (ISO UTC datetime pattern) | no | | "informational purposes only and does not affect the expiry time imposed by the MMS" |
+| `cxEventNameCreation` | string 1–140 | no | | "Examples - Payment agreement Received or Updated payment terms received or Transfer Initiated." |
+| `cxEventNameResolution` | string 1–140 | no | | "Examples - Payment agreement Declined or Updated payment terms authorised or Transfer Completed" |
+
+`GetMandateActionsCreationEventDto` — `required: ["partyRole","servicerBic","sponsorBic","time"]`: `partyRole` enum `DEBTOR`, `PAYMENT_INITIATOR`; `servicerBic`, `sponsorBic` string `^[A-Z0-9]{4}[A-Z]{2}[A-Z0-9]{2}[A-Z0-9]{3}$` (11-char BIC; docs examples use `ANNCAU22XXX`, `NPBOAU21XXX`); `time` ISO UTC datetime "YYYY-MM-DDThh:mm:ss.sssZ".
+
+`GetMandateActionsResolutionEventDto` — `required: ["time"]`: `time`; optional `servicerBic`, `sponsorBic` (same BIC pattern); `reasonCode` enum (bilateral only) `AC02`,`AC05`,`AC06`,`AC13`,`AG01`,`AG03`,`AM03`,`AM12`,`AM14`,`BE06`,`MD09`,`MD16`,`MD21`,`NOAS`,`RR04`,`SL11`,`SL12` ("InvalidDebtorAccountNumber, ClosedDebtorAccountNumber, BlockedAccount, InvalidDebtorAccountType, TransactionForbidden, TransactionNotSupported, NotAllowedCurrency, InvalidAmount, AmountExceedsAgreedLimit, UnknownEndCustomer, NoMandateServiceOnCustomer, RequestedByCustomer, MandateCancelledDueToFraud, NoAnswerFromCustomer, Regulatory Reason, Creditor not on Whitelist of Debtor, Creditor on Blacklist of Debtor"); `reasonDescription` string 1–256.
+
+`GetMandateActionsDetailsStatusChangeDto` — "Request to change the status of a mandate." `required: ["change"]`: `change` enum `CANCEL`, `RELEASE`, `SUSPEND`; `reasonCode` enum = **StatusChangeReasonCode** (31 values, below); `reasonDescription` string 1–256.
+
+**StatusChangeReasonCode** (used by `CancelMandateRequestBody.reasonCode`, `SuspendMandateRequestBody.reasonCode`, `GetMandateActionsDetailsStatusChangeDto.reasonCode` — identical lists) [spec]: `AC02` Invalid Debtor account number · `AC04` Closed account number · `AC05` Closed Debtor account number · `AC06` Blocked account · `AC13` Invalid Debtor account type · `AG01` Transaction forbidden · `AG03` Transaction not supported · `AM03` Not allowed currency · `AM12` Invalid amount · `AM14` Amount exceeds agreed limit · `CTAM` Contract amended · `CTCA` Contract cancellation initiated by Debtor · `CTEX` Contract expired · `MCFC` Mandate suspended final collection · `MCOC` Mandate suspended once off collection · `MD07` End customer deceased · `MD08` No Mandate service by Agent · `MD09` No Mandate service on Customer · `MD16` Requested by Customer · `MD17` Requested by initiating party · `MD20` Mandate expired · `MD21` Mandate cancelled due to fraud · `MS02` Not specified reason Customer generated · `MS03` Not specified reason Agent generated · `MSUC` Mandate suspended after 7 consecutive unsuccessful collections · `NARR` Narrative · `NOAS` No answer from Customer · `RR04` Regulatory reason · `SL01` Specific service offered by Debtor Agent · `SL11` Creditor not on whitelist of Debtor · `SL12` Creditor on blacklist of Debtor.
+
+`GetMandateActionsDetailsCreationDto` — "Request to register payment mandate in central mandate service." `required: ["automaticExtensionIndicator","debtorInformation","establishmentScheme","initiationRequestIdentification","mandateType","paymentInformation","paymentInitiatorInformation","validityStartDate"]`:
+
+| field | type | required | enum / constraints |
+|---|---|---|---|
+| `automaticExtensionIndicator` | boolean | yes | "Automatic renewal of a mandate arrangement at the end of the defined period" |
+| `bescUserIdentification` | string 0–6 | no | "BECS user ID related to migrated DDR mandate." |
+| `creditorInformation` | `...CreationCreditorInformationDto` | no | |
+| `debtorInformation` | `...CreationDebtorInformationDto` | yes | |
+| `description` | string 1–140 | no | |
+| `establishmentScheme` | string | yes | `AUTHORISED_PAYMENT_MANDATE` ("Established bilaterally as Authorised Payment Mandate"), `MIGRATED_BY_CREDITOR`, `UNILATERAL_BY_DEBTOR` |
+| `initiationRequestIdentification` | string `^[ -~]{1,35}$` | yes | "as originally assigned by the initiating party" |
+| `mandatePurposeCode` | string | no | 12-value purpose enum |
+| `mandateType` | string | yes | `DIRECT_DEBIT`, `STANDING_ORDER` |
+| `nppBackofficeService` | string `^[ -~]{1,35}$` | no | |
+| `paymentInformation` | `...CreationPaymentInformationDto` | yes | |
+| `paymentInitiatorInformation` | `...CreationPaymentInitiatorInformationDto` | yes | |
+| `resolutionRequestedBy` | ISO UTC datetime | no | |
+| `shortDescription` | string 1–35 | no | |
+| `transferArrangement` | string 1–140 | no | |
+| `validityEndDate` | date pattern | no | "valid until 23:59:59.999 Australia Sydney time on this date" |
+| `validityStartDate` | date pattern | yes | "valid as of 00:00:00.000 Australia Sydney time on this date" |
+
+`GetMandateActionsDetailsAmendmentDto` — "Request to amend the details of a mandate." No required fields; same field set as Creation minus `establishmentScheme`/`initiationRequestIdentification`/`mandateType`/`validityStartDate`, plus `mandateDetailsCxExtension`; **clear-sentinel semantics**: `description`/`shortDescription`/`nppBackofficeService`/`bescUserIdentification` set to `'-'` mean cleared; `validityEndDate` `'1000-01-01'` means cleared [spec].
+
+`GetMandateActionsDetailsPortingDto` — "Details of the target party that the mandate is to be ported to. Only the details that are to be updated need to be present." Fields `creditorInformation`, `debtorInformation`, `paymentInitiatorInformation` (Porting variants) [spec].
+
+Party information DTOs (`GetMandateActionsDetails{Creation,Amendment,Porting}{Creditor,Debtor}InformationDto`) share this field set [spec]:
+
+| field | type / constraint | enum |
+|---|---|---|
+| `accountAliasIdentification` | string 1–2048 | |
+| `accountAliasTypeCode` | string | `PHONE_NUMBER`, `EMAIL_ADDRESS`, `AUSTRALIAN_BUSINESS_NUMBER`, `ORGANISATION_ID` |
+| `accountId` | uuid | "Platform identifier of the creditor account" (the debtor DTOs carry the same, copy-pasted, text) |
+| `accountIdentificationIssuer` | `^[ -~]{1,35}$` | |
+| `accountIdentificationTypeCode` | string | `BASIC_BANK_ACCOUNT_NUMBER`, `ALIAS` |
+| `accountNumber` | `^[ -~]{11,15}$` | BSB+account |
+| `accountServicerBic` | BIC pattern | |
+| `fullLegalAccountName` | `^[ -~]{1,140}$` | |
+| `partyIdentification` | `^[ -~]{1,35}$` | |
+| `partyIdentificationTypeCode` | string | `ALIEN_REGISTRATION_NUMBER`, `PASSPORT_NUMBER`, `CUSTOMER_ID`, `DRIVER_LICENSE_NUMBER`, `EMPLOYEE_ID`, `NATIONAL_IDENTITY_NUMBER`, `SOCIAL_SECURITY_NUMBER`, `TAX_ID`, `BANK_PARTY_ID`, `CENTRAL_BANK_ID`, `CLEARING_ID`, `CERTIFICATE_OF_INCORPORATION_NUMBER`, `COUNTRY_ID_CODE`, `DATA_UNIVERSAL_NUMBERING_SYSTEM`, `GS1GLN_ID`, `SIREN`, `SIRET`, `AUSTRALIAN_BUSINESS_NUMBER`, `AUSTRALIAN_COMPANY_NUMBER`, `LEGAL_ENTITY_ID` |
+| `partyName` | `^[ -~]{1,140}$` | |
+| `partyReference` | `^[ -~]{1,35}$` | |
+| `partyType` | string | `ORGANISATION`, `PERSON` — "Once the party type has been set it is not possible to clear it through a mandate amendment." |
+| `ultimatePartyName` | `^[ -~]{1,140}$` | |
+
+Creation variants: `required: ["accountIdentificationTypeCode","partyName","ultimatePartyName"]`. Amendment variants: no required; `'-'` clears string fields, `'ZZZZZZZZZZZ'` clears `accountServicerBic`, `'ZZZZ'` clears `partyIdentificationTypeCode`. Porting variants: no required.
+
+`GetMandateActionsDetails{Creation,Amendment,Porting}PaymentInitiatorInformationDto`: `partyIdentification` (`^[ -~]{1,35}$`), `partyIdentificationTypeCode` (same 20-value enum), `partyLegalName` (`^[ -~]{1,140}$`), `partyName`, `partyServicerBic` (BIC). Creation variant `required: ["partyIdentification","partyIdentificationTypeCode","partyLegalName","partyName"]`.
+
+`GetMandateActionsDetails{Creation,Amendment}PaymentInformationDto` — Creation `required: ["paymentFrequency"]`:
+
+| field | type / constraint | enum / notes |
+|---|---|---|
+| `amount`, `firstPaymentAmount`, `lastPaymentAmount`, `maximumAmount` | `CurrencyAmountDto` (string amount) | |
+| `countPerPeriod` | string `^(?=.{1,19}$)[0-9]{0,19}(?:\.[0-9]{0,18})?$` | `'0'` = cleared (amendment) |
+| `firstPaymentDate`, `lastPaymentDate` | date pattern | `'1000-01-01'` = cleared (amendment) |
+| `paymentAmountType` | string | `BALLOON`, `FIXED`, `USAGE_BASED`, `VARIABLE`; `'ZZZZ'` = cleared |
+| `paymentExecuteNotBeforeTime` | `^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.[0-9]{1,3})?(?:Z)|(-)$` | "each execution ... should not occur before a given time of that execution day" |
+| `paymentFrequency` | string | `ADHOC`, `DAILY`, `FORTNIGHTLY`, `INTRA_DAY`, `SEMI_ANNUAL`, `MONTHLY`, `QUARTERLY`, `WEEKLY`, `ANNUAL` |
+| `pointInTime` | `^[0-9]{2}$` | `'00'` = cleared |
+
+`GetMandateActionsDetailsAmendmentMandateDetailsCxExtensionDto` — MMS "CX" display labels/values; all optional strings (`cx*Label` 1–35, `cx*Display` 1–140, `cxInitiatorPartyNameDisplay` 1–300) plus **`cxMandateStatus`** enum `ACTION_REQUIRED`, `ACTIVE_TRANSFER_INITIATED`, `PAUSED_TRANSFER_INITIATED`, `TRANSFERRED`, `ACTIVE`, `PAUSED_BY_PAYMENT_INITIATOR`, `PAUSED_BY_CUSTOMER`, `PAUSED_BY_PAYER_INSTITUTION`, `CANCELLED_AUTHORISATION_TIMED_OUT`, `CANCELLED_BY_PAYMENT_INITIATOR`, `CANCELLED` ("Extended status of a mandate") [spec]. Full label list: `cxAmountLabel/Display`, `cxAutomaticExtensionIndicatorLabel`, `cxDebtorAccountIdentificationLabel`, `cxDebtorAccountIdentificationTypeCodeLabel/Display`, `cxDebtorPartyNameLabel`, `cxDebtorPartyReferenceLabel`, `cxDebtorUltimatePartyNameLabel`, `cxDescriptionLabel`, `cxFirstPaymentAmountLabel`, `cxInitiatorPartyNameLabel/Display`, `cxLastPaymentAmountLabel`, `cxMandatePurposeCodeLabel/Display`, `cxMandateStatusLabel/Display`, `cxPaymentAmountTypeLabel/Display`, `cxPaymentExecuteNotBeforeTimeLabel`, `cxPaymentFrequencyLabel/Display`, `cxPortingIdentificationLabel`, `cxShortDescriptionLabel`, `cxTransferArrangementLabel`, `cxValidityEndDateLabel`, `cxValidityStartDateLabel`.
+
+### Small response types
+
+- `CreateMandateResponseBody` `{ mandateId: uuid }`; `CheckPayToBsbSupportResponseBody` `{ supported: boolean }`; `GenericMessage` `{ message: string }`; `ErrorResponse` `{ details, message, status, traceId }` (all strings) [spec].
+
+### Webhook payloads (Shaype → client) [webhook-spec]
+
+Envelope `NotificationDto` (POST `/api/hay/v0/communications/notification`): `required: ["customerHayId","idempotencyKey","type"]`; `type` enum includes `MANDATE` ("Mandate notification"), `MANDATE_DUE_PAYMENT`, `MANDATE_PAYMENT`, `MANDATE_ACTION_EXPIRATION`, `TRANSACTION`, `SCHEDULED_PAYMENT`; `actionOwner` enum `["CLIENT","PLATFORM"]`; one event-detail property is populated per type. Verbatim property names on the envelope: **`mandateEventDto`**, **`mandateDuePaymentEventDto`**, **`mandatePaymentEventDto`**, **`mandateActionExpirationEvent`** (note: three with `Dto` suffix, one without), `transactionEvent`.
+
+| event `type` | envelope property | schema | fields |
+|---|---|---|---|
+| `MANDATE` | `mandateEventDto` | `MandateEventDto` | `mandateId` uuid; `actionId` uuid; `description` string "Event description"; `trigger` enum (32): `MAMN`,`MAMP`,`MAMR`,`MAMX`,`MCRP`,`MCRR`,`MCRT`,`MCRX`,`MPOF`,`MPOT`,`MPOX`,`MSCH`,`CSCH`,`PAMC`,`PAMD`,`PAMN`,`PCRC`,`PCRD`,`PPOT`,`PSCH`,`PPOI`,`PPOR`,`MCRC`,`MCRD`,`MAMC`,`MAMD`,`CCRR`,`IAMN`,`ISCH`,`IAMP`,`IAMR`,`ICRR` |
+| `MANDATE_DUE_PAYMENT` | `mandateDuePaymentEventDto` | `MandateDuePaymentEventDto` | `mandateId` uuid; `notificationId` uuid; `paymentDateTimeUtc` date-time |
+| `MANDATE_PAYMENT` | `mandatePaymentEventDto` | `MandatePaymentEventDto` | `instructionId` string; `mandateId` uuid; `paymentStatus` enum `MANDATE_PAYMENT_ACCEPTED`,`MANDATE_PAYMENT_ACCEPTED_FOR_CLEARANCE`,`MANDATE_PAYMENT_PENDING`,`MANDATE_PAYMENT_RECEIVED`,`MANDATE_PAYMENT_REJECTED`,`MANDATE_PAYMENT_SENT`,`MANDATE_PAYMENT_SETTLEMENT_ABORTED`,`MANDATE_PAYMENT_STORE_AND_FORWARD`,`MANDATE_PAYMENT_UNDELIVERED`; `reasonCode` string (example `AB01`; catalogue below); `transactionHayId` uuid ("When payment status is rejected, transaction identifier is null"); `isFinal` boolean; `originId` uuid; `originType` enum `CUSTOMER`,`SCHEDULED_PAYMENT`,`HAAS_OPERATIONS`,`OPERATIONS`,`MANDATE_PAYMENT`,`DIRECT_DEBIT`,`TRANSACTION` |
+| `MANDATE_ACTION_EXPIRATION` | `mandateActionExpirationEvent` | `MandateActionExpirationEventDto` | `mandateId` uuid; `actionId` uuid; `resolutionRequestedByDateTimeUtc` date-time |
+| `TRANSACTION` | `transactionEvent.mandatePaymentDetails` | `MandatePaymentDetails` | `mandateId` uuid; `instructionId` string; `initiatingPartyName` string — alongside `transactionEvent.originType: MANDATE_PAYMENT` and `originId` |
+
+`MandateEventDto.trigger` meanings (verbatim): CCRR Cuscal mandate create recalled · CSCH Cuscal mandate status changed · IAMN Initiator mandate amended · IAMP Initiator mandate amend proposed · IAMR Initiator mandate amend recalled · ICRR Initiator mandate create recalled · ISCH Initiator mandate status changed · MAMC Mandate amend confirmed · MAMD Mandate amend declined · MAMN Mandate amended · MAMP Mandate amend proposed · MAMR Mandate amend recalled · MAMX Mandate amend expired · MCRC Mandate create confirmed · MCRD Mandate create declined · MCRP Mandate create proposed · MCRR Mandate create recalled · MCRT Mandate created · MCRX Mandate create expired · MPOF Mandate port finalised · MPOT Mandate ported · MPOX Mandate port expired · MSCH Mandate status changed · PAMC Payer mandate amend confirmed · PAMD Payer mandate amend declined · PAMN Payer mandate amended · PCRC Payer mandate create confirmed · PCRD Payer mandate create declined · PPOI Payer mandate port initiated · PPOR Payer mandate port recalled · PPOT Payer mandate ported · PSCH Payer mandate status changed.
+
+**PaymentReasonCode** (`MandatePaymentEventDto.reasonCode`; also the value space of `transactionStatusReasonCode`) [webhook-spec]: `AB01` Clearing process aborted due to timeout · `AB02` Clearing process aborted due to a fatal error · `AB03` Settlement aborted due to timeout · `AB04` Settlement aborted due to a fatal error · `AB08` Creditor agent is not online · `AC02` Account to be debited does not exist · `AC03` Account to be Credited does not exist · `AC05` The original Payer Customer Account number is closed · `AC06` Account is temporarily blocked · `AC07` Account to be credited previously existed and is now permanently closed · `AC13` Account to be debited cannot debit funds within · `AC14` Account to be credited cannot accept funds · `AC15` Payer account was changed to different account · `AG01` Account to be debited is unable to be debited · `AG03` Payee Participant has rejected the resulting NPP payment from payer · `AG07` Debtor account cannot be debited for a generic reason · `AGNT` Agent in the payment workflow is incorrect · `AM01` Use of zero-dollar payment initiation requests is prohibited · `AM02` amount greater than the maximum NPP limit of $99,999,999,999 · `AM03` non-processable currency · `AM04` insufficient funds · `AM06` less than agreed minimum · `AM09` Amount received is not the amount agreed or expected · `AM12` amount missing or invalid · `AM19` Number of transactions at the Group level is invalid or missing · `AM21` amount exceeds the agreed limit · `BE05` Creditor is unknown to Debtor · `BE06` End customer ... not known · `BE08` Debtor Name not provided · `BE22` Creditor Name not provided · `CH20` Number of decimal points not compatible with the currency · `CH21` Required Compulsory Element Missing · `CURR` currency other than AUD · `CUST` Cancellation requested by the Debtor · `DT02` CreationDateTime format · `DT04` future dated requests not supported · `ED05` Settlement of the transaction has failed · `ED06` Interbank settlement system not available · `FF04` Service Level code is missing or invalid · `FF08` End to End Id missing or invalid · `FF10` technical issues at the bank side · `FF11` subject to an abort operation · `FRAD` originated fraudulently · `G005` delivered to creditor agent with service level · `G006` delivered without service level · `MD01` did not contain a MandateId · `MD02` Mandate Cryptogram did not verify · `MD20` Mandate Cryptogram older than 24hrs · `MS02` Reason has not been specified by end customer · `NARR` narrative · `RC05` BIC invalid or missing · `RR04` Regulatory Reason · `SL01` specific service offered by the Debtor Agent · `SL11` Creditor not on whitelist · `SL12` Creditor on blacklist · `SL13` Number of transactions exceeds Debtor Agent offering · `SL14` Total value exceeds Debtor Agent offering · `TD03` file format incomplete or invalid · `TM01` after cut-off time · `E991`/`E992` Check with Cuscal on possible Outage · `M901-M922` Various mandate-specific error codes · `M308` Creditor Reference Must be equal to End to End Id · `M001` Invalid or not applicable character set · `E999` Unexpected System Error · `PA04` Check with Cuscal on possible Outage.
+
+### Related utility (mock) types — owned by the utilities domain, listed for cross-reference [spec]
+
+- `GenerateInitiatorMandateNotificationRequestBody.trigger` (4 chars) enum `MCRC,MCRD,MCRX,MAMC,MAMD,MAMN,MAMX,MPOF,MPOT,MPOX,MSCH`; `GeneratePayerMandateNotificationRequestBody.trigger` enum `MCRX,MCRT,MCRP,MAMN,MAMP,MAMR,MAMX,MSCH`; both take `actionDetails {actionId}` and `mandateDetails {mandateId (32-hex), creditorInformation, debtorInformation, paymentInformation {amount, countPerPeriod, firstPaymentAmount, firstPaymentDate, lastPaymentAmount, lastPaymentDate, maximumAmount, paymentAmountType (BALN/FIXE/USGB/VARI), paymentFrequency (ADHO/DAIL/FRTN/INDA/MIAN/MNTH/QURT/WEEK/YEAR), pointInTime}, validityStartDate, validityEndDate}`.
+- `PaymentInstructionSummary` (`createStubForMandateSearchPaymentInstructions`): `transactionStatus` enum `RECV`,`UNDV`,`SENT`,`SAFD`,`ACCP`,`ACSP`,`ACSC`,`RJCT`; `instructionIdentification` pattern `^[A-Z0-9]{4}[A-Z]{2}[A-Z0-9]{2}[A-Z0-9]{3}I[0-9]{8}00[0-9]{12}[0-9a-zA-Z]$`.
+- `GenerateRapainTransactionStatusInformation.transactionStatus` enum `ACCP`,`RJCT` ("Details of initial response to mandate payment request by Cuscal").
+
+## 3. State machines
+
+### Mandate `status` — `CREATED`, `ACTIVE`, `SUSPENDED`, `CANCELLED` [spec enum]
+
+Initial state on create: `CREATED` ("On production, mandates initially are in status CREATED") [docs:payto-staging-testing-suite]. Terminal: `CANCELLED` [inferred — no documented way out].
+
+| from | to | via | source |
+|---|---|---|---|
+| (none) | `CREATED` | `createMandate` | [docs:payto-staging-testing-suite] |
+| `CREATED` | `ACTIVE` | Payer accepts: `resolveMandateByPayer?resolution=ACCEPT` (platform Payer) or external bank authorisation → MMS `MCRC` to Initiator | [docs:payto-staging-testing-suite "when mandate creation proposal is accepted by the other party, the mandate status is switched to ACTIVE"] |
+| `CREATED` | `CANCELLED` | MMS authorisation timeout after 6 days → `MCRX` (cx `CANCELLED_AUTHORISATION_TIMED_OUT`) | [docs:payto-staging-testing-suite "after 6 days mandate should be automatically rejected and set into CANCELED status by MMS"] |
+| `CREATED` | `CANCELLED` [inferred] | Payer declines: `resolveMandateByPayer?resolution=REJECT` → `MCRD`/`PCRD` | status after decline not documented; [inferred] |
+| `CREATED` | `CANCELLED` [inferred] | Initiator recalls: `resolveMandateByInitiator` → `MCRR` (cx `CANCELLED_BY_PAYMENT_INITIATOR`) | status after recall not documented; [inferred] |
+| `ACTIVE` | `SUSPENDED` | `suspendMandateByInitiator` (cx `PAUSED_BY_PAYMENT_INITIATOR`) / `suspendMandateByPayer` (cx `PAUSED_BY_CUSTOMER`) / debtor institution (cx `PAUSED_BY_PAYER_INSTITUTION`, e.g. `MSUC`) → `MSCH` | [docs:payto-staging-testing-suite "Only mandates that are in ACTIVE status can be successfully suspended"]; cx mapping [inferred] |
+| `SUSPENDED` | `ACTIVE` | `releaseMandateByInitiator` / `releaseMandateByPayer` → `MSCH` | [docs:payto-staging-testing-suite "mandates can be released only when suspended"] |
+| `ACTIVE` | `CANCELLED` | `cancelMandateByInitiator` / `cancelMandateByPayer` → `MSCH` | [docs:payto-staging-testing-suite "Mandates can be cancelled from any other status"] |
+| `SUSPENDED` | `CANCELLED` | same | same |
+| `CREATED` | `CANCELLED` | `cancelMandateByPayer` (?) — "canceling a mandate from CREATED status is not done by the Initiator" | Payer side unstated; [open] |
+| `ACTIVE`/`SUSPENDED` | `CANCELLED` [inferred] | validity end date passed / MMS expiry (`MD20`, `CTEX`) | reason codes exist; behaviour undocumented |
+| `ACTIVE` | `ACTIVE` | `amendMandateByInitiator`, `amendMandateByPayer`, accepted `amendMandatePaymentTerms` (data change, no status change) | [spec], [docs] |
+
+Not allowed (documented errors): suspend when not `ACTIVE`; release when not `SUSPENDED`; Initiator cancel from `CREATED` [docs:payto-staging-testing-suite]. amendMandateByPayer requires `ACTIVE` or `SUSPENDED` [docs:payto-staging-testing-suite].
+
+### MandateAction `status` — `COMPLETED`, `DECLINED`, `PENDING`, `RECALLED`, `TIMED_OUT` [spec enum]
+
+Terminal: all except `PENDING` [inferred from the descriptions]. Unilateral actions (bank-detail amendments, suspend, release, cancel) are born `COMPLETED` ("A unilateral action has been performed") [spec]. Bilateral actions (`CREATE` via createMandate; `AMEND` via amendMandatePaymentTerms; `PORT`) are born `PENDING` with an `expiryTime` [spec description of `expiryTime`; inferred].
+
+| from | to | via | source |
+|---|---|---|---|
+| (none) | `PENDING` | createMandate (CREATE, bilateral), amendMandatePaymentTerms (AMEND, bilateral), MMS porting (PORT) | [inferred from spec] |
+| (none) | `COMPLETED` | amendMandateByInitiator / amendMandateByPayer (AMEND, unilateral); suspend / release / cancel (STATUS_CHANGE) | [spec status description] |
+| `PENDING` | `COMPLETED` | `resolveMandateByPayer?resolution=ACCEPT` / external bank accept → `MCRC` / `MAMC` (`cxEventNameResolution` e.g. "Updated payment terms authorised") | [docs:payto-notifications] |
+| `PENDING` | `DECLINED` | `resolveMandateByPayer?resolution=REJECT` / external decline → `MCRD` / `MAMD`; `resolutionEvent.reasonCode` may be set | [docs:payto-notifications], [spec] |
+| `PENDING` | `RECALLED` | `resolveMandateByInitiator` → `MCRR` / `MAMR` | [docs:payto-staging-testing-suite] |
+| `PENDING` | `TIMED_OUT` | MMS expiry at `expiryTime` → `MCRX` / `MAMX` ("status of the action is set to Timed Out (TIMO)") | [docs:payto-notifications] |
+| `PENDING` (PORT) | `COMPLETED` | port finalised → `MPOF` | [spec status description "A port that has been finalised"] |
+
+### PaymentInstruction `transactionStatus` — 9 values [spec enum]; finality per [docs:status-transitions]
+
+| status | MMS code | final? | meaning (verbatim, docs) | webhook `paymentStatus` |
+|---|---|---|---|---|
+| `UNDELIVERED` | `UNDV` | **Final** | "Message could not be delivered to the PayTo rails (Payment Gateway PAG). Client should retry initiation." | `MANDATE_PAYMENT_UNDELIVERED` |
+| `STORE_AND_FORWARD` | `SAFD` | Non-final | "Target institution is not available, but message will be relayed when they are back online" | `MANDATE_PAYMENT_STORE_AND_FORWARD` |
+| `SENT` | `SENT` | Non-final | "Message has been sent, no acknowledgement yet received" | `MANDATE_PAYMENT_SENT` |
+| `RECEIVED` | `RECV` | Non-final | "Message has been received, no further update on status yet" | `MANDATE_PAYMENT_RECEIVED` |
+| `ACCEPTED_FOR_CLEARANCE` | `ACCP` | Non-final | "Payment is accepted but settlement not initiated" | `MANDATE_PAYMENT_ACCEPTED_FOR_CLEARANCE` |
+| `SETTLEMENT_ABORTED` | `ACSP` | Non-final | "Settlement could not be completed" — docs: "Retry"; spec: "A retry attempt will be made on behalf of the client. Please continue to check for updates." | `MANDATE_PAYMENT_SETTLEMENT_ABORTED` |
+| `PENDING` | (none listed) | Non-final | "Settlement queued for handling but not complete" | `MANDATE_PAYMENT_PENDING` |
+| `ACCEPTED_AND_SETTLED` | `ACSC` | **Final** | "Settlement completed" | `MANDATE_PAYMENT_ACCEPTED` (note the different name) |
+| `REJECTED` | `RJCT` | **Final** | "Payment could not be completed" | `MANDATE_PAYMENT_REJECTED` |
+
+The docs' transition diagram is an image (`2d36d35-small-PayTo_-_Frame_5.jpg`) and could not be read; transitions below are those evidenced by text/mocks:
+
+| from | to | via | source |
+|---|---|---|---|
+| (none) | `SENT` / `RECEIVED` / `STORE_AND_FORWARD` / `REJECTED` | makeAdhocPayment synchronous response (or scheduler) | [docs:payto-staging-testing-suite examples] |
+| `SENT` | `UNDELIVERED` | delivery failure | [docs:payto-staging-testing-suite "paymentstatus:sent&undv"] |
+| `STORE_AND_FORWARD` | `UNDELIVERED` | "after technical retries" | [docs:payto-staging-testing-suite "paymentstatus:safd&undv"] |
+| `RECEIVED` | `REJECTED` | debtor bank rejects (reason code) | [docs:payto-staging-testing-suite "paymentstatus:recv&rjct"] |
+| (initiated) | `REJECTED` (`AB01`) | 15-second clearing timeout | [docs:payto-staging-testing-suite "timeout_rjct"] |
+| `RECEIVED` → `ACCEPTED_FOR_CLEARANCE` → (`PENDING`) → `ACCEPTED_AND_SETTLED` | | normal success path (RAPAIN `ACCP` then RAP) | [inferred from docs:status-transitions ordering and the staging flow] |
+| `ACCEPTED_FOR_CLEARANCE` / `PENDING` | `SETTLEMENT_ABORTED` | settlement failure; retried by Shaype | [spec description] |
+
+Terminal: `UNDELIVERED`, `ACCEPTED_AND_SETTLED`, `REJECTED` [docs:status-transitions]. `statusIsFinal`/`isFinal` = status ∈ that set [inferred]. Staging default when no `paymentstatus:` hint: "Settlement aborted" [docs:payto-staging-testing-suite].
+
+### `resolution` (query enum on resolveMandateByPayer) — `ACCEPT`, `REJECT` [spec]. Not a stored state.
+
+## 4. Invariants and calculations
+
+- **No balances or limits are computed in this domain.** Money moves as NPP transactions in the transactions/accounts domains; the only amount rules stated are: `CurrencyAmount.amount` "to 2 decimal places" [spec]; `maximumAmount` is "Maximum amount that may be paid from the debtor's account, per instruction" [spec: utils DTO]; `AM14`/`AM21` "Amount exceeds agreed limit" and `AM01` "zero-dollar ... prohibited" exist as reason codes [spec, webhook-spec] → `[inferred]` reject adhoc `amount` > `paymentTerms.maximumAmount` (when set) and `amount ≤ 0`.
+- **Mandate ID**: UUID v1 (pattern above) [spec]; MMS form = same without hyphens (32 hex, `^[0-9a-fA-F]{32}$`) [spec]. **Action ID**: UUID v1 [spec]. **Idempotency keys / notificationId**: any UUID [spec; docs].
+- **Instruction ID** (`instructionId` / `PaymentInstruction.id`): 35 chars = `<11-char BIC>` + `I` + `YYYYMMDD` + `00` + 12 digits + 1 alphanumeric — pattern `^[A-Z0-9]{4}[A-Z]{2}[A-Z0-9]{2}[A-Z0-9]{3}I[0-9]{8}00[0-9]{12}[0-9a-zA-Z]$` [spec: `PaymentInstructionSummary`]; `ExternalMandatePaymentDetails.instructionId` is 1–35 chars [spec]. Staging examples use BIC `ANNCAU22XXX`, e.g. `ANNCAU22XXXI20230718000000000077240`. Derived NPP ids: `paymentId`/`originalMessageIdentification` = id with the leading `ANNCAU22XXXI2` removed... per docs: "should have the same ID as instructionIdentification but after first part of the ID that indicates Business Identifier Code (BIC - ANNCAU22XXXI2) should be removed"; `transactionIdentification` inserts `N` after the BIC (`ANNCAU22XXXN2023...`) [docs:payto-staging-testing-suite].
+- **endToEndId**: adhoc → request `endToEndId` (1–35 chars); scheduled → creditor `partyReference` from mandate creation; absent → literal `"Not provided"` [docs:payto-staging-testing-suite].
+- **Dates**: `validityStartDate`/`validityEndDate` are `YYYY-MM-DD`; MMS semantics "valid as of 00:00:00.000 Australia Sydney time on [start]" and "valid until 23:59:59.999 Australia Sydney time on [end]" [spec: action schemas]. All datetimes are UTC `YYYY-MM-DDThh:mm:ss.sssZ` (strict regex on `from`/`to`, `time`, `expiryTime`) [spec]. `registrationDateTime` set at create [inferred].
+- **Scheduling** (non-ADHOC, `ACTIVE`): "only the next upcoming payment is scheduled. When the time of the payment comes, scheduled payment is initiated, and another scheduled payment is created in place of the previously existing one" [docs:payto-staging-testing-suite]. First schedule created on `MCRC`; replaced on `MAMC` [docs:payto-staging-testing-suite]. For `USAGE_BASED`/`VARIABLE`, the amount comes from setScheduledPaymentInitiationRequestAmount keyed by the `MANDATE_DUE_PAYMENT.notificationId` [spec; inferred link]. How `frequency` + `pointInTime` + `countPerPeriod` + `firstPayment`/`lastPayment` yield the next date is **not defined anywhere** [open].
+- **Timeouts**: makeAdhocPayment synchronous wait ≤ 15 s [docs:payto-staging-testing-suite]; mandate authorisation expiry 6 days [docs:payto-staging-testing-suite]; payment-instruction status retrievable for 15 days [docs:payto-payment].
+- **Pagination** (getMandates): 1-based `pageNumber`, `pageSize` 1–50, `totalCount` = all matches [spec].
+- **Status code mapping** MMS 4-letter → API: `RECV→RECEIVED`, `UNDV→UNDELIVERED`, `SENT→SENT`, `SAFD→STORE_AND_FORWARD`, `ACCP→ACCEPTED_FOR_CLEARANCE`, `ACSP→SETTLEMENT_ABORTED`, `ACSC→ACCEPTED_AND_SETTLED`, `RJCT→REJECTED` [spec `PaymentInstructionSummary` descriptions + docs stub/search example `RECV`→`RECEIVED`]. Mandate status MMS `CNCD` → `CANCELLED` [spec]. Payment-terms MMS codes `BALN/FIXE/USGB/VARI` ↔ `BALLOON/FIXED/USAGE_BASED/VARIABLE`; `ADHO/DAIL/FRTN/INDA/MIAN/MNTH/QURT/WEEK/YEAR` ↔ `ADHOC/DAILY/FORTNIGHTLY/INTRA_DAY/SEMI_ANNUAL/MONTHLY/QUARTERLY/WEEKLY/ANNUAL` [spec utils DTO descriptions].
+- **Rate limiting** on createMandate: response headers `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` (seconds); 429 with `Retry-After` [spec]. Window/limit values undocumented.
+
+## 5. Cross-domain dependencies
+
+- **Accounts**: `creditorDetails.accountId`, `debtorDetails.accountId`, `creditorAccountId`, `debtorAccountId` are platform account UUIDs (`HayAccount`). Amend-by-Initiator/Payer require the new account to be **`ACTIVE`** (`HayAccount.status` enum `PENDING_APPROVAL, APPROVED, ACTIVE, LOCKED, DORMANT, CLOSED, ACTIVE_IN_ARREARS` [spec]) and to belong to the same account holder as the previous one [docs:payto-staging-testing-suite]. getMandateIdsByInitiator requires the caller to own the account and BSB [spec]. `debtorDetails.accountNumber` / `getMandates.accountIds` use BSB+account-number strings (the account domain's BSB/account number), not UUIDs [spec]. Whether createMandate itself requires the creditor account to be `ACTIVE` is not stated ("Accounts for both debtor and creditor have been previously created in the platform, they have been activated and they should contain money" is a staging prerequisite) [docs:payto-staging-testing-suite].
+- **Customers**: "same account holder" checks resolve accounts to their customer [inferred]. Webhook envelope `customerHayId` is required for every mandate notification; which customer (creditor's for Initiator-side events, debtor's for Payer-side) is not stated [open].
+- **Transactions**: a settled PayTo payment appears as a transaction with `originType: MANDATE_PAYMENT` (enum on `FinancialTransaction`, `HayStackTransaction`, `TransactionEventDto`) and `mandatePaymentDetails {mandateId, instructionId, initiatingPartyName}` (`ExternalMandatePaymentDetails` in the spec, `MandatePaymentDetails` in the webhook) [spec; webhook-spec]. The spec warns: "Making Mandate Information available is under construction ... no data will be provided at present" for `ExternalMandatePaymentDetails` [spec]. Credit to creditor account on RAP; debit from a platform debtor account on RAPAIN/MAP [docs:payto-staging-testing-suite].
+- **PayID / NPP**: alias identification (`accountAliasType` EMAIL_ADDRESS etc.) reuses PayID; staging only supports `EMAIL_ADDRESS` aliases of the form `<bsb><account_number>@something.com` and "existing PayId cannot be used" [docs:payto-staging-testing-suite]. BSB support lookup (`checkBsbIsSupportedByPayTo`) is a static NPP participant table [inferred].
+- **Notifications/webhooks**: this domain emits `MANDATE`, `MANDATE_DUE_PAYMENT`, `MANDATE_PAYMENT`, `MANDATE_ACTION_EXPIRATION` and contributes to `TRANSACTION` [webhook-spec].
+- **Utilities (staging mocks)**: `generateMandateNotificationForInitiator`, `generateMandateNotificationForPayer`, `createStubForMandateSearchPaymentInstructions`, `generateReceiveAPaymentInstruction` (RAPAIN), `generateInboundNppTransactionV2` (RAP) drive the mandate/payment state in staging [docs:payto-staging-testing-suite]. A local implementation may use these as the "external world" entry points.
+- **External authorisation**: not involved (no PayTo references in `external-balance.yaml`).
+
+## 6. Error catalogue
+
+Declared codes for every operation: 400, 403, 422, 500, 501 (`ErrorResponse`); createMandate also 429 [spec]. No 404/409 declared. Documented texts:
+
+| condition | operation(s) | HTTP | message text | source |
+|---|---|---|---|---|
+| Creditor account cannot be matched (system rejection of mandate) | createMandate | `422` | `NOT_FOUND: CUS.API.100522 - Creditor account details incorrect (M900 - No matching record found)`; `details`: `Please refer to the API documentation or contact Shaype for more info with the traceId.` | [docs:payto-staging-testing-suite] |
+| Suspend when status ≠ `ACTIVE` | suspendMandateByInitiator, suspendMandateByPayer | not shown (`[inferred]` 422) | `Validation of the request for suspension mandate with id: {mandate_id}: To suspend a mandate it must be in active status.` | [docs:payto-staging-testing-suite] |
+| Release when status ≠ `SUSPENDED` | releaseMandateByInitiator, releaseMandateByPayer | not shown (`[inferred]` 422) | `Validation of the request for releasing mandate with id: {mandate_id} failed. To release a mandate it must be in suspended status.` | [docs:payto-staging-testing-suite] |
+| Amend creditor to account not `ACTIVE` / different holder | amendMandateByInitiator | not shown | "an error will be returned that data validation hasn't passed" (no literal text) | [docs:payto-staging-testing-suite] |
+| Amend debtor to account not `ACTIVE` / different holder / mandate not `ACTIVE`or`SUSPENDED` | amendMandateByPayer | not shown | none given | [docs:payto-staging-testing-suite] |
+| Unknown `mandateId` | cancelMandate*, resolveMandateByPayer (explicitly), all others [inferred] | not shown (`[inferred]` 422 `NOT_FOUND: ...`) | none given | [docs:payto-staging-testing-suite] |
+| Wrong role (Initiator calling Payer-only op and vice versa) | getMandates, all `/payer/` and `/initiator/` ops | `403` [inferred] | none | [spec descriptions] |
+| Caller not party to mandate / not owner of account+BSB | getMandate, getMandateIdsByInitiator | `403` [inferred] | none | [spec] |
+| Rate limit exceeded | createMandate | `429` + `Retry-After` | none | [spec] |
+| Schema violations (missing required, bad enum, `description`>140, `endToEndId` 1–35, `bsbNumber` not `^\d{6}$`, `pageSize`>50, `from`/`to` not ISO-UTC or in the future) | respective ops | `400` [inferred] | none | [spec constraints] |
+| setScheduledPaymentInitiationRequestAmount on `FIXED`/`BALLOON` mandate, or unknown `notificationId` | setScheduledPaymentInitiationRequestAmount | `422` [inferred] | none | [spec description] |
+| No pending bilateral action to resolve/recall | resolveMandateByPayer, resolveMandateByInitiator | `422` [inferred] | none | — |
+| Adhoc payment rejected by rails (not an HTTP error) | makeAdhocPayment | `200` with `transactionStatus: REJECTED`, `statusIsFinal: true`, `message: "Adhoc payment executed successfully."`; reason in webhook `reasonCode` (e.g. `AB01`) | | [docs:payto-staging-testing-suite] |
+
+## 7. Open questions
+
+1. **`creditorDetails.accountId` required vs alias**: spec marks it required; docs show creation with only `accountAliasIdentification`/`accountAliasType` for both parties. Decide: accept either `accountId` or (`accountAliasIdentification` + `accountAliasType`) for the creditor; require at least one of `accountId` / `accountNumber` / alias for the debtor [inferred].
+2. **HTTP code for "mandate not found"**: no 404 declared; the only documented not-found is `422` with a `NOT_FOUND:`-prefixed message. Decide: 422.
+3. **Wrong-role calls**: 403 vs 422 undefined. Decide: 403.
+4. **Mandate status after Payer REJECT and after Initiator recall of a CREATE**: undocumented; cx statuses `CANCELLED`/`CANCELLED_BY_PAYMENT_INITIATOR` suggest `CANCELLED`.
+5. **Can the Payer cancel/suspend a `CREATED` mandate?** Docs only forbid the Initiator cancelling from `CREATED`.
+6. **Cross-party release**: may an Initiator release a Payer-suspended mandate (and vice versa)? MMS cx statuses distinguish who paused; API does not.
+7. **Cancelling an already-`CANCELLED` mandate, suspending `CANCELLED`** etc.: error vs no-op undefined (suspend/release texts imply 422-style validation errors).
+8. **Idempotency semantics** for `createMandate.idempotencyKey` and `makeAdhocPayment.idempotencyKey`: replay returns the original 200? conflict → 409 (not declared)? Decide: same key + same body → replay original response; same key + different body → 422 [inferred].
+9. **makeAdhocPayment validation set**: which of mandate `ACTIVE`, `frequency == ADHOC`, `amount ≤ maximumAmount`, `amount > 0`, `currency == AUD`, today within `[validityStartDate, validityEndDate]` are enforced synchronously (HTTP error) vs returned as `REJECTED` with a reason code. `amount` is optional in the schema — behaviour when omitted (use `paymentTerms.amount`?) undefined.
+10. **Synchronous outcome of makeAdhocPayment**: which status the local implementation should return by default (`SENT` non-final vs `ACCEPTED_AND_SETTLED` final) and how the state advances afterwards; staging hints (`paymentstatus:*` in the mandate `description`) could be reproduced as a test hook.
+11. **`transactionStatusReasonCode`** is `required` on getMandatePaymentStatus but absent in every documented response; value for non-rejected statuses undefined.
+12. **15-day archive**: response after the window (422? empty?) undefined; also whether searchPaymentsInstructions is subject to it.
+13. **Scheduling algorithm** for non-ADHOC mandates (next-date from `frequency`/`pointInTime`/`countPerPeriod`/`firstPayment`/`lastPayment`; lead time of `MANDATE_DUE_PAYMENT`; what happens if no amount is set for `USAGE_BASED`/`VARIABLE` before `paymentDateTimeUtc`; whether `SUSPENDED` skips or defers).
+14. **amendMandatePaymentTerms**: allowed from-states; whether `frequency`/`type` may change; whether an empty body is a 400; whether getMandate shows proposed terms before acceptance; whether a second amend while one is `PENDING` is rejected.
+15. **resolveMandateByInitiator target selection** when multiple actions could be pending.
+16. **`getMandates.accountIds` format** (BSB+account like `debtorDetails.accountNumber`, or something else) and query-array serialisation; sort order of `getMandates`, `getMandateIdsByInitiator`, `searchPaymentsInstructions`, actions.
+17. **`GenericMessage.message` texts** for every success except `"Mandate resolved successfully."` — invent consistent strings.
+18. **`MandateAction` population**: `servicerBic`/`sponsorBic` values (staging uses `ANNCAU22XXX`), `notificationPriority` default (`NORMAL` [inferred]), `initiationRequestIdentification` source, `cxEventName*` texts, `expiryTime` = creation + 6 days [inferred from docs].
+19. **Webhook `customerHayId`** for mandate events, and which side receives which trigger when both creditor and debtor are platform accounts (the docs tables and the two mock trigger lists overlap but differ; `MandateEventDto.trigger` has 32 values including `I*`/`P*`/`C*` prefixed variants whose emission rules are undocumented).
+20. **`MANDATE_ACTION_EXPIRATION`** event: when it fires (at `resolutionRequestedBy`? at MMS `expiryTime`?) — no docs.
+21. **Rate-limit window** for createMandate.
+22. **Validity-date expiry**: does a mandate auto-transition to `CANCELLED` (`MD20`/`CTEX`) at `validityEndDate`, and are payments refused before `validityStartDate`?
+23. **Spec quirk fidelity**: whether to serve the comma-joined single-string enums verbatim in a served OpenAPI document (irrelevant to JSON responses — values are plain strings).
