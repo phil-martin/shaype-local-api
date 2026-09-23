@@ -141,3 +141,15 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# build output
+dist/
+
+# generated contract (run: npm run gen)
+src/contract/generated/
+
+# local sqlite databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
