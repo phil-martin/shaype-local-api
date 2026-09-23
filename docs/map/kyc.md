@@ -114,3 +114,138 @@ Listed in `ops.json` order.
   - Under Reduced KYC this is the only stage, so approving it completes onboarding → `ACTIVE` `[inferred]`.
   - Preconditions, effects, idempotency and side effects: as for `approveAmlKycCheck`, substituting the sanctions stage.
 - Webhook events: none named for this operation in the docs.
+
+## 2. Entities and fields
+
+Only two KYC-owned schemas describe persisted state (`ExternalCase`, and the implied per-customer "onboarding stage" record that the three approval endpoints act on but which **no schema exposes**). The rest are request/response envelopes. KYC-relevant fields that live on Customers-domain schemas are listed at the end because the implementer must join them.
+
+### ExternalCase — "Case" [spec]
+
+Returned only inside `CreateCaseExternalResponse.scanCase`. **Created** by `createCase`. **Read** by nothing (no GET). **Updated** by the platform/vendor as the end user completes verification (`outcome`) and by `createHayCustomer` when it links the case (`customerId`) `[inferred]`. No `required` list.
+
+| field | type | nullable | enum (verbatim) | example [docs:sample-requests-responses] | notes |
+|---|---|---|---|---|---|
+| `customerId` | string (uuid) | not flagged, but absent in the sample | | (absent) | "Customer id." Populated once linked via `identityVerificationCaseId` `[inferred]` |
+| `id` | string (uuid) | no | | `49645b93-2481-489e-a2d5-f704514e03f5` | "Unique identifier." The value the client passes as `identityVerificationCaseId` [docs:customer-creation-1] |
+| `outcome` | string | no | `NOT_EXECUTED`, `REJECTED`, `WARNING`, `PASSED` | `NOT_EXECUTED` | "Identity verification outcome" — see §3 |
+| `timestamp` | string (date-time) | no | | `2024-03-12T23:00:17.559Z` | "The date and time the case was created." |
+
+### CreateCaseExternalResponse — "New case created" [spec]
+
+Response envelope of `createCase`. No `required` list.
+
+| field | type | example [docs:sample-requests-responses] | notes |
+|---|---|---|---|
+| `mobileToken` | string | `eyJhbGciOiJIUzUxMiIsInppcCI6IkdaSVAifQ.<payload>.<sig>` | "Mobile SDK token used to complete identity verification on mobile phone." Same value as the `authorizationToken` query param inside `webLink` in the sample |
+| `scanCase` | `ExternalCase` | see above | |
+| `webLink` | string | `https://haasXY.web1.amer-1.jumio.ai/web1/v4/app?authorizationToken=<mobileToken>&locale=en-US` | "HTTP link to a web client to complete identity verification process through a web browser." |
+
+### UserConsentRequestBody — request-only, `createCase` [spec]
+
+`required: ["userLocationCountry"]`. Fields: `consentObtained` string nullable (prose-only domain `'yes'`, `'no'`, `'na'`; **no schema enum**); `consentObtainedAt` string date-time nullable; `userIp` string nullable; `userLocationCountry` string (ISO 3166-1 alpha-3 per description; no pattern); `userLocationState` string nullable. No examples anywhere (docs sample says `N/A`).
+
+### OnboardingStageApprovalBody — request-only, all three `approve*Check` ops [spec]
+
+"Details of the onboarding stage approval." No `required` list. Single field `comments` string — "Note / comment to be captured with approval". No examples.
+
+### ConfirmationResponse — response of all three `approve*Check` ops [spec]
+
+"A confirmation response." Single field `message` string — "A confirmation message." No example value anywhere.
+
+### ErrorResponse [spec]
+
+`details` string "Error details"; `message` string "Error description"; `status` string "HTTP response status"; `traceId` string "TraceID that can be used by HAY for troubleshooting the request". Shape example (Accounts domain, the only one in the spec): `{"message":"PERMISSION_DENIED: Account cannot be created for customer with id eed1e718-b1ca-4b94-a508-3d2d41c2e96b as their status is currently BLOCKED","details":"Please refer to the API documentation or contact Shaype for more info with the traceId.","status":"422","traceId":"b24daeb7-4242-4ff1-ba50-9825d5deedd8"}`.
+
+### Onboarding stage record (implied; **no schema**) `[inferred]`
+
+The three approval endpoints address stages `amlKycCheck`, `documentCheck`, `sanctionCheck` by path segment [spec]; the webhook names the failing stage with `OnboardingFailedEventDto.state` enum **`["DOCUMENT_SCAN","SANCTIONS_SCAN","KYC_AML_SCAN","DUPLICATE_CHECK"]`** (verbatim descriptions: `DOCUMENT_SCAN` "Document and identity check", `SANCTIONS_SCAN` "Sanctions check", `KYC_AML_SCAN` "KYC / AML check", `DUPLICATE_CHECK` "Duplicate customer check") [webhook-spec]. The docs list the Standard-KYC steps as "ID&V, Document Certification and Sanctions Screening" and Reduced KYC as "only ... Sanctions Screening" [docs:flexible-kyc-checks]. Name correspondence `[inferred]`:
+
+| path segment | webhook `state` | docs step | runs under Standard | runs under Reduced (`onlySanctionsCheck`) | manual approval endpoint |
+|---|---|---|---|---|---|
+| `documentCheck` | `DOCUMENT_SCAN` | ID&V / Document Certification (which of the two is undetermined — §7) | yes | no | `approveDocumentCheck` |
+| `amlKycCheck` | `KYC_AML_SCAN` | ID&V / Document Certification (the other one) or a separate AML data check | yes | no `[inferred]` | `approveAmlKycCheck` |
+| `sanctionCheck` | `SANCTIONS_SCAN` | Sanctions Screening | yes | yes | `approveSanctionCheck` |
+| (none) | `DUPLICATE_CHECK` | duplicate customer check (email / phone / docType+number / name+DOB) [docs:customer-creation-1] | yes | yes `[inferred]` | **none** — no approval endpoint exists |
+
+Per-stage fields the local implementation needs (all `[inferred]`, names are the implementer's choice): stage name, result (pending / passed / failed), manual-approval flag, `comments`, approved-at timestamp.
+
+### KYC-relevant fields on Customers-domain schemas (owned by `customers.md`; listed for the join) [spec]
+
+- `CreateHayCustomerRequestBody`: `identityVerificationCaseId` string (uuid) nullable — "Optional Identity Verification ID for the identity check" (= `scanCase.id` [docs:customer-creation-1]); `journeyId` string (uuid) nullable **`deprecated: true`** — "Please do not use this field for customer creation, please refer to identityVerificationCaseId"; `skipKyc` boolean — "Only applicable to Clients using Shaype KYC solution. Used to bypass KYC checks for the Customer. Must only set as 'true' in agreed scenarios (i.e. permission to generate a dummy / test account has been granted). This flag cannot be used at the same time as onlySanctionsCheck." (default `false` [docs:customer-creation-1]); `onlySanctionsCheck` boolean — "Applicable only to clients using our Sanctions-Check-Only KYC functionality. Used to only perform sanctions check on the Customer as part of KYC checks. This flag cannot be used at the same time as skipKyc."; `identityDocumentType` enum `["DRIVING_LICENSE","PASSPORT"]`; `identityDocumentNumber`; `identityDocumentCardNumber` pattern `^[a-zA-Z0-9]{6,10}$`; `identityDocumentExpiry` date; `identityDocumentIssuingCountry`; `identityDocumentRegion` pattern `NSW|QLD|SA|TAS|VIC|WA|ACT|NT`.
+- `HayCustomer`: `status` enum `["ACTIVE","INACTIVE","REJECTED","BLOCKED","PENDING_APPROVAL","REFERRED"]` (description of `REFERRED`: "Customer is referred for further KYC checks"); `approvedDateTimeUtc` date-time — "DateTime in UTC format when the customer has been approved"; the same `identityDocument*` fields as above; `statusReason` enum `["SUSPICIOUS","DECEASED","CUSTOMER","OPERATIONAL"]` (INACTIVE reasons, not KYC).
+- `UpdateCustomerRequestBody.documentData` → `DocumentData` (`required: ["identityDocumentIssuingCountry","identityDocumentNumber","identityDocumentType"]`; "When provided will be updated as a whole, setting the not provided fields to null.") — lets a client correct identity-document data after creation; nothing says this re-triggers any check (§7).
+- `ChangeHayCustomerStatusRequestBody.newStatus` — same six-value enum; the client-side alternative to platform activation ("If you are not using Shaype KYC, you will need to manually update the customer status to `ACTIVE`" [docs:customer-creation-1]).
+
+### Webhook payload `NotificationDto` — KYC-relevant subset [webhook-spec]
+
+Delivered to `POST {clientBase}/api/hay/v0/communications/notification` (client responds 200; Shaype retries on 401/403/429/5xx, **18 times over up to 48 hours** with exponential backoff [docs:webhook-notification]). `required: ["customerHayId","idempotencyKey","type"]`.
+
+| field | type | enum / notes |
+|---|---|---|
+| `customerHayId` | string (uuid) | "Unique identifier (UUID) of the customer associated with the notification" |
+| `idempotencyKey` | string (uuid) | "Idempotency key (UUID) to uniquely represent this request and prevent duplication." |
+| `type` | string | full enum verbatim: `ACCOUNT_STATUS_CHANGE`, `CUSTOMER_STATUS_UPDATED`, `CARD_ADDED_TO_WALLET`, `CARD_STATUS_CHANGE`, `CUSTOMER_DETAILS_CHANGE`, `ONBOARDING_PASSED`, `ONBOARDING_FAILED`, `REMINDER`, `SCHEDULED_PAYMENT`, `TRANSACTION`, `DIRECT_ENTRY`, `MANDATE`, `MANDATE_DUE_PAYMENT`, `MANDATE_PAYMENT`, `APPLE_PAY_REWARD_FOR_CUSTOMER`, `MANDATE_ACTION_EXPIRATION`, `DELEGATED_OTP_NOTIFICATION`. KYC ones: `ONBOARDING_PASSED` "Customer onboarding completed successfully"; `ONBOARDING_FAILED` "Customer onboarding failed"; `CUSTOMER_STATUS_UPDATED` "Customer's status has been updated" |
+| `actionOwner` | string | `CLIENT` "Client executed an action which triggered the event." / `PLATFORM` "Shaype executed an action which triggered the event." |
+| `firebaseDeviceToken` | string | "Firebase token of the customer's device" — present in both `ONBOARDING_*` doc samples |
+| `onboardingFailedEvent` | `OnboardingFailedEventDto` | `state` enum `["DOCUMENT_SCAN","SANCTIONS_SCAN","KYC_AML_SCAN","DUPLICATE_CHECK"]`; `submissionFailure` boolean (no description). "provided when the type is `ONBOARDING_FAILED`" |
+| `customerStatusUpdatedEvent` | `CustomerStatusUpdatedEventDto` | `customerStatus` enum `["ACTIVE","INACTIVE","REJECTED","BLOCKED","PENDING_APPROVAL","REFERRED"]`. "provided when the type is `CUSTOMER_STATUS_UPDATED`" |
+
+Documented sample payloads [docs:customer-creation-1] (verbatim keys):
+```json
+{"customerHayId":"42f5b631-edd5-00f0-9f17-cd17da0ca0d9","idempotencyKey":"42f5b631-edd5-00f0-9f17-cd17da0ca0d9","type":"ONBOARDING_PASSED","firebaseDeviceToken":"fD3Z...sdf234sd"}
+{"customerHayId":"c1c476dd-6c1a-23dd-8e4f-a4229f9563bf","idempotencyKey":"3971e549-a178-23dd-9d76-737328a6ce40","type":"ONBOARDING_FAILED","firebaseDeviceToken":"dbRQ...sdfsZ","onboardingFailedEvent":{"state":"KYC_AML_SCAN","isSubmissionFailure":true}}
+{"customerHayId":"74b7aaa9-dwe3-4a09-a618-f1bd405c3ead","idempotencyKey":"f7ec6a11-df3t-4eff-a5d9-31e948e8210f","type":"CUSTOMER_STATUS_UPDATED","actionOwner":"CLIENT","customerStatusUpdatedEvent":{"customerStatus":"ACTIVE"}}
+```
+Discrepancies: the docs sample uses **`isSubmissionFailure`** where the schema property is **`submissionFailure`** [docs vs webhook-spec]; the `ONBOARDING_*` samples carry **no `actionOwner`** (schema: optional); the sample UUIDs are not valid hex (`dwe3`, `df3t`) — treat as illustrative.
+
+## 3. State machines
+
+### `ExternalCase.outcome` — values verbatim [spec]
+
+`NOT_EXECUTED`, `REJECTED`, `WARNING`, `PASSED`. No transitions are documented; the only statements are the enum descriptions and the sample's initial value. Reconstructed from those:
+
+| from | to | via | source |
+|---|---|---|---|
+| (none) | `NOT_EXECUTED` | `createCase` | [docs:sample-requests-responses] (initial value in the sample); [spec] "Outcome is unknown because customer didn't complete the identity verification or customer input processing isn't complete yet" |
+| `NOT_EXECUTED` | `PASSED` | platform/vendor, after the end user completes the web/mobile flow and processing succeeds | [spec] enum description; transition itself `[inferred]` |
+| `NOT_EXECUTED` | `REJECTED` | platform/vendor, "Customer failed identity verification" | [spec]; transition `[inferred]` |
+| `NOT_EXECUTED` | `WARNING` | platform/vendor, "System is unable to make a definitive judgment. Requires" (truncated — presumably manual review) | [spec]; transition `[inferred]` |
+| `WARNING` / `REJECTED` | (unchanged) | `approveDocumentCheck` overrides the **stage**, not the case outcome — nothing says the case outcome is rewritten | `[inferred]` |
+
+Terminal: `PASSED`, `REJECTED` `[inferred]`; `WARNING` is terminal for the case but non-terminal for onboarding `[inferred]`. **No API transitions exist** — every change is platform-side; the local implementation needs a test hook (§7).
+
+### Onboarding stage result (implied, no schema) `[inferred]`
+
+Per stage in {`DOCUMENT_SCAN`, `KYC_AML_SCAN`, `SANCTIONS_SCAN`, `DUPLICATE_CHECK`} [webhook-spec names]:
+
+| from | to | via | source |
+|---|---|---|---|
+| (none) | pending | `createHayCustomer` with Shaype KYC (`skipKyc` false); stages present depend on `onlySanctionsCheck` | [docs:customer-creation-1][docs:flexible-kyc-checks]; representation `[inferred]` |
+| pending | passed | platform runs the check | [docs:customer-creation-1] "automatically" |
+| pending | failed | platform runs the check; emits `ONBOARDING_FAILED {state: <stage>}` | [webhook-spec][docs:customer-creation-1] |
+| failed | approved (manual) | `approveDocumentCheck` / `approveAmlKycCheck` / `approveSanctionCheck` respectively | [spec] endpoint existence; effect `[inferred]` |
+| failed (`DUPLICATE_CHECK`) | — | no endpoint; the customer stays failed | [spec] (absence) |
+
+All stages passed/approved ⇒ onboarding complete ⇒ customer `ACTIVE`, `ONBOARDING_PASSED` `[inferred]` from [docs:customer-creation-1] "The customer will become active automatically when the KYC is successful".
+
+### Customer `status` — the KYC-driven subset (full matrix in `customers.md` §3) [spec enum]
+
+Values verbatim: `ACTIVE`, `INACTIVE`, `REJECTED`, `BLOCKED`, `PENDING_APPROVAL`, `REFERRED`. The docs' transition diagram is an image only; text-stated transitions relevant to KYC:
+
+| from | to | via | source |
+|---|---|---|---|
+| (none) | `PENDING_APPROVAL` | `createHayCustomer` — "the initial state when a customer enters the onboarding phase" | [docs:customer-status-flow][docs:customer-creation-1] |
+| `PENDING_APPROVAL` | `ACTIVE` | platform, all KYC checks pass ("The customer will become active automatically when the KYC is successful"); `actionOwner: PLATFORM` `[inferred]` | [docs:customer-creation-1] |
+| `PENDING_APPROVAL` | `ACTIVE` | client `changeHayCustomerStatus {newStatus: ACTIVE}` (non-Shaype-KYC / `skipKyc`) | [docs:customer-creation-1] |
+| `PENDING_APPROVAL` | `REFERRED` | platform, "the customer has failed one or more the of the steps such as provided an invalid ID or flagged as a PEP"; "If a customer fails a check they will be referred to an operational colleague" | [docs:customer-status-flow][docs:flexible-kyc-checks] |
+| `PENDING_APPROVAL` | `REJECTED` | platform, "the onboarding evaluation has concluded that Shaype cannot open an account for the user as a result of the information provided" | [docs:customer-status-flow] |
+| `PENDING_APPROVAL` | withdrawn (target status unnamed; `INACTIVE` `[inferred]`) | client — "It can be 'Withdrawn' by the client at this stage" | [docs:customer-status-flow] |
+| `REFERRED` | `ACTIVE` | `approve*Check` clearing the last failed stage ("Shaype would look to resolve dispute with the customer") | `[inferred]` from [spec] endpoints + [docs:customer-status-flow] |
+| `REFERRED` | `REJECTED` | Shaype operations (no B2B endpoint other than `changeHayCustomerStatus`) | `[inferred]` from [docs:customer-status-flow] |
+| `INACTIVE` | (new record) `PENDING_APPROVAL` | "unless successfully completing the process of re-onboarding" — a fresh `createCase` + `createHayCustomer` | [docs:customer-status-flow]; new-record reading `[inferred]` |
+
+Terminal for KYC purposes: `REJECTED` (nothing documents leaving it) and `INACTIVE` (re-onboarding creates a new customer) `[inferred]`. `BLOCKED`/`ACTIVE`/`INACTIVE` transitions unrelated to KYC are in `customers.md`.
+
+### `OnboardingFailedEventDto.state` [webhook-spec]
+
+Not a state machine — a label for which stage failed: `DOCUMENT_SCAN`, `SANCTIONS_SCAN`, `KYC_AML_SCAN`, `DUPLICATE_CHECK`. `submissionFailure` boolean is undescribed; the sample sets it `true` with `KYC_AML_SCAN` [docs:customer-creation-1]. `[inferred]`: `true` = the end user's submission itself failed/was unusable (e.g. unreadable document) vs. `false` = the submission was processed and the check failed on its merits.
