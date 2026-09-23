@@ -249,3 +249,84 @@ Terminal for KYC purposes: `REJECTED` (nothing documents leaving it) and `INACTI
 ### `OnboardingFailedEventDto.state` [webhook-spec]
 
 Not a state machine — a label for which stage failed: `DOCUMENT_SCAN`, `SANCTIONS_SCAN`, `KYC_AML_SCAN`, `DUPLICATE_CHECK`. `submissionFailure` boolean is undescribed; the sample sets it `true` with `KYC_AML_SCAN` [docs:customer-creation-1]. `[inferred]`: `true` = the end user's submission itself failed/was unusable (e.g. unreadable document) vs. `false` = the submission was processed and the check failed on its merits.
+
+## 4. Invariants and calculations
+
+No balances, limits, counters or formulas exist in this domain. What is fixed:
+
+- **ID formats** [spec]: `scanCase.id`, `scanCase.customerId`, path `customerId`, webhook `customerHayId`/`idempotencyKey` are all `format: uuid` strings. The docs sample case id `49645b93-2481-489e-a2d5-f704514e03f5` is a v4 UUID [docs:sample-requests-responses]. `[inferred]`: generate v4.
+- **Case ↔ customer link**: `identityVerificationCaseId` (customer create) **must equal** a `scanCase.id` returned by `createCase` [docs:customer-creation-1]. Whether the platform rejects an unknown id, a reused id, or an id whose case is `NOT_EXECUTED` is unstated (§7). `journeyId` is the deprecated predecessor of the same field [spec].
+- **Ordering**: `createCase` precedes `createHayCustomer` ("Create a case is the first step") [docs:customer-creation-1]; `createHayCustomer` precedes every `approve*Check` (they take `customerId`) [spec]; account creation requires `ACTIVE` ("An account can only be opened if the customer is in `ACTIVE` status") [docs:customer-status-flow].
+- **Flag exclusivity**: `skipKyc` and `onlySanctionsCheck` "cannot be used at the same time" [spec]. Default `skipKyc = false` [docs:customer-creation-1]; default `onlySanctionsCheck` unstated (`[inferred]` false).
+- **Check set** [docs:flexible-kyc-checks]: Standard KYC = ID&V + Document Certification + Sanctions Screening; Reduced KYC (`onlySanctionsCheck: true`) = Sanctions Screening only; `skipKyc: true` = no checks, customer stays `PENDING_APPROVAL` until the client sets `ACTIVE` [docs:customer-creation-1]. "There are no changes to how the platform processes either customers outcomes in either Standard or Reduced KYC" [docs:flexible-kyc-checks]. Duplicate check (`DUPLICATE_CHECK`) is an additional onboarding stage present in the failure enum [webhook-spec]; INACTIVE customers are excluded from it [docs:customer-creation-1].
+- **Activation side effects** `[inferred]` from [spec HayCustomer]: on the transition to `ACTIVE` set `approvedDateTimeUtc = now (UTC)` and bump `lastUpdatedDateTimeUtc`.
+- **Date handling** [spec]: `timestamp`, `consentObtainedAt`, `approvedDateTimeUtc` are RFC 3339 `date-time` in UTC; sample renders millisecond precision with `Z` (`2024-03-12T23:00:17.559Z`) [docs:sample-requests-responses]. `consentObtainedAt` is client-supplied and stored as given `[inferred]`.
+- **Country codes**: `userLocationCountry` is ISO 3166-1 alpha-3 (e.g. `AUS`) [spec description]; no pattern is enforced by schema — `[inferred]`: validate `^[A-Z]{3}$`.
+- **Consent domain**: `consentObtained ∈ {'yes','no','na'}` by prose only [spec]; `[inferred]`: enforce case-sensitively and reject others with 400.
+- **Tokens** [docs:sample-requests-responses]: `mobileToken` is a JWS (`{"alg":"HS512","zip":"GZIP"}` header); `webLink` = `https://<tenant>.web1.<region>.jumio.ai/web1/v4/app?authorizationToken=<mobileToken>&locale=en-US`. The local implementation needs neither a real signature nor a real host — `[inferred]`: emit an opaque token and a link on the local server's own host that the test harness can drive (§7).
+- **Webhook delivery** [docs:webhook-notification]: `idempotencyKey` per event; retries 18 times / ≤48 h with exponential backoff on client 401/403/429/5xx; client must answer 200. The `ONBOARDING_PASSED` sample reuses the `customerHayId` as `idempotencyKey`; the others use distinct UUIDs [docs:customer-creation-1] — `[inferred]`: always generate a fresh UUID.
+- **No pagination, no search, no counters** in this domain [spec].
+
+## 5. Cross-domain dependencies
+
+Reads/writes into other domains (all by the platform-side onboarding pipeline that these endpoints steer):
+
+- **Customers (`customers.md`)**
+  - `createHayCustomer` **consumes** `scanCase.id` via `identityVerificationCaseId` and the flags `skipKyc` / `onlySanctionsCheck`; it is what instantiates the onboarding stages for a customer [docs:customer-creation-1][docs:flexible-kyc-checks].
+  - KYC **writes** `HayCustomer.status` (`PENDING_APPROVAL → ACTIVE | REFERRED | REJECTED`) and `approvedDateTimeUtc` [docs:customer-creation-1][docs:customer-status-flow][spec].
+  - `approve*Check` **reads** the customer by `customerId` (must exist) [spec path param] and, `[inferred]`, requires it to be `PENDING_APPROVAL`/`REFERRED` on Shaype KYC.
+  - `changeHayCustomerStatus` is the client-side substitute for platform activation when Shaype KYC is not used [docs:customer-creation-1]; `updateCustomer.documentData` can rewrite the identity-document fields after creation [spec].
+  - Duplicate checks (email / phone / doc type+number / name+DOB) surface in the KYC path as `ONBOARDING_FAILED {state: DUPLICATE_CHECK}` [webhook-spec][docs:customer-creation-1].
+- **Accounts (`accounts.md`)**
+  - Account creation is gated on customer `ACTIVE` [docs:customer-status-flow]; the Accounts-domain error example "Account cannot be created for customer with id ... as their status is currently BLOCKED" shows the gate is enforced with `422` and a `PERMISSION_DENIED:` message prefix [spec ErrorResponse example].
+  - Account `riskLevel` defaults to `HIGH` ("accounts that didn't go through all regulatory checks yet") and blocks all fund movement until the client sets `LOW` — a separate, client-driven gate after KYC [docs:customer-creation-1].
+- **Webhooks (`notification-webhooks.json`)** — KYC is the **producer** of `ONBOARDING_PASSED`, `ONBOARDING_FAILED` and (on activation/referral/rejection) `CUSTOMER_STATUS_UPDATED` [docs:customer-creation-1][webhook-spec]. Which `actionOwner` a manual approval produces is unstated (`[inferred]`: `CLIENT` for `approve*Check`, `PLATFORM` for automatic outcomes).
+- **Cards, Groups, Transactions, Holds, Stacks, PayTo, BPAY, FX, Liquidity, Perks, Tokens, Utilities** — no dependency in either direction [spec].
+- **External authorisation (`external-balance.yaml`)** — none. The client-side refusal code `REFUSED_SENDER_ACCOUNT_NOT_VERIFIED` is the client's own verification concept, not Shaype KYC [ext-auth-spec].
+
+## 6. Error catalogue
+
+The spec attaches the same five error responses to all four operations and documents **no** condition → code mapping and **no** message text for any of them [spec]. Everything below the first two rows is therefore `[inferred]`, patterned on the one `ErrorResponse` example in the spec (`status` as a string, `message` prefixed with an upper-snake code and a colon).
+
+| condition | HTTP | `message` (verbatim if documented) | source |
+|---|---|---|---|
+| Declared for every op: "Bad Request" / "Forbidden" / "Unprocessable Content" / "Internal Server Error" / "Not Implemented" | 400 / 403 / 422 / 500 / 501 | none documented | [spec] |
+| `ErrorResponse` body shape | any | `{details, message, status (string), traceId}` | [spec] |
+| `createCase`: `userLocationCountry` missing or not a 3-letter code | 400 | unstated | `[inferred]` (schema `required`) |
+| `createCase`: `consentObtained` not one of `yes` / `no` / `na` | 400 | unstated | `[inferred]` (prose-only domain) |
+| `createCase`: `consentObtainedAt` not RFC 3339 | 400 | unstated | `[inferred]` |
+| `createCase`: malformed JSON / wrong content type | 400 | unstated | `[inferred]` |
+| `approve*Check`: `customerId` not a UUID | 400 | unstated | `[inferred]` |
+| `approve*Check`: body missing (spec `requestBody.required: true`) | 400 | unstated | `[inferred]` — `{}` is valid |
+| `approve*Check`: customer does not exist | **404 or 422 — undeclared** (no op declares 404) | unstated | `[inferred]`; §7 |
+| `approve*Check`: customer created with `skipKyc: true` / client-KYC (no stages) | 422 | unstated | `[inferred]` |
+| `approveDocumentCheck` / `approveAmlKycCheck` on a Reduced-KYC (`onlySanctionsCheck`) customer (stage does not exist) | 422 | unstated | `[inferred]` |
+| `approve*Check`: customer `ACTIVE` / `REJECTED` / `INACTIVE` / `BLOCKED` (nothing to approve or terminal) | 422 (or 200 no-op) | unstated | `[inferred]`; §7 |
+| `approve*Check`: stage already approved | 200 (idempotent no-op) | unstated | `[inferred]`; §7 |
+| Caller not permitted (e.g. wrong client for this customer) | 403 | unstated | [spec] declares 403; condition `[inferred]` |
+| Related, Customers domain: `skipKyc` and `onlySanctionsCheck` both `true` | unstated (400/422) | "This flag cannot be used at the same time as ..." (schema prose, not a message) | [spec] |
+| Related, Customers domain: duplicate customer | unstated; async `ONBOARDING_FAILED {state: DUPLICATE_CHECK}` in the KYC path | none | [docs:customer-creation-1][webhook-spec] |
+| Related, Accounts domain: create account for non-ACTIVE customer | 422 | `PERMISSION_DENIED: Account cannot be created for customer with id <uuid> as their status is currently <STATUS>` | [spec ErrorResponse example] |
+
+Webhook-side (client → Shaype) responses that matter for the local simulator: Shaype retries on **401, 403, 429, 5XX** from the client, 18 attempts over ≤48 h [docs:webhook-notification].
+
+## 7. Open questions
+
+Decisions the implementer must make because the spec/docs are silent or contradictory:
+
+1. **Case lifecycle simulation.** No endpoint or webhook ever exposes `ExternalCase.outcome` after creation, and no B2B call advances it. The local server needs a test hook (e.g. an admin route or a header on `createHayCustomer`) to set the case outcome (`PASSED` / `REJECTED` / `WARNING`) and to drive each stage's result, and a policy for the default (auto-pass immediately vs. stay `PENDING_APPROVAL` until driven). `customers.md` §7 item 20 raises the same point from the customer side.
+2. **`identityVerificationCaseId` validation.** Must it reference an existing case? Can a case be linked to two customers? Is a case still `NOT_EXECUTED` acceptable at customer creation (the docs flow implies the end user may finish verification before or after)? Which error (400/422) for a bad id?
+3. **Stage ↔ docs-step mapping.** Docs name three Standard-KYC steps (ID&V, Document Certification, Sanctions Screening) [docs:flexible-kyc-checks]; the API has `documentCheck`, `amlKycCheck`, `sanctionCheck`; the webhook has `DOCUMENT_SCAN`, `KYC_AML_SCAN`, `SANCTIONS_SCAN`, `DUPLICATE_CHECK`. Which of ID&V / Document Certification is `documentCheck` vs `amlKycCheck` is undetermined. Also whether `amlKycCheck` runs under Reduced KYC (docs say sanctions only, so presumably not).
+4. **Effect of `approve*Check` on customer status.** Does approving the last failed stage move `REFERRED → ACTIVE` and emit `ONBOARDING_PASSED` + `CUSTOMER_STATUS_UPDATED`? With which `actionOwner`? Does approving one of several failed stages leave the customer `REFERRED`? Nothing is documented.
+5. **Preconditions and error codes for `approve*Check`** when the customer is missing (404 vs 422 — no op declares 404), `ACTIVE`, `REJECTED`, `INACTIVE`, `BLOCKED`, created with `skipKyc`, or lacks that stage (Reduced KYC). Whether a repeat approval is a 200 no-op or a 422.
+6. **`ConfirmationResponse.message` text** — no example anywhere. Pick a fixed string per endpoint.
+7. **`ExternalCase.customerId` semantics** — absent in the sample; presumably filled when linked. Should `createCase` ever accept/return a `customerId` (e.g. re-onboarding an `INACTIVE` customer)?
+8. **Consent body strictness.** The schema marks only `userLocationCountry` required and gives `consentObtained` no enum; the docs sample sends no body at all (`N/A`) and the spec's `requestBody` is not `required: true`. Decide whether an empty/absent body is 400 (schema) or accepted (sample).
+9. **`WARNING` outcome handling.** The enum description is truncated ("Requires"). Assumed: manual review → customer `REFERRED` with `DOCUMENT_SCAN` failed → `approveDocumentCheck`. Confirm.
+10. **Which status `ONBOARDING_FAILED` implies** — `REFERRED` (docs: failed checks are "referred to an operational colleague") or `REJECTED` (docs: "Shaype cannot open an account ... as a result of the information provided"), and for `DUPLICATE_CHECK` specifically (no approval endpoint exists, so likely `REJECTED`). Also whether a `CUSTOMER_STATUS_UPDATED` fires alongside every `ONBOARDING_*`.
+11. **`submissionFailure` vs `isSubmissionFailure`** — schema says `submissionFailure`, docs sample says `isSubmissionFailure`. Emit the schema name (and optionally both).
+12. **`DUPLICATE_CHECK` timing** — sync 4xx on `createHayCustomer` ("customer creation will fail") vs. async `ONBOARDING_FAILED`; both are documented. Decide per KYC mode (e.g. sync when `skipKyc`, async otherwise).
+13. **Re-onboarding an `INACTIVE` customer** — new customer record (as `customers.md` reads it) vs. re-running checks on the same `customerHayId` via a new case. The `approve*Check` path takes an existing `customerId`, which is compatible with either.
+14. **Does `updateCustomer.documentData` re-trigger `documentCheck`?** Unstated.
+15. **Token/link realism** — whether tests need `webLink`/`mobileToken` to be parseable JWTs or just opaque strings; and whether `webLink` should point at a local page that lets the harness "complete" the case.
+16. **403 semantics** — every op declares 403 but there is no auth model in the spec; decide whether the local server ever returns it (e.g. customer belongs to another client id).
