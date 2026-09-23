@@ -451,5 +451,173 @@ One value per create request; no transitions. `ACCEPTED` ⇒ transaction posted;
 
 No terminal state; unlimited re-adds/removes [docs:draft-transaction-tagging].
 
-## (section 4-7 pending)
+## 4. Invariants and calculations
 
+### 4.1 Account balances (the quantities this domain moves)
+
+Fields on `HayAccount` [spec] (all numbers "to 2 decimal places"): `totalBalance` "Total value of all funds on the Account (this amount will also include unused overdraft limit and Stacks, held and locked value)"; `availableBalance` "Total balance available for use on Account. Funds that are held, locked and allocated to a Stack will not be available"; `heldBalance` "Total value of all authorised but not yet cleared transactions for all Cards on Account. **Positive** value"; `lockedBalance` "locked and unavailable for use, typically as a result of an operations team action. Positive value"; `stacksBalance` "Total value current held against any Stack(s). Positive value"; `overdraftLimit`, `overdraftBalance` "Total value of overdraft used" positive; `technicalOverdraftBalance` "negative position beyond the total deposits / overdraft limit".
+
+Docs formulas (verbatim) [docs:account-balances]:
+- **Available Balance** = Account Balance + (Overdraft Limit + Overdraft Balance) + Technical Overdraft Balance + Held Balance + Stacks balance
+- **Total Balance** = Total Available Balance + (Overdraft Limit + Overdraft Balance) + Technical Overdraft Balance + Stacks Balance
+- with value ranges: Account Balance "$0 or Positive"; Held Balance "$0 or **Negative**"; Overdraft Balance "$0 or Negative"; Technical Overdraft "$0 or Negative"; Stack Balance "$0 or Positive"; Available "$0 or Positive value, with exceptional of negative if a technical overdraft is applied".
+
+**Sign conflict:** the docs table treats held/overdraft as negative quantities added; the spec `HayAccount` and the webhook samples carry `heldBalance` as **positive** (sample `heldBalance.amount: 8.4`). The webhook samples are the executable truth for the local implementation [docs:card-transactions samples]:
+
+| sample | totalBalance | heldBalance | lockedBalance | stacksBalance | availableBalance | check |
+|---|---|---|---|---|---|---|
+| after hold −8.40 | 11.13 | 8.40 | 0 | 0 | 2.73 | 11.13 − 8.40 = 2.73 ✓ |
+| after settlement of that hold | 2.73 | 0 | 0 | 0 | 2.73 | total −8.40, held −8.40, available unchanged ✓ |
+| after partial reversal +0.50 (held was 9.50) | 10.87 | 9.00 | 0 | 0 | 1.87 | held −0.50, available +0.50, total unchanged ✓ |
+| after refund +5.99 | 5.99 | 0 | 0 | 0 | 5.99 | ✓ |
+
+⇒ Working invariant (no overdraft, no stacks/locks) [inferred from samples + spec descriptions]:
+**`availableBalance = totalBalance − heldBalance − lockedBalance − stacksBalance`** (heldBalance stored positive); with overdraft [docs formula]: `availableBalance = totalBalance + overdraftLimit − overdraftBalance − heldBalance − lockedBalance − stacksBalance` [inferred reconciliation of docs formula with positive-signed spec fields]. `updatedBalance` in the webhook = `availableBalance` after the event (all samples) [docs:card-transactions].
+
+### 4.2 Balance effects per event [docs:card-transactions "Balance Update"; docs:simulates-card-transaction-on-staging; inferred for general credit/debit]
+
+| event | totalBalance | heldBalance | availableBalance |
+|---|---|---|---|
+| Authorisation hold (amount a) | — | +a | −a |
+| Hold increase by d (hold total becomes a+d) | — | +d | −d |
+| Hold decrease / partial reversal by r | — | −r | +r |
+| Full reversal / cancel of hold (current amount h) | — | −h | +h |
+| Settlement of hold (current amount h, settled s) | −s | −h | −s + h (= unchanged when s = h) |
+| Refund (post-settlement) +x | +x | — | +x |
+| ATM stand-in (no hold) −x | −x | — | −x |
+| General credit +x (createCredit*) | +x | — | +x |
+| General debit −x (createDebit*) | −x | — | −x |
+
+Docs wording: hold/increase — "The held balance increases. The available balance decreases accordingly."; reversal — "The held balance decreases. The available balance increases accordingly." [docs:card-transactions]; settlement — "lifts the block on account and deducts the transaction amount from balance" [docs:card-transactions]; "The hold is released and the funds are removed from the total balance" [docs:simulates-card-transaction-on-staging]. Settlement amount differing from hold amount (partial settlement) is not documented — open question; the sample where a 5.00 hold was reversed by 0.50 then settled for 4.50 shows `held → 0` and `total −4.50` ✓.
+
+### 4.3 Amount and sign conventions
+
+- All amounts "to 2 decimal places" [spec]; JSON `number` in the B2B API, JSON `string` in external-balance callbacks [spec:external-balance].
+- Emitted `currencyAmount.amount` sign: negative for debits/holds/settlements, positive for credits/refunds/reversals [docs:card-transactions samples]; external-balance: "Positive when crediting customer account and negative when debiting" [spec:external-balance].
+- Request `amount` on the create ops: sign unspecified (open question); staging mock card endpoints say "Pass a negative value as transaction will deduct the account balance" [docs:simulates-card-transaction-on-staging] but that is a different endpoint family.
+- `rollingAccountBalance` = "Total Account balance after the transaction posted" [spec] ⇒ `totalBalance` after applying the amount [inferred].
+- `currencyAmount.currency` = account currency; `originalCurrencyAmount` = spend currency when different [inferred].
+
+### 4.4 Limits (what a create/authorisation is checked against)
+
+- Limit types [docs:account-limits]: `ATM_WITHDRAWAL_PER_DAY`, `BANK_TRANSFER_TOP_UP_PER_DAY`, `BPAY_DAILY_LIMIT`, `CARD_PAYMENTS_DAILY`, `DIRECT_DEBIT_PER_DAY`, `MAX_BALANCE`, `MIN_BALANCE` (Shaype use only), `MIN_STACK_BALANCE` (Shaype use only), `OVERDRAFT_PRODUCT_LIMIT`, `PAYMENT_TO_ACCOUNT_NUMBER`, `SINGLE_CARD_TRANSACTION`, `TOTAL_SPEND_PER_YEAR`, `TOP_UP_PER_DAY`; not in use: `BPAY_TOP_UP_PER_DAY`, `CARD_TOP_UP_PER_DAY`, `PAYMENT_TO_PAY_ID`. (The multi-currency page uses different spellings — `SINGLE_CARD_TRANSACTION_LIMIT`, `CARD_TRANSACTIONS_PER_DAY`, `TRANSFERS_OUT_PER_DAY`, `BPAY_PER_DAY` [docs:limits-1] — treat as the same limits.)
+- Effective limit = account-level if set, else product-level; account-level cannot exceed product-level [docs:account-limits].
+- Daily limits: "calculated on a rolling 24h window … get all transactions from the past 24h for that account and check if the total (including the current transaction) would go over the limit" [docs:account-limits]. (The worked example then says "rejected until the next calendar day" — contradictory; implement rolling 24h per the definition.)
+- A single transaction larger than the daily limit is refused on its own [docs:account-limits example].
+- Risk level `HIGH` ⇒ all limits 0 ⇒ all inbound and outbound refused; `LOW` ⇒ product limits [docs:account-limits].
+- Outcome mapping [docs:payment-transaction-outcome]: `MAX_BALANCE` → `REFUSED_MAX_BALANCE_EXCEEDED`; `MIN_BALANCE` → `REFUSED_NOT_ENOUGH_FUNDS` (HTTP enum: `REFUSED_INSUFFICIENT_FUNDS`); `ATM_WITHDRAWAL_PER_DAY` → `REFUSED_DAILY_ATM_WITHDRAWAL_LIMIT_BREACHED`; `DIRECT_DEBIT_PER_DAY` → `REFUSED_DAILY_DIRECT_DEBIT_LIMIT_BREACHED`; `BPAY_DAILY_LIMIT` → `REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED`; `CARD_PAYMENTS_DAILY` → `REFUSED_DAILY_CARD_TRANSACTIONS_LIMIT_BREACHED`; `SINGLE_CARD_TRANSACTION` → `REFUSED_SINGLE_CARD_TRANSACTION_LIMIT_BREACHED`; transfers-out daily → `REFUSED_DAILY_TRANSFERS_OUT_LIMIT_BREACHED`; annual → `REFUSED_ANNUAL_SPENDING_LIMIT_BREACHED`; top-up daily → `REFUSED_DAILY_TOP_UP_LIMIT_BREACHED`.
+- External-balance clients: platform checks `ATM_WITHDRAWAL_PER_DAY`, `TOP_UP_PER_DAY`, `CARD_PAYMENTS_DAILY`, `PAYMENT_TO_ACCOUNT_NUMBER`, `SINGLE_CARD_TRANSACTION`, `TOTAL_SPEND_PER_YEAR` before calling the client [docs:external-authorisation-and-balance].
+- Multi-currency: `MAX_BALANCE`, single-card, card-per-day, ATM-per-day, top-ups, transfers-out are aggregated across the wallet hierarchy at the margin-free cached rate; `DIRECT_DEBIT_PER_DAY`, `BPAY_PER_DAY`, `MIN_BALANCE`, `MIN_STACK_BALANCE` are not [docs:limits-1].
+
+### 4.5 Identifiers and linkage
+
+- Every id is a UUID (`format: uuid`) [spec]. Name inconsistencies to preserve: `accountHayId` (create body, entities) vs `accountId` (search body, `getPendingHolds` path); `transactionHayId` (entities, paths) vs `transactionId` (`TransactionOutcome`); `holdHayId` (hold entity, webhook) vs `holdId` (path) vs `relatedHoldHayId` (`FinancialTransaction`) [spec].
+- Hold: webhook `transactionHayId` = `holdHayId` = hold id for the hold and all its updates; settlement `transactionHayId` is new and `holdHayId`/`relatedHoldHayId` points back [docs:card-transactions; spec:webhooks holdHayId description].
+- Refund: own id, no link to the original purchase [docs:simulates-card-transaction-on-staging].
+- `idempotencyKey` (create body) is client-supplied UUID [spec]; webhook `idempotencyKey` is platform-supplied per notification and "prevent[s] duplication" [spec:webhooks]; external-balance `Shaype-Idempotency-Key` header is constant across retries of the same request and is covered by the signature [docs:external-authorisation-and-balance].
+
+### 4.6 Dates
+
+All `*Utc` fields are `date-time` in UTC; samples use `Z` with microsecond precision (`2025-07-17T11:13:20.990107Z`) [docs:card-transactions]. `transactionTimeUtc` = initiated/received (for a hold: "when Transaction was Authorised"); `clearingTimeUtc` = posted [spec]. Search filters/sorts on either per `sortBy` [spec]; general credit/debit have both equal to the posting instant [inferred].
+
+### 4.7 Search paging
+
+`limit` ∈ [1, 1000], `offset` ≥ 0, both required; `sortBy` default `CLEARING_TIME` [spec]. Response is a bare array — no total; "end of results" = fewer than `limit` items [inferred].
+
+### 4.8 Tags
+
+- Key = (`category`, `value`), each 1–64 chars, `\S(.*\S)?` (no leading/trailing whitespace), at most 100 per request, at least 1 [spec]. No documented cap on tags per transaction.
+- ADD is idempotent per key; REMOVE of absent key is a no-op; ordering by creation time ascending [docs:draft-transaction-tagging].
+- Allowed only on ledger (posted) transactions [docs:draft-transaction-tagging].
+
+### 4.9 Webhook delivery and external-auth timing
+
+- Notifications retried **18 times over up to 48 hours**, exponential backoff, on client HTTP 401/403/429/5XX [docs:webhook-notification]. Path `{baseUrl}/api/hay/v0/communications/notification` [docs:webhook-notification; spec:webhooks].
+- External authorisation timeouts: card 1.2 s, non-scheme 10 s, else `INTERNAL_ERROR`; 10 RPS [docs:external-authorisation-and-balance]. Only `REFUSED_MAX_BALANCE_EXCEEDED` and `REFUSED_NOT_ENOUGH_FUNDS` are honoured from the client (yaml enum also lists `REFUSED_SENDER_ACCOUNT_NOT_VERIFIED`); anything else ⇒ `INTERNAL_ERROR` [docs:external-authorisation-and-balance; spec:external-balance].
+
+## 5. Cross-domain dependencies
+
+| other domain | this domain reads | this domain writes / triggers |
+|---|---|---|
+| **Accounts** (`HayAccount`, `getPendingHolds`, limits, risk level) | `status` (LOCKED ⇒ `REFUSED_ACCOUNT_BLOCKED`, CLOSED ⇒ `REFUSED_ACCOUNT_CLOSED` [docs:payment-transaction-outcome; inferred mapping]); `currency`; all balance fields; account-level limits and product limits; risk level; `accountHolderType` (`CUSTOMER`/`GROUP` — joint accounts get one reward [docs:apple-reward-transactions]); `overdraftLimit`. `GET /v0/accounts/{accountId}/holds` returns this domain's `AuthorisationHold[]` [spec]. | `totalBalance`, `availableBalance`, `heldBalance` (and `rollingAccountBalance` snapshot) on every accepted transaction / hold event [docs:card-transactions; inferred]. Blocking an account "blocks … every child" and prevents transactions [llms.txt blockAccount description]. |
+| **Cards** | `cardId`/`cardHayId` on holds and card transactions; card status and card preferences (`cardPreferenceOutcome`: `CARD_FROZEN`, `CARD_NOT_PRESENT_DISABLED`, `CASH_WITHDRAWAL_DISABLED`, `CONTACTLESS_DISABLED`, `OVERSEAS_SPENDING_DISABLED`, `MAGNETIC_STRIPE_PAYMENT_DISABLED`, `MOBILE_WALLET_PAYMENT_DISABLED`, `OK`, `CARD_BLOCKED` [spec:webhooks]) ⇒ `REFUSED_CARD_PREFERENCE` [docs:payment-transaction-outcome]; card public token is the key for the mock generators [docs:simulates-card-transaction-on-staging]. | none |
+| **Customers** | `customerId` (cardholder / account owner) on every entity and `customerHayId` on every webhook [spec]. | none |
+| **Utilities (staging mocks)** | — | `generate-auth-hold` → hold; `generate-card-transaction` → hold + settlement (`settlementDelayInSeconds` 5–300); `generate-update-auth-hold` → hold + increase/decrease (`updateHoldAmount`: positive = decrease, negative = increase; `updateHoldDelayInSeconds` 5–300) + settlement; `generate-refund-transaction` → post-settlement refund; `generate-atm-transaction` → settled ATM txn without hold; `declineReason` enum `CARD_EXPIRED`, `WRONG_CVV`, `CVV_BLOCKED`, `INCORRECT_PIN`, `ALLOWED_PIN_RETRIES_EXCEEDED`, `INVALID_MERCHANT`, `CARD_IS_NOT_ACTIVE`, `RESTRICTED_CARD` forces a processor decline [spec; docs:simulates-card-transaction-on-staging]. These are the only ways to create holds locally. |
+| **Webhooks (Communications)** | — | Emits `NotificationDto` `type: TRANSACTION` with `transactionEvent` for every hold event, settlement, refund and (inferred) general credit/debit; `APPLE_PAY_REWARD_FOR_CUSTOMER` notifications are the trigger for clients to call createCreditTransactionV1 with `APPLE_REWARD` [docs:apple-reward-transactions]. |
+| **External authorisation (client-hosted)** | Client's 200/470 answer to `POST /holds`, `PATCH /holds/{holdId}`, `POST /transactions` (`authorisationTransactionType` ∈ `BPAY_TRANSFER_OUT`, `DIRECT_DEBIT_TRANSFER`, `GENERAL_CREDIT`, `GENERAL_DEBIT`, `INBOUND_PAYMENT`, `OUTBOUND_PAYMENT`) decides acceptance [spec:external-balance]. | Calls the client before creating a hold / posting a general credit or debit; passes `account.balance` "immediately before this transaction", `statistics.txn_count_last_10m`, `txn_sum_last_24h`, customer `tenure_days` [spec:external-balance]. |
+| **Stacks** | `stacksBalance` reduces `availableBalance` [spec HayAccount]. Stack transactions are a separate API (`/v0/accounts/{accountId}/stacks/transactions`) and not `FinancialTransaction`s here [spec]. | none |
+| **FX / multi-currency** | Conversions linked to a hold (composite authorisation) are unwound on reversal; `searchConversions` "Searches FX conversions linked to a given card-spend transaction"; `parentAccountId` child accounts; aggregated limits [docs:composite-authorisation-reversal; docs:limits-1; spec]. | `originalCurrencyAmount`; webhook `CONVERSION_IN`/`CONVERSION_OUT` events [spec:webhooks]. |
+| **Payments (NPP, Direct Entry, BPAY, Direct Debits, PayTo/mandates, scheduled payments)** | — | Each posts `FinancialTransaction`s with its own `transactionChannel`/`type`/`originType` (`SCHEDULED_PAYMENT`, `MANDATE_PAYMENT`, `DIRECT_DEBIT`) and `counterpartDetails`/`reference`/`mandatePaymentDetails`, all visible through `searchTransactions`/`getTransactionById` [spec enums]. |
+| **Products** | `productId` on transactions and webhooks; product-level limits [spec; docs:account-limits]. | none |
+
+## 6. Error catalogue
+
+### 6.1 HTTP-level (body `ErrorResponse` {`message`, `details`, `status` (string), `traceId`}) [spec]
+
+| status | ops | condition | message text |
+|---|---|---|---|
+| 400 Bad Request | all 9 | malformed JSON; missing required field (`accountHayId`, `amount`, `counterpartName`, `description`, `idempotencyKey`, `transactionChannel`; `fromDateTimeUtc`, `toDateTimeUtc`; `limit`, `offset`; `operation`, `tags`); enum value not in list; `minLength: 1` violated; non-UUID id [inferred from schema constraints — no text documented] | none documented |
+| 400 Bad Request | modifyTagsForTransaction | "Invalid request - tag validation failed, list is empty, or operation is missing" [spec, verbatim response description]; "an empty array will be rejected with 400 Bad Request" [docs:draft-transaction-tagging] | none documented beyond the description |
+| 400 Bad Request | searchTransactions | `limit` outside 1..1000 [inferred from "value between 1 and 1000"] | none documented |
+| 403 Forbidden | all 9 | caller not authorised for the client/entity [inferred] | none documented |
+| 422 Unprocessable Content | all 9 | semantically invalid — e.g. unknown `accountHayId` / `transactionHayId` / `holdId` (no 404 exists), tagging a non-ledger transaction [inferred]. Style from spec example elsewhere: `"message":"PERMISSION_DENIED: …"`, `"details":"Please refer to the API documentation or contact Shaype for more info with the traceId."`, `"status":"422"` | see example |
+| 500 Internal Server Error | all 9 | — | none |
+| 501 Not Implemented | all 9 | declared on every op [spec]; no condition documented | none |
+| 404 / 409 | none | **not declared** on any op in this domain [spec] | — |
+
+### 6.2 Business refusals — HTTP 200 with `TransactionOutcome.outcome` (create ops) [spec; docs:payment-transaction-outcome]
+
+| outcome | condition |
+|---|---|
+| `REFUSED_ACCOUNT_BLOCKED` | account blocked (LOCKED) |
+| `REFUSED_ACCOUNT_CLOSED` | account closed |
+| `REFUSED_RECIPIENT_ACCOUNT_BLOCKED` / `REFUSED_RECIPIENT_ACCOUNT_CLOSED` | recipient account blocked/closed ("transferring funds between Shaype accounts" — [inferred] not reachable from a general credit/debit) |
+| `REFUSED_MAX_BALANCE_EXCEEDED` | credit would exceed `MAX_BALANCE` |
+| `REFUSED_INSUFFICIENT_FUNDS` (HTTP enum) / `REFUSED_NOT_ENOUGH_FUNDS` (docs, webhook) | debit would breach `MIN_BALANCE` / available funds |
+| `REFUSED_DAILY_TRANSFERS_OUT_LIMIT_BREACHED` | daily transfers-out limit (rolling 24 h) |
+| `REFUSED_LIMIT_BREACH` | **v0 only** — any of the two above collapsed [spec] |
+| `REFUSED_TOTAL_INBOUND_DIRECT_DEBIT_DAILY_LIMIT_BREACHED`, `REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED`, `REFUSED_TOTAL_NET_VISA_DAILY_LIMIT_BREACHED`, `REFUSED_TOTAL_NON_SCHEME_DAILY_LIMIT_BREACHED` | client-wide daily totals [docs] |
+| `REFUSED_FRAUD` | fraud detection |
+| `REFUSED_CUSTOMER_PREFERENCE`, `REFUSED_INVALID_PAY_ID`, `REFUSED_SENDER_ACCOUNT_NOT_VERIFIED`, `REFUSED_CAPABILITY_NOT_ENABLED`, `REFUSED_QUOTE_EXPIRED`, `UNKNOWN` | in enum; no documented condition for general credit/debit |
+| `INTERNAL_ERROR` | platform error; external-balance client timeout or unsupported response [docs:external-authorisation-and-balance] |
+
+Docs limit-breach example (verbatim) [docs:account-limits]: `"outcome": "LIMIT_BREACH", "detailedOutcome" :"REFUSED_DAILY_ATM_WITHDRAWAL_LIMIT_BREACHED"` — this shape (`LIMIT_BREACH`, `detailedOutcome`) matches **neither** `TransactionOutcome` nor `TransactionEventDto`; treat as stale documentation.
+
+### 6.3 Webhook-level outcomes (card authorisations; `TransactionEventDto.outcome`) [docs:payment-transaction-outcome; spec:webhooks]
+
+`REFUSED_CARD_PREFERENCE`, `REFUSED_RULES` (with `ruleDetails.ruleId`), `REFUSED_SINGLE_CARD_TRANSACTION_LIMIT_BREACHED`, `REFUSED_DAILY_CARD_TRANSACTIONS_LIMIT_BREACHED`, `REFUSED_DAILY_ATM_WITHDRAWAL_LIMIT_BREACHED`, `REFUSED_ANNUAL_SPENDING_LIMIT_BREACHED`, `REFUSED_DAILY_TOP_UP_LIMIT_BREACHED`, `REFUSED_DAILY_DIRECT_DEBIT_LIMIT_BREACHED`, `REFUSED_BPAY_INVALID_BILLER_CODE`, `REFUSED_BPAY_INVALID_REFERENCE`, `REFUSED_BPAY_INVALID_PAYMENT`, `REFUSED_BPAY_REJECTED`, `REFUSED_SANCTIONS`, `REFUSED_UNABLE_TO_VALIDATE`, `REFUSED_INSUFFICIENT_DATA`, plus the shared ones above. Documented as not in use: `REFUSED_ACCOUNT_PREFERENCE`, `REFUSED_DAILY_LIMIT_EXCEEDED`, `REFUSED_AML`, `REFUSED_ACCOUNT_NOT_FOUND_FOR_CARD_TOKEN`, `REFUSED_UNDETERMINED_BALANCE_FOR_ACCOUNT`, `REFUSED_ACCOUNT_NOT_FOUND_FOR_CURRENCY`, `REFUSED_UNDETERMINED_SPENDING_FOR_ACCOUNT`, `REFUSED_UNDETERMINED_TOP_UPS_FOR_ACCOUNT`, `REFUSED_UNDETERMINED_ATM_WITHDRAWALS_FOR_ACCOUNT`.
+
+### 6.4 External-balance callback errors (client → Shaype) [spec:external-balance; docs:external-authorisation-and-balance]
+
+HTTP `470` with `{ "errorCode": "REFUSED_MAX_BALANCE_EXCEEDED" | "REFUSED_NOT_ENOUGH_FUNDS" | "REFUSED_SENDER_ACCOUNT_NOT_VERIFIED", "reason": string }`; 500 "Internal error"; any other ⇒ platform outcome `INTERNAL_ERROR`.
+
+## 7. Open questions
+
+1. **Request `amount` sign** on createCredit/Debit: positive magnitude with direction from the endpoint, or signed? Not specified. (Recommend: accept positive; decide whether to reject negative with 400.)
+2. **Idempotency semantics** of `idempotencyKey`: does a retry return the original `TransactionOutcome` (same `transactionId`)? What if the same key arrives with a different body — 400/422, or ignored? Is the key scoped per client, per account, or global? Does a key from a refused request block a retry?
+3. **Insufficient-funds outcome string**: HTTP enum says `REFUSED_INSUFFICIENT_FUNDS`, docs/webhook say `REFUSED_NOT_ENOUGH_FUNDS`. Which does the debit endpoint actually return?
+4. **Which account statuses accept a general credit/debit?** Only `LOCKED`→blocked and `CLOSED`→closed are documented. Behaviour for `APPROVED` (does the first transaction move it to `ACTIVE`, per the status description "has had a transactional action performed on it"?), `DORMANT`, `PENDING_APPROVAL`, `ACTIVE_IN_ARREARS` is undefined.
+5. **Does a general credit/debit emit a `TRANSACTION` webhook?** Strongly implied by the webhook enum (`GENERAL_CREDIT`/`GENERAL_DEBIT`) but never stated.
+6. **Which limits apply to general credit/debit?** Docs only tie `MAX_BALANCE` and daily transfers-out (plus the v0 note). Do `TOP_UP_PER_DAY` (credit) or `TOTAL_SPEND_PER_YEAR` / `PAYMENT_TO_ACCOUNT_NUMBER` (debit) apply? Is there a `transactionChannel`-specific exemption (e.g. `INTEREST_ADJUSTMENT`, `SERVICE_FEE`)?
+7. **Unknown-id responses**: no `404` is declared anywhere; is an unknown `transactionHayId`/`holdId`/`accountHayId` a `400`, `422`, or something else, and with what `message`?
+8. **Hold retrievability after terminal state**: does `GET /v1/holds/{holdId}` still return a settled/reversed/cancelled hold (and with what amount), or error? `getPendingHolds` implies the list is pending-only; the single GET is silent.
+9. **Hold expiry**: docs mention 7–10 / 28-day merchant windows but define no automatic release; should the local implementation expire holds at all?
+10. **Partial settlement**: when the settled amount differs from the current hold amount, is the remainder released (held −h, total −s) or kept? Samples only show s = h after prior reversals.
+11. **Hold cancellation webhook**: console cancel [docs:authorisation-hold-cancel] — what `transactionType`/`isPending` is emitted, if any?
+12. **Refused authorisation webhook**: is a webhook emitted for a refused card authorisation (outcome `REFUSED_*`), and with what `isPending`/`currencyAmount`/balances?
+13. **Search semantics**: inclusive vs exclusive bounds of `fromDateTimeUtc`/`toDateTimeUtc`; which timestamp the range applies to when `sortBy` = `TRANSACTION_TIME`; sort direction (asc/desc); behaviour when `accountId` is omitted; whether `offset` beyond the end yields `[]` or an error; validation of `toDateTimeUtc < fromDateTimeUtc`.
+14. **Does getTransactionById resolve a hold id?** The hold webhook reuses the hold id as `transactionHayId`, but holds are not `FinancialTransaction`s.
+15. **Tag `id` identity**: spec says "existing tag", docs say "identifier for the tag association". Is `id` a client-wide (category,value) definition reusable across transactions, or per-transaction? What is returned when ADDing by an `id` that belongs to another transaction, or a non-existent `id` (400 per "tag validation failed"?)?
+16. **Tag ADD with `id` plus conflicting `category`/`value`** — which wins?
+17. **Tag category/value case sensitivity and trimming**: pattern forbids leading/trailing whitespace; is matching case-sensitive?
+18. **Tagging a pending hold id** — status code (400 vs 422) and message.
+19. **Response ordering of `tags` in `modifyTagsForTransaction`/`FinancialTransaction.tags`** — assume createdAt ascending like the GET?
+20. **`countryOfExpenditure`, `cardId`, `externalIdentifiers`, `merchantDetails`** on non-card transactions — omitted or `null`? (Spec has no `nullable` flags; the webhook samples show explicit `null`s.)
+21. **`counterpartName` (deprecated) vs `counterpartDetails.name`** — populate both from the create request's `counterpartName`?
+22. **`UNKNOWN` outcome** — when is it produced?
+23. **`REFUSED_LIMIT_BREACH` on v1** — guaranteed never returned, or still possible for limits other than the two named?
+24. **`transactionChannel` on a hold** — the spec description names `*_DOMESTIC` variants that do not exist in the enum; which enum value does a domestic Visa card-present hold carry (`VISA_CARD_PRESENT`?)?
+25. **`reference` validation** — description says max 35 alphanumeric and "only applicable to NPP"; is it rejected, truncated, or stored as-is on a general credit/debit?
+26. **`ExternalIdentifier.type` vs webhook `identifierType`** — confirm the API field name is `type` as in the spec.
+27. **`productId` on `FinancialTransaction`** — derived from the account's product at posting time (immutable snapshot)?
+28. **Held balance sign in any account-level API response** — spec says positive; docs table says negative; confirm positive (as in webhook samples).
