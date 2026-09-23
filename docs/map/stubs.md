@@ -192,7 +192,7 @@ Context: two layers — Currency Cloud is the underlying FX provider ("prices on
   - `idempotencyKey` — string, **required**, `format: uuid`, "Unique value (UUID) used to identify this request and to recognise any subsequent retries." [spec].
   - `sellCurrency` — string, **required**, `<ISO-162>`, "Currency to sell, as an ISO 4217 three-letter code.", example `"AUD"` [spec].
   - `target` — string, **required**, enum `["CLIENT_HOUSE","TREASURY_RECON_SUB"]`, example `"CLIENT_HOUSE"`, "The account to convert within. …" [spec].
-- Response: `200 Success` → `LiquidityConversionResponse` (description "The account a conversion was made within, and the conversion itself") = `{ conversion: LiquidityConversion, target: enum ("The account the conversion was made within") }` [spec]. `LiquidityConversion` ("A Currency Cloud conversion, returned as-is") has 31 optional fields — full list in §2; key ones: `conversionId` uuid ("Currency Cloud's conversion identifier"), `shortReference` (example `"20260821-ABCDEF"`), `status` string ("Current conversion status, as returned by Currency Cloud", example `"awaiting_funds"`), `currencyPair` (example `"AUDUSD"`), `clientRate`, `coreRate`, `midMarketRate`, `partnerRate`, `buyAmount`, `sellAmount`, `settlementDate`, `conversionDate`, `uniqueRequestId` ("The idempotency key echoed back by Currency Cloud") [spec]. Common error responses.
+- Response: `200 Success` → `LiquidityConversionResponse` (description "The account a conversion was made within, and the conversion itself") = `{ conversion: LiquidityConversion, target: enum ("The account the conversion was made within") }` [spec]. `LiquidityConversion` ("A Currency Cloud conversion, returned as-is") has 29 optional fields — full list in §2; key ones: `conversionId` uuid ("Currency Cloud's conversion identifier"), `shortReference` (example `"20260821-ABCDEF"`), `status` string ("Current conversion status, as returned by Currency Cloud", example `"awaiting_funds"`), `currencyPair` (example `"AUDUSD"`), `clientRate`, `coreRate`, `midMarketRate`, `partnerRate`, `buyAmount`, `sellAmount`, `settlementDate`, `conversionDate`, `uniqueRequestId` ("The idempotency key echoed back by Currency Cloud") [spec]. Common error responses.
 - Behaviour: no quote step, no margin, no Shaype ledger entry — treasury-only [spec]; `uniqueRequestId` = the request's `idempotencyKey` [spec]; Currency Cloud rejects conversions below its minimum (`conversion_below_limit`) [docs:minimum-conversion-rounding-logic] — how that surfaces here is unspecified [inferred: 422 `ErrorResponse`]; `status` values are Currency Cloud's and not enumerated (only `awaiting_funds` is shown) [spec].
 - Webhooks: none documented.
 
@@ -357,3 +357,203 @@ Context [spec tag]: "Customer value-added services (top-ups, gift cards, bill pa
 - Response: **`201 Created`** → `OrderSummary` (§2) [spec]. Common error responses (no 409).
 - Behaviour: which optional groups are mandatory is data-driven by the product's `requiredBeneficiaryFields`, `requiredSenderFields`, `requiredCreditPartyIdentifierFields`, `requiredDebitPartyIdentifierFields`, `requiredStatementIdentifierFields`, `requiredAdditionalIdentifierFields` — each an array of alternative field-name combinations, "provide all fields of one combination" [spec]; for ranged products (`RANGED_VALUE_*`) `calculationMode` is required and exactly one of `source`/`destination` is the fixed amount, which must lie within the product's `MonetaryValue.min`/`max` [spec descriptions; range check inferred]; for fixed products the amount is the product's `MonetaryValue.amount` [inferred]; `externalId` must be unique per order [spec] — duplicate ⇒ status unspecified [inferred: 422, or idempotent replay of the original order]; unknown `productId` ⇒ unspecified [inferred: 422]; the order is created in a non-final state and the final `status` (`COMPLETED` | `DECLINED` | `REVERSED`) arrives via webhook [webhook-spec]; **how the order is funded from a Shaype account is not stated anywhere** — there is no `accountId`/`customerId` in the request (see §7); `pinCode`/`pinSerial`/`redemption` are populated only for PIN-based products, on completion [spec][webhook-spec].
 - Webhooks: `PERK_ORDER_UPDATE` on the v1 notification stream (`POST /api/hay/v1/communications/notification`): `NotificationDtoV1 { idempotencyKey (uuid, required), type: "PERK_ORDER_UPDATE" (required), createdTimeUtc, actionOwner: CLIENT|PLATFORM, eventDetails: PerkOrderUpdateEventDto }`; `PerkOrderUpdateEventDto` = `EventDetailsDto { eventType: "PERK_ORDER_UPDATE" }` + `{ orderExternalId: uuid ("The externalId the perk order was created with."), status: enum ["COMPLETED","DECLINED","REVERSED"] ("Final order status."), pinCode ("PIN code, for PIN-based products."), pinSerial ("PIN serial, for PIN-based products."), confirmedTimeUtc: date-time ("DateTime of when the order was confirmed."), redemption: RedemptionDto { usageInfo: string[], terms: string (Markdown), validity: ValidityDto { unit: string (example "DAY"), quantity: int32 ("Unit count; -1 unlimited, null unknown.", example 365) } } }` [webhook-spec].
+
+## 2. Entities and fields
+
+All types below are from `components.schemas` [spec] unless marked `[webhook-spec]`. "req" = listed in the schema's `required` array; everything else is optional and, absent `nullable: true`, the spec does not say whether it is omitted or `null` when unset. Examples are the spec's property-level `example` values.
+
+### CurrencyAmount (shared value object)
+Description "Monetary value and currency". Used by: `ConversionQuoteResponse`, `ConversionExecuteResponse`, `ConversionDetailsResponse`, `LiquidityBalancesResponse.balances[]`.
+
+| field | type | req | notes |
+|---|---|---|---|
+| `amount` | number | yes | "Amount of the transaction to 2 decimal places" |
+| `currency` | string enum `<ISO-162>` | yes | "Currency as three letter code as per ISO 4217" |
+
+`<ISO-162>` verbatim (162 values, verified identical at all 12 sites in this domain): `AED, AFN, ALL, AMD, ANG, AOA, ARS, AUD, AWG, AZN, BAM, BBD, BDT, BGN, BHD, BIF, BMD, BND, BOB, BOV, BRL, BSD, BTN, BWP, BYN, BZD, CAD, CDF, CHF, CLP, CNH, CNY, COP, CRC, CUC, CUP, CVE, CZK, DJF, DKK, DOP, DZD, EGP, ERN, ETB, EUR, FJD, FKP, GBP, GEL, GHS, GIP, GMD, GNF, GTQ, GYD, HKD, HNL, HRK, HTG, HUF, IDR, ILS, INR, IQD, IRR, ISK, JMD, JOD, JPY, KES, KGS, KHR, KMF, KPW, KRW, KWD, KYD, KZT, LAK, LBP, LKR, LRD, LSL, LYD, MAD, MDL, MGA, MKD, MMK, MNT, MOP, MRU, MUR, MVR, MWK, MXN, MYR, MZN, NAD, NGN, NIO, NOK, NPR, NZD, OMR, PAB, PEN, PGK, PHP, PKR, PLN, PYG, QAR, RON, RSD, RUB, RWF, SAR, SBD, SCR, SDG, SEK, SGD, SHP, SLE, SLL, SOS, SRD, SSP, STN, SVC, SYP, SZL, THB, TJS, TMT, TND, TOP, TRY, TTD, TWD, TZS, UAH, UGX, USD, UYU, UZS, VES, VND, VUV, WST, XAF, XCD, XCG, XOF, XPF, YER, ZAR, ZMW, ZWG, ZWL`.
+
+### FX quote — `ConversionQuoteResponse`
+Description "FX conversion quote with buy/sell amounts". Created by `generateConversionQuote`; consumed (by `quoteId`) by `executeConversion`; its rates are echoed on `ConversionDetailsResponse.quote*`. No status field; expiry is implicit via `expiresAtUtc`.
+
+| field | type | req | notes |
+|---|---|---|---|
+| `quoteId` | string uuid | no | "Unique quote identifier" |
+| `rate` | number | no | "Exchange rate for the conversion" (margin-adjusted [docs:margins-and-quote-locking]) |
+| `buyAmount` | `CurrencyAmount` | no | |
+| `sellAmount` | `CurrencyAmount` | no | |
+| `expiresAtUtc` | string date-time | no | "Timestamp when the quote expires (UTC)" |
+
+Stored-but-unexposed inputs the stub must keep against the quote to serve later operations: `sellAccountId`, `buyCurrency`, `fixedSide`, `amount`, `marginPercentage`/effective margin, unadjusted rate, `idempotencyKey`, created timestamp [inferred from `ConversionDetailsResponse` fields].
+
+### FX conversion — `ConversionExecuteResponse` (create result) and `ConversionDetailsResponse` (read model)
+Created by `executeConversion` (customer-initiated) and by composite card authorisation (platform-initiated) [docs:multi-currency-card-authorisation]; read by `getConversion`, `searchConversions`.
+
+`ConversionExecuteResponse` ("FX conversion execution result"):
+
+| field | type | req | notes |
+|---|---|---|---|
+| `conversionId` | string uuid | no | "Unique conversion identifier" |
+| `quoteId` | string uuid | no | "Quote ID that was executed" |
+| `outcome` | string enum | no | `ACCEPTED, INTERNAL_ERROR, REFUSED_LIMIT_BREACH, REFUSED_FRAUD, REFUSED_CUSTOMER_PREFERENCE, REFUSED_INSUFFICIENT_FUNDS, REFUSED_ACCOUNT_BLOCKED, REFUSED_RECIPIENT_ACCOUNT_BLOCKED, REFUSED_ACCOUNT_CLOSED, REFUSED_RECIPIENT_ACCOUNT_CLOSED, REFUSED_INVALID_PAY_ID, UNKNOWN, REFUSED_DAILY_TRANSFERS_OUT_LIMIT_BREACHED, REFUSED_MAX_BALANCE_EXCEEDED, REFUSED_TOTAL_INBOUND_DIRECT_DEBIT_DAILY_LIMIT_BREACHED, REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED, REFUSED_TOTAL_NET_VISA_DAILY_LIMIT_BREACHED, REFUSED_TOTAL_NON_SCHEME_DAILY_LIMIT_BREACHED, REFUSED_SENDER_ACCOUNT_NOT_VERIFIED, REFUSED_CAPABILITY_NOT_ENABLED, REFUSED_QUOTE_EXPIRED` (21 values, verbatim order) |
+| `buyAmount` / `sellAmount` | `CurrencyAmount` | no | |
+| `debitTransactionId` | string uuid | no | "ID of the debit transaction" |
+| `creditTransactionId` | string uuid | no | "ID of the credit transaction" |
+
+`ConversionDetailsResponse` ("FX conversion details") — 14 fields, none required: `conversionId` uuid; `quoteId` uuid; `sellAccountId` uuid ("Account ID from which funds were sold"); `buyAccountId` uuid ("Account ID to which funds were bought"); `sellAmount`, `buyAmount` `CurrencyAmount`; `fixedSide` enum `BUY|SELL`; `conversionRate` number ("Conversion rate executed"); `quoteUnadjustedRate` number ("Quote rate excluding margin"); `quoteMarginAdjustedRate` number ("Quote rate including margin"); `quoteTimestampUtc` date-time; `conversionTimestampUtc` date-time; `debitTransactionId`, `creditTransactionId` uuid. Linkage to a card-spend `transactionId` (for `searchConversions`) is stored but not exposed on this model [spec].
+
+### Indicative rates — `FxRatesResponse`, `FxRateEntry`, `FxRateFailure`
+Read-only, produced by `getFxRates` from the rate cache. `FxRatesResponse` = `{ successes: FxRateEntry[], failures: FxRateFailure[] }`.
+
+| entity.field | type | req | notes |
+|---|---|---|---|
+| `FxRateEntry.sellCurrency` | `<ISO-162>` | yes | example `AUD` |
+| `FxRateEntry.buyCurrency` | `<ISO-162>` | yes | example `GBP` |
+| `FxRateEntry.bidRate` | number | yes | "Naked (unadjusted) bid rate." |
+| `FxRateEntry.cardMarginAdjustedBidRate` | number, nullable | no | "Bid rate adjusted for card-authorisation margin." |
+| `FxRateEntry.walletMarginAdjustedBidRate` | number, nullable | no | "Bid rate adjusted for wallet-to-wallet margin." |
+| `FxRateEntry.lastRefreshedAtUtc` | string date-time | yes | example `2026-05-20T01:23:45Z` |
+| `FxRateFailure.currencyPair` | string | no | "Original pair string as supplied by the caller.", example `XYZABC` |
+| `FxRateFailure.reason` | string enum | no | `MALFORMED_PAIR, UNKNOWN_CURRENCY, CURRENCY_NOT_SUPPORTED` |
+
+### Liquidity (treasury) account — `LiquidityBalancesResponse`, `LiquidityConversion`, `LiquidityDetailedRate`
+Currency Cloud pass-through models; the stub needs a per-`target` (`CLIENT_HOUSE` | `TREASURY_RECON_SUB`) multi-currency balance table. Read by `getLiquidityBalances`, `getLiquidityDetailedRates`; written by `createLiquidityConversion` (and, in the real platform, by composite-auth conversions and the rounding surplus [docs:minimum-conversion-rounding-logic]).
+
+`LiquidityBalancesResponse` = `{ target: enum, balances: CurrencyAmount[] }` (example `[{"amount":1250.75,"currency":"AUD"},{"amount":99.1,"currency":"USD"}]`; "Empty when the account holds no funds").
+
+`LiquidityConversionResponse` = `{ target: enum ("The account the conversion was made within"), conversion: LiquidityConversion }`. `LiquidityConversion` ("A Currency Cloud conversion, returned as-is"), 29 fields, none required:
+
+| field | type | notes |
+|---|---|---|
+| `conversionId` | string uuid | "Currency Cloud's conversion identifier" |
+| `shortReference` | string | "Human readable trade identifier", example `20260821-ABCDEF` |
+| `accountId` | string uuid | "Currency Cloud identifier of the account the conversion belongs to" |
+| `creatorContactId` | string uuid | "Currency Cloud identifier of the contact that requested the conversion" |
+| `status` | string | "Current conversion status, as returned by Currency Cloud", example `awaiting_funds` (no enum) |
+| `currencyPair` | string | "Concatenated pair of currencies traded", example `AUDUSD` |
+| `buyCurrency` / `sellCurrency` | `<ISO-162>` | "Currency bought" / "Currency sold" |
+| `buyAmount` / `sellAmount` | number | "Amount bought" / "Amount sold" |
+| `fixedSide` | enum `BUY|SELL` | "Which side of the trade was fixed in value" |
+| `clientRate` | number | "The rate applied to the conversion" |
+| `coreRate` | number | "The market rate" |
+| `midMarketRate` | number | "The mid point between the buy and sell rates" |
+| `partnerRate` | number | "The market rate plus Currency Cloud's commission, where applicable" |
+| `partnerBuyAmount` / `partnerSellAmount` | number | "Partner-side amount bought" / "… sold" |
+| `conversionDate` | string date-time | "The date the conversion is made" |
+| `settlementDate` | string date-time | "When funds must be available for the trade to settle" |
+| `createdAt` / `updatedAt` | string date-time | "When the conversion was created" / "… last updated" |
+| `depositRequired` | boolean | "Whether a deposit is required for the conversion" |
+| `depositAmount` | number | "The deposit amount required" |
+| `depositCurrency` | `<ISO-162>` | "Currency the deposit is shown in" |
+| `depositRequiredAt` | string date-time | "When the deposit is required by" |
+| `depositStatus` | string | "Current status of the deposit" (no enum) |
+| `paymentIds` | string[] | "Identifiers of any payments related to the conversion" |
+| `unallocatedFunds` | number | "Funds not yet allocated to the conversion" |
+| `uniqueRequestId` | string | "The idempotency key echoed back by Currency Cloud" |
+
+`LiquidityDetailedRatesResponse` = `{ target: enum, rate: LiquidityDetailedRate }`; `LiquidityDetailedRate` fields (14, none required) are listed under `getLiquidityDetailedRates` in §1.
+
+### Client liquidity snapshot — `ClientLiquidity`
+Read-only, produced by `getClientLiquidity` for one `date`. All numbers, no descriptions, everything required [spec].
+
+| path | type | req |
+|---|---|---|
+| `clientReference` | string | yes |
+| `date` | string date | yes |
+| `scheme.domestic`, `scheme.international`, `scheme.total` | number | yes |
+| `nonScheme.total` | number | yes |
+| `nonScheme.bpay.{inbound,outbound,total}` | number | yes |
+| `nonScheme.haas.{inbound,outbound,total}` | number | yes |
+| `nonScheme.npp.{inbound,outbound,total}` | number | yes |
+| `nonScheme.directEntry.total` | number | yes |
+| `nonScheme.directEntry.credit.{inbound,outbound,total}` | number | yes |
+| `nonScheme.directEntry.debit.{inbound,outbound,total}` | number | yes |
+
+### LiquidityThreshold
+Created by `createLiquidityThreshold`, updated by `updateLiquidityThreshold`, listed by `getClientLiquidityThresholds`. `required: ["clientReference","id","type"]`. No field descriptions on this schema (descriptions come from the request bodies in §1).
+
+| field | type | req | notes |
+|---|---|---|---|
+| `id` | string uuid | yes | client-supplied on create |
+| `clientReference` | string, `minLength: 1` | yes | set by platform [inferred] |
+| `type` | string enum | yes | `TOTAL_DAILY_INBOUND_DIRECT_DEBIT, TOTAL_DAILY_NET_NON_SCHEME, TOTAL_DAILY_NET_VISA, TOTAL_DAILY_OUTBOUND_BPAY` |
+| `active` | boolean | no | |
+| `percental` | boolean | no | true ⇒ `percent` used; false ⇒ `amount` used |
+| `percent` | integer int32, nullable, 1–100 | no | |
+| `amount` | number, nullable, `minimum: 1` | no | |
+| `external` | boolean | no | **undocumented** — not in either request body; [inferred] `true` for client-created thresholds vs. platform defaults |
+
+Example (docs, prose): `percental = false`, amount `$1000` [docs:liquidity-monitoring-and-alerting-1].
+
+### Perk catalogue — `CountrySummary`, `RegionSummary`, `OperatorSummary`, `MobileNumberOperatorSummary`, `ProductSummary`, `MonetaryValue`, `RedemptionDetails`, `RedemptionValidity`
+Read-only reference data (seeded by the stub). Read by `getCountries`, `getOperators`, `getOperatorById`, `lookupOperators`, `getProducts`, `getProductById`, `getAllProducts`.
+
+| entity.field | type | notes / example |
+|---|---|---|
+| `CountrySummary.isoCode` | string | "ISO 3166-1 alpha-3 country code", `SGP` |
+| `CountrySummary.name` | string | `Singapore` |
+| `CountrySummary.regions` | `RegionSummary[]` | "Regions or states within the country" |
+| `RegionSummary.code` / `.name` | string | "Region code" / "Region name" |
+| `OperatorSummary.id` | string uuid | `3f2504e0-4f89-41d3-9a0c-0305e82c3301` |
+| `OperatorSummary.name` | string | `Telkomsel` |
+| `OperatorSummary.countryIsoCode` | string | `IDN` |
+| `OperatorSummary.regions` | `RegionSummary[]` | "Regions or states the operator serves" |
+| `MobileNumberOperatorSummary.identified` | boolean | example `true` |
+| `MobileNumberOperatorSummary.operator` | `OperatorSummary` | |
+| `ProductSummary.id` | string uuid | `3f2504e0-4f89-41d3-9a0c-0305e82c3301` |
+| `ProductSummary.name` | string | `Telkomsel 5000` |
+| `ProductSummary.description` | string | "Product description" |
+| `ProductSummary.type` | enum | `FIXED_VALUE_RECHARGE, RANGED_VALUE_RECHARGE, FIXED_VALUE_PIN_PURCHASE, RANGED_VALUE_PIN_PURCHASE, RANGED_VALUE_PAYMENT`; example `FIXED_VALUE_RECHARGE` |
+| `ProductSummary.perkSubType` | enum | `AIRTIME, BUNDLE, DATA, ELECTRICITY, WATER, GAS, INTERNET, LANDLINE, TELEVISION, VOIP, RETAIL, GAMING, CASH_CARDS, FOOD, ENTERTAINMENT, TRAVEL_AND_TRANSPORT, ESIM`; example `AIRTIME` |
+| `ProductSummary.countryIsoCode` | string | `IDN` |
+| `ProductSummary.operatorId` | string uuid | |
+| `ProductSummary.operatorName` | string | `Telkomsel` |
+| `ProductSummary.source` / `.destination` | `MonetaryValue` | what the purchaser pays / what the beneficiary receives [inferred from names] |
+| `ProductSummary.redemption` | `RedemptionDetails` | |
+| `ProductSummary.requiredBeneficiaryFields`, `.requiredSenderFields`, `.requiredCreditPartyIdentifierFields`, `.requiredDebitPartyIdentifierFields`, `.requiredStatementIdentifierFields`, `.requiredAdditionalIdentifierFields` | `string[][]` | "<group> fields required to order; provide all fields of one combination" |
+| `MonetaryValue.amount` | number double | "Fixed amount; null for ranged products" |
+| `MonetaryValue.min` / `.max` | number double | "Range lower bound; null for fixed products" / "Range upper bound; null for fixed products" |
+| `MonetaryValue.currency` | string (no enum) | "ISO currency code", `USD` |
+| `RedemptionDetails.terms` | string | "Restrictions and terms; Markdown formatted" |
+| `RedemptionDetails.usageInfo` | string[] | "Instructions on how to redeem the PIN" |
+| `RedemptionDetails.validity` | `RedemptionValidity` | |
+| `RedemptionValidity.quantity` | integer int32 | "Unit count; -1 unlimited, null unknown", example `365` |
+| `RedemptionValidity.unit` | string | "Time unit", example `DAY` |
+
+Note `ProductSummary` has **no `perkType`** field, and `OperatorSummary`/`CountrySummary` have no perk-type field either, although all three list endpoints filter by `perkType` [spec].
+
+### Perk order — `OrderSummary` (+ `Money`, `Party`, `PartyIdentifier`, `StatementIdentifier`)
+Created by `createOrder` (201), listed by `getOrders`, finalised by the `PERK_ORDER_UPDATE` webhook. 15 fields, none required.
+
+| field | type | notes / example |
+|---|---|---|
+| `externalId` | string uuid | "Caller-specified external reference of the order", `3f2504e0-4f89-41d3-9a0c-0305e82c3301`; the only order identifier exposed (there is no platform `orderId`) |
+| `productId` | string uuid | |
+| `productName` | string | `Telkomsel 5000` |
+| `operatorId` | string uuid | |
+| `countryIsoCode` | string | `IDN` |
+| `perkType` | enum | `MOBILE_TOP_UP, UTILITIES, GIFT_CARDS, ESIM` |
+| `source` / `destination` | `Money` | |
+| `status` | string (**no enum**) | "Order status", example `COMPLETED` |
+| `statusClass` | string (**no enum**) | "Order status class", example `COMPLETED` |
+| `createdAt` | string (no format) | "When the order was created (ISO 8601)" |
+| `confirmedAt` | string (no format) | "When the order was confirmed (ISO 8601)" |
+| `pinCode` / `pinSerial` | string | "PIN code, for PIN-based products" / "PIN serial, for PIN-based products" |
+| `redemption` | `RedemptionDetails` | |
+
+`Money` = `{ amount: number double (req, example 5), currency: string (req, "ISO currency code", example "USD") }`. `Party`, `PartyIdentifier`, `StatementIdentifier` field lists are under `createOrder` in §1; they are request-only and not echoed on `OrderSummary` [spec].
+
+### HayMerchantCategoryCode
+Read-only reference row for `getAllMerchantCategoryCodes`: `code` integer int32 ("Merchant Category Code (MCC) as four digit code as per ISO 18245"), `description` string. Neither required.
+
+### Token responses
+`ExchangeExternalTokenResponse` = `{ accessToken: string, accessExpiresUtc: integer int64, installationHandle: string }`; `ElevateExternalTokenResponse` = `{ elevationHeader: string }`. No descriptions, nothing required, nothing persisted by contract (a stub may keep issued tokens to make `elevate` validate `externalAccessToken` [inferred]).
+
+### Request-only bodies
+`EnrolCardToClickToPayRequestBody`, `ExchangeExternalTokenRequestBody`, `ElevateExternalTokenRequestBody`, `ConversionQuoteRequest`, `ConversionExecuteRequest`, `SearchConversionsRequestBody`, `LiquidityConversionRequest`, `CreateThresholdRequestBody`, `UpdateThresholdRequestBody`, `MobileNumberLookupRequestBody`, `CreateOrderRequestBody` — every field, constraint and enum is spelled out under the owning operation in §1.
+
+### Common — `GenericMessage`, `ErrorResponse`
+See Conventions.
+
+### Webhook DTOs `[webhook-spec]`
+- `NotificationDtoV1` ("Details of event the v1 notification"), `required: ["idempotencyKey","type"]`: `idempotencyKey` uuid ("Idempotency key (UUID) to uniquely represent this request and prevent duplication."); `type` enum `["BATCH_COMPLETED","PERK_ORDER_UPDATE"]`; `createdTimeUtc` date-time; `actionOwner` enum `["CLIENT","PLATFORM"]` ("**CLIENT**: Client executed an action which triggered the event. **PLATFORM**: Shaype executed an action which triggered the event."); `eventDetails` oneOf `BatchCompletedEventDto` | `PerkOrderUpdateEventDto`, discriminated by `EventDetailsDto.eventType` (same enum).
+- `PerkOrderUpdateEventDto` ("Details of the **Perk Order Update** event; provided when the type is `PERK_ORDER_UPDATE`."): `orderExternalId` uuid; `status` enum `["COMPLETED","DECLINED","REVERSED"]` ("Final order status."); `pinCode`; `pinSerial`; `confirmedTimeUtc` date-time; `redemption: RedemptionDto { usageInfo: string[], terms: string, validity: ValidityDto { unit: string (example "DAY"), quantity: int32 (example 365, "-1 unlimited, null unknown") } }`.
