@@ -127,3 +127,65 @@ Shared shapes used by every operation below [spec]:
   - Ownership check presumably applies [inferred]; failure code not documented.
   - Setting the current status again (e.g. ACTIVE → ACTIVE) is **not documented**; no idempotency key [spec].
 - Webhooks: none documented.
+
+### GET /v1/accounts/{accountId}/payids (getPayIdsForAccount)
+
+- Purpose: "Returns all PayIDs and details associated with a particular customer's account" [docs:payid]; spec summary "Get PayIDs by Account ID". Not deprecated.
+- Params [spec]: `accountId` (path, string, format uuid, required) — "Unique identifier (UUID) of the Account".
+- Request body: none.
+- Response 200: `array` of `PayIdDetailsResponse` [spec] — "Details of the PayID":
+  - `lastResolutionDateTimeUtc: string(date-time)`
+  - `lastUpdatedDateTimeUtc: string(date-time)`
+  - `payIdName: string`
+  - `payIdType: string` enum `["EMAIL","TELEPHONE","INDIVIDUAL_AUSTRALIAN_BUSINESS","ORGANISATION"]`
+  - `payIdValue: string`
+  - `reason: string` enum `["FROD","CUST","DECD","LEGL","PART"]`
+  - `registrationDateTimeUtc: string(date-time)`
+  - `status: string` enum `["ACTIVE","DEREGISTERED","DISABLED","PORTABLE"]`
+  - No field is marked required [spec].
+  - 400/403/422/500/501 → `ErrorResponse`.
+- Behaviour:
+  - Multiple PayIDs per account are allowed ("can assist where multiple PayIDs registered against the same Account" [spec `payIdName` description]).
+  - Whether DEREGISTERED PayIDs are included is **not documented** (they are "no longer linked to any bank account" [docs:payid], so exclusion is the natural reading) [inferred].
+  - Unknown `accountId`: no 404 is declared; the natural mapping is 422 or an empty array [inferred]. Account belonging to another client: 403 [inferred].
+  - Read-only; idempotent [inferred].
+- Webhooks: none documented.
+
+### POST /v1/accounts/{accountId}/payids/{payId}/register (postPayIdRegister)
+
+- Purpose: "Allows the registration of a PayID with a particular customer's account" [docs:payid]; spec summary "Register PayID". Not deprecated.
+- Params [spec]:
+  - `accountId` (path, string, format uuid, required).
+  - `payId` (path, string, required) — the PayID value being registered.
+- Request body (required) `PayIdRegisterRequestBody` [spec] — "Request body for PayID registration"; required: `["ownerName","payIdName","payIdType"]`:
+  - `ownerName: string`, required, minLength 1 — "Name of the individual or legal entity that is registered as the account holder".
+  - `payIdName: string`, required, minLength 1 — alias/nickname.
+  - `payIdType: string`, required, enum `["EMAIL","TELEPHONE","INDIVIDUAL_AUSTRALIAN_BUSINESS","ORGANISATION"]`.
+- Response 200 `GenericMessage`; 400/403/422/500/501 `ErrorResponse` [spec].
+- Behaviour:
+  - Preconditions [docs:payid]: account must be NPP enabled ("PayIDs can only be registered against accounts that are NPP enabled"); the PayID value must be available ("A single PayID can only be linked to one account at a time ... cannot be registered to multiple accounts"); the value must be clearly associated with the customer (2FA-confirmed phone/email, or a business number registered to that business) — the latter is a client obligation, not a platform validation.
+  - `ownerName` "**must** be reflective of the account holder name as this information will be visible and used by customers as a validation check when sending funds from another financial institution" [docs:payid]. Whether the platform validates it against the customer record is **not documented**.
+  - Format rules per type [docs:payid PayID Types table]: TELEPHONE = `+` + country code (1–3 chars) + `-` + a digit 1–9 + any digits (example `+61-423765879`); EMAIL = max 256 chars, lower case, must contain `@` with leading/trailing characters, no whitespace (example `test@email.com`); INDIVIDUAL_AUSTRALIAN_BUSINESS = 9–11 digit ABN/ACN/ARBN/ARSN (example `601428737`); ORGANISATION = company/organisation name plus business description and/or location (examples `aardvark plumbing mosman nsw`, `snackspotvending 10shelley lvl08 sydney nsw`). ORGANISATION is "largely unused in the industry"; AUBN is best practice for businesses [docs:payid]. The status code for a format violation is not documented (422 [inferred]).
+  - State effects [docs:payid + docs:payid-image]: creates the PayID record in status ACTIVE ("AliasRegistration": Initial → ACTV) linked to `accountId`, sets `registrationDateTimeUtc` [inferred: now], stores `ownerName`, `payIdName`, `payIdType`, `payIdValue`. A DEREGISTERED value "can be re-registered again with the same or different account at any point" [docs:payid]; a value in PORTABLE at another FI can be registered "within 14 days" of being made portable [docs:payid].
+  - Registering a value that is ACTIVE/DISABLED elsewhere must fail; the HTTP status is **not documented** (no 409 is declared; 422 is the declared candidate) [inferred].
+  - No idempotency key [spec]. Re-registering an already-ACTIVE value to the same account: behaviour not documented.
+- Webhooks: none documented.
+
+### GET /v1/npp/eligibility/branch-identifiers/{branchIdentifier} (verifyBranchIdentifier)
+
+- Purpose: "Check if a Branch Identifier is eligible for NPP payments" [spec summary]; tag "NPP API" — "APIs for NPP related operations" [spec]. Not deprecated.
+- Params [spec]: `branchIdentifier` (path, string, required, pattern `^\d{6}$`, example `636636`) — "Target Branch Identifier" (a BSB).
+- Request body: none.
+- Response 200 `NppEligibilityCheckResponse` [spec] — "Response Body of a NPP (New Payments Platform) eligibility check"; description "Branch Identifier eligibility check completed":
+  - `enabled: boolean` — "Describes whether a NPP (New Payments Platform) is enabled for the subject of the request".
+  - Spec examples: "Branch Identifier supports NPP payments" → `{"enabled": true}`; "Branch Identifier does not support NPP payments" → `{"enabled": false}`.
+- Response 422 `ErrorResponse` — description "Branch Identifier format is invalid"; spec example "Invalid Branch Identifier format":
+  ```json
+  {"message": "branchIdentifier format is not correct.", "details": "Please refer to the API documentation or contact Shaype for more info with the traceId.", "status": "422", "traceId": "97e1bc06-ba16-4718-9bdd-d6d78ecdc3ea"}
+  ```
+- Responses 400/403/500/501 → `ErrorResponse` [spec].
+- Behaviour:
+  - Validation: `branchIdentifier` must match `^\d{6}$`, otherwise 422 with the message above [spec].
+  - The answer is a property of the BSB (target FI branch) — the same signal the transfer engine uses: for `transferType` ACCOUNT, "the platform verifies whether the recipient account is enabled for NPP. If it is, the payment will be executed via NPP; otherwise, it will be executed via DE" [docs:payments]. A local implementation needs a BSB → NPP-enabled lookup table [inferred].
+  - Read-only; idempotent [inferred]. No documented relation to the staging multi-BSB brand BSBs (636383/636385 → 636380, DE only) [docs:multi-bsb-routing].
+- Webhooks: none documented.
