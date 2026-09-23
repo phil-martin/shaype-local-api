@@ -236,3 +236,117 @@ Conventions used below:
 - Response: `200 Success` → `GenericMessage`. Common error responses.
 - Behaviour: stores arbitrary JSON object against the account, readable via `GET /v0/accounts/{id}?expand=customData` [spec]. Whether a second call **merges** keys or **replaces** the object is not stated [open] (schema says "update", docs say "create"). Size/depth limits not stated [open].
 - Webhooks: none.
+
+### GET /v1/accounts/{accountId}/limits (getAccountLimits)
+
+- Purpose: "Get all limits by Account ID". Not deprecated.
+- Path params: `accountId` (uuid, required).
+- Request body: none.
+- Response: `200 Success` → `array<ExternalLimitAmounts>` [spec]. Common error responses.
+  - `ExternalLimitAmounts` = `{ accountLimit: number ("Custom limit applied to the Account"), effectiveLimit: number ("Effective limit applied to the Account"), productLimit: number ("Default limit applied to the Account based on the product"), type: enum }` — none required [spec].
+  - `type` enum (16 values, verbatim order): `MAX_BALANCE`, `MIN_BALANCE`, `TOTAL_SPEND_PER_YEAR`, `ATM_WITHDRAWAL_PER_DAY`, `TOP_UP_PER_DAY`, `CARD_TOP_UP_PER_DAY`, `BPAY_TOP_UP_PER_DAY`, `BANK_TRANSFER_TOP_UP_PER_DAY`, `PAYMENT_TO_ACCOUNT_NUMBER`, `PAYMENT_TO_PAY_ID`, `CARD_PAYMENTS_DAILY`, `SINGLE_CARD_TRANSACTION`, `MIN_STACK_BALANCE`, `DIRECT_DEBIT_PER_DAY`, `OVERDRAFT_PRODUCT_LIMIT`, `BPAY_DAILY_LIMIT` [spec].
+  - Per-type meanings [spec, identical text on all three limit schemas]: `ATM_WITHDRAWAL_PER_DAY` Maximum value of ATM cash withdrawals; `BANK_TRANSFER_TOP_UP_PER_DAY` Maximum value of inbound cash transfers; `BPAY_DAILY_LIMIT` Maximum value of outgoing BPAY payments; `BPAY_TOP_UP_PER_DAY` Not currently used; `CARD_PAYMENTS_DAILY` Maximum value of Card payments; `CARD_TOP_UP_PER_DAY` Not currently used; `DIRECT_DEBIT_PER_DAY` Maximum value of outgoing direct debit transfers; `MAX_BALANCE` Maximum balance that can be held in Account; `MIN_BALANCE` Minimum balance that can be held in Account (Shaype use only); `MIN_STACK_BALANCE` Minimum balance that can be held in Stack (Shaype use only); `OVERDRAFT_PRODUCT_LIMIT` Maximum overdraft value that can be applied on Account; `PAYMENT_TO_ACCOUNT_NUMBER` Maximum value of individual outgoing cash transfer; `PAYMENT_TO_PAY_ID` Not currently used; `SINGLE_CARD_TRANSACTION` Maximum value of individual Card payment; `TOTAL_SPEND_PER_YEAR` Maximum value of outgoing transfers / payments on Account in a year; `TOP_UP_PER_DAY` Maximum value of inbound cash transfers.
+- Behaviour: one element per limit type [inferred]. `effectiveLimit` = `accountLimit` if an account-level limit is set, else `productLimit` [docs:account-limits "Effective limit"]. What `accountLimit` is when none is set (null / absent / 0 / = productLimit) is not stated [open]. While risk level is `HIGH`, all limits are 0 [docs:account-limits] — whether that shows in `effectiveLimit` is [open].
+- Webhooks: none.
+
+### DELETE /v1/accounts/{accountId}/limits/{limitType} (deleteAccountLimit)
+
+- Purpose: "Delete limit from Account" — "reset the limit for a specific account and limit type. Once removed, the Product level limit will be used. The Product level limit cannot be removed" [docs:account-limits]. Not deprecated.
+- Path params: `accountId` (uuid, required); `limitType` (string, required, enum = the full 16-value list above: `MAX_BALANCE`, `MIN_BALANCE`, `TOTAL_SPEND_PER_YEAR`, `ATM_WITHDRAWAL_PER_DAY`, `TOP_UP_PER_DAY`, `CARD_TOP_UP_PER_DAY`, `BPAY_TOP_UP_PER_DAY`, `BANK_TRANSFER_TOP_UP_PER_DAY`, `PAYMENT_TO_ACCOUNT_NUMBER`, `PAYMENT_TO_PAY_ID`, `CARD_PAYMENTS_DAILY`, `SINGLE_CARD_TRANSACTION`, `MIN_STACK_BALANCE`, `DIRECT_DEBIT_PER_DAY`, `OVERDRAFT_PRODUCT_LIMIT`, `BPAY_DAILY_LIMIT`) [spec].
+- Request body: none.
+- Response: `200 Success` → `DeleteAccountLimitResponse` = `{ success: boolean }` [spec]. Common error responses.
+- Behaviour: removes the account-level override; `effectiveLimit` reverts to `productLimit` [docs:account-limits]. Deleting a type that has no override — result not stated ([inferred] `success: true`, idempotent). Note the DELETE enum includes types that PUT cannot set (`MIN_BALANCE`, `MIN_STACK_BALANCE`, `OVERDRAFT_PRODUCT_LIMIT`, `CARD_TOP_UP_PER_DAY`, `BPAY_TOP_UP_PER_DAY`) [spec] — [open] whether deleting those is a no-op or an error. Invalid `limitType` string → 400 [inferred].
+- Webhooks: none.
+
+### PUT /v1/accounts/{accountId}/limits/{limitType} (setAccountLimit)
+
+- Purpose: "Set limit for Account" — account-level override [docs:account-limits]. Not deprecated.
+- Path params: `accountId` (uuid, required); `limitType` (string, required, enum — **11 values**, verbatim order: `MAX_BALANCE`, `TOTAL_SPEND_PER_YEAR`, `ATM_WITHDRAWAL_PER_DAY`, `TOP_UP_PER_DAY`, `BANK_TRANSFER_TOP_UP_PER_DAY`, `PAYMENT_TO_ACCOUNT_NUMBER`, `PAYMENT_TO_PAY_ID`, `CARD_PAYMENTS_DAILY`, `SINGLE_CARD_TRANSACTION`, `DIRECT_DEBIT_PER_DAY`, `BPAY_DAILY_LIMIT`) [spec]. `MIN_BALANCE`, `MIN_STACK_BALANCE`, `OVERDRAFT_PRODUCT_LIMIT`, `CARD_TOP_UP_PER_DAY`, `BPAY_TOP_UP_PER_DAY` are **not settable** here [spec]; the parameter description still lists all 16 with the "(Shaype use only)" / "Not currently used" notes.
+- Request body (required): `ExternalSetAccountLimitRequestBody` = `{ limitAmount: number (**required**, `minimum: 0`, `exclusiveMinimum: true` → must be > 0, "Custom Account limit value being applied") }` [spec].
+- Response: `200 Success` → `ExternalSetAccountLimitResponse` = `{ accountId: uuid, limitAmount: number, limitType: enum (full 16-value list) }` [spec]. Common error responses.
+- Behaviour:
+  - "An account level limit cannot exceed the Product level" [docs:account-limits] → 422 when `limitAmount > productLimit` [inferred code].
+  - Sets `accountLimit` and hence `effectiveLimit` for that type [docs:account-limits]. Replaces any prior override (PUT semantics) [inferred].
+  - `limitAmount <= 0` violates the schema → 400/422 [inferred].
+  - Daily limits are evaluated on a rolling 24-hour window: "the limit checker will get all transactions from the past 24h for that account and check if the total (including the current transaction) would go over the limit" [docs:account-limits]. (The same page's example says "until the next calendar day" — inconsistent; rolling 24h is the explicit rule.)
+  - Multi-currency wallets: limits are assessed across the whole hierarchy (parent + children) after converting each balance/transaction to the home currency at the margin-free cached FX rate; aggregated types: `MAX_BALANCE`, single card txn, card per day, `ATM_WITHDRAWAL_PER_DAY`, `TOP_UP_PER_DAY`, `BANK_TRANSFER_TOP_UP_PER_DAY`, transfers-out per day; **not** aggregated: `DIRECT_DEBIT_PER_DAY`, BPAY per day, `MIN_BALANCE`, `MIN_STACK_BALANCE` [docs:limits-1]. That page uses names not in the spec enum (`SINGLE_CARD_TRANSACTION_LIMIT`, `CARD_TRANSACTIONS_PER_DAY`, `TRANSFERS_OUT_PER_DAY`, `BPAY_PER_DAY`) — treat as aliases of `SINGLE_CARD_TRANSACTION`, `CARD_PAYMENTS_DAILY`, (no spec equivalent; nearest `PAYMENT_TO_ACCOUNT_NUMBER` is per-transaction), `BPAY_DAILY_LIMIT` [inferred].
+  - Breach outcomes (transaction side, not this endpoint): `REFUSED_LIMIT_BREACH` with detailed outcome e.g. `REFUSED_DAILY_ATM_WITHDRAWAL_LIMIT_BREACHED` [docs:account-limits]; full outcome list in section 6.
+- Webhooks: none.
+
+### GET /v1/accounts/{accountId}/rules (getAccountRules)
+
+- Purpose: "Get all Rules by Account ID" — "retrieve all a rules associated with the specific account" [docs:account-rules]. Not deprecated.
+- Path params: `accountId` (uuid, required).
+- Request body: none.
+- Response: `200 Success` → `array<ExternalTransactionRuleResponse>` [spec]. Common error responses. (Schema in addAccountRule.)
+- Behaviour: read-only. Whether disabled/expired rules are included is not stated [open]; the response carries `disabled` and `expiresAtUtc` so [inferred] they may be.
+- Webhooks: none.
+
+### POST /v1/accounts/{accountId}/rules (addAccountRule)
+
+- Purpose: "Create Rule for Account" — account-level control over where money can be spent (merchant blocking) [docs:account-rules]. Not deprecated.
+- Path params: `accountId` (uuid, required).
+- Request body (required): `ExternalAddTransactionRuleRequest` — required: `name`, `ruleDetails`, `ruleType` [spec].
+  - `name` — string, **required**, `minLength: 1`, "Name assigned to the Rule".
+  - `ruleType` — string, **required**, enum `MERCHANT_CODE_BLOCK` ("Transactions blocked by Merchant Category Code (MCC)") | `MERCHANT_ID_BLOCK` ("Transactions blocked by merchant ID") | `MERCHANT_NAME_BLOCK` ("Transactions blocked by merchant name").
+  - `expiresIn` — integer int64, optional, `minimum: 1`, "Number of seconds until the Rule expires after it is created".
+  - `ruleDetails` — `RuleDetails` (**required**), all properties optional in-schema but conditionally required by `ruleType`:
+    - `blockedMerchantCategoryCodes` — int32[] , `uniqueItems: true`, "Blocked Merchant Category Code (MCC) as four digit code as per ISO 18245 (required for Rule type: MERCHANT_CODE_BLOCK)."
+    - `blockedMerchantIds` — string[], `uniqueItems: true`, "List of blocked merchant identifiers, each up to 15 alphanumeric characters (required for rule type of `MERCHANT_ID_BLOCK`)."
+    - `blockedMerchantName` — string, "Blocked merchant name (required for Rule type: MERCHANT_NAME_BLOCK)."
+    - `merchantNameMatchingOperator` — enum `CONTAINS` ("Merchant name contains the Rule value") | `ENDS_WITH` | `EXACT` ("Merchant name is an actual match of the Rule value") | `STARTS_WITH`, "(required for Rule type: MERCHANT_NAME_BLOCK)".
+- Response: `200 Success` → `ExternalTransactionRuleResponse` = `{ id: uuid ("Unique identifier (UUID) of the Rule"), name: string, ruleType: enum (as above), rule: Rule (opaque `object`, "Contains detail of the Rule"), ownerId: string ("Unique identifier (UUID) of the owner of Rule (either the Customer ID or Client Reference if a rule applied across the product)"), disabled: boolean ("Indicates if Rule is currently disabled"), expiresAtUtc: date-time ("DateTime in UTC format when the Rule expires") }` — none required [spec]. Common error responses.
+- Behaviour:
+  - Validation [spec descriptions; response code inferred 422]: `MERCHANT_CODE_BLOCK` requires `blockedMerchantCategoryCodes`; `MERCHANT_ID_BLOCK` requires `blockedMerchantIds` (each ≤ 15 alphanumeric); `MERCHANT_NAME_BLOCK` requires `blockedMerchantName` and `merchantNameMatchingOperator`.
+  - `expiresAtUtc` = creation time + `expiresIn` seconds [inferred]; absent `expiresIn` → no expiry [inferred].
+  - `ownerId` is the account holder's customer ID for account-level rules, or a client reference for product-wide rules (which are created outside this API) [spec].
+  - `rule` echo shape is undefined (`Rule` is an empty object schema) [spec] — [inferred] echo the submitted `ruleDetails`.
+  - Enforcement (transactions domain): card transactions matching a rule are refused with outcome `REFUSED_RULES`; "If there are multiple rules that apply to a transaction, the transaction will be blocked by the first matching rule and return only that reason"; the `TRANSACTION` webhook carries `ruleDetails: { ruleId }` [docs:account-rules]. Full webhook example in docs:account-rules (`transactionEvent.outcome: "REFUSED_RULES"`, `ruleDetails.ruleId`).
+  - MCC codes are obtainable from `getallmerchantcategorycodes` (another domain) [docs:account-rules].
+  - Idempotency: none (no idempotencyKey); duplicate POSTs create duplicate rules [inferred].
+- Webhooks: none on creation; `TRANSACTION` with `outcome: REFUSED_RULES` when a rule later blocks a payment [docs:account-rules].
+
+### DELETE /v1/accounts/{accountId}/rules/{ruleId} (disableRule)
+
+- Purpose: "Delete Rule from Account" [docs:account-rules]; operationId `disableRule` and response field `disabled` indicate a soft delete [spec]. Not deprecated.
+- Path params: `accountId` (uuid, required); `ruleId` (uuid, required, "Unique identifier (UUID) of the Rule").
+- Request body: none.
+- Response: `200 Success` → `DisableRuleResponse` = `{ success: boolean }` [spec]. Common error responses.
+- Behaviour: marks the rule `disabled: true` [inferred from naming]; a disabled rule no longer blocks transactions [docs:account-rules "disable rules"]. Whether `getAccountRuleById` still returns it afterwards — [open]. Rule belonging to a different account → 4xx [inferred]. Re-disabling — [inferred] `success: true`.
+- Webhooks: none.
+
+### GET /v1/accounts/{accountId}/rules/{ruleId} (getAccountRuleById)
+
+- Purpose: "Get Rule for Account by Rule ID" [docs:account-rules]. Not deprecated.
+- Path params: `accountId` (uuid, required); `ruleId` (uuid, required).
+- Request body: none.
+- Response: `200 Success` → `ExternalTransactionRuleResponse` (schema above). Common error responses.
+- Behaviour: read-only. Rule not found / not owned by this account → no 404 declared; [inferred] 400 or 422 `ErrorResponse`.
+- Webhooks: none.
+
+### POST /v1/accounts/{accountId}/transfer (makeTransferV1)
+
+- Purpose: "Initiate Cash Transfer" — outbound transfer from `accountId` to another Shaype account, a BSB/account number, or a PayID [spec, docs:payments]. Not deprecated (replaces makeTransferV0).
+- Path params: `accountId` (uuid, required) — the **sender** account.
+- Request body (required): `TransferOutRequestBody` — required: `amount`, `description`, `senderCustomerHayId`, `transferType` [spec]. **`idempotencyKey` is NOT in the required list** [spec].
+  - `amount` — number, **required**, `minimum: 0`, `exclusiveMinimum: true` (> 0), "The amount to be transferred".
+  - `description` — string, **required**, `minLength: 1`, `maxLength: 255`, "Transfer description, will be seen by both sender and recipient".
+  - `senderCustomerHayId` — uuid, **required**, "Unique identifier (UUID) of the Customer (initiator of the transfer)".
+  - `transferType` — string, **required**, enum `ACCOUNT` ("Transfer to Account using bank account details (requires accountTransfer object to be provided)") | `INTERNAL` ("Transfer to Account using AccountID, where recipient also Client's Customer with Shaype (requires internalTransfer object to be provided)") | `PAY_ID` ("Transfer to Account using PayID (requires payIdTransfer object to be provided)").
+  - `idempotencyKey` — uuid, optional, "Unique value (UUID) used to identify this request and used to recognise any subsequent retries".
+  - `category` — string, optional, "Used to assign a category of the transfer" (example values seen: `EATING_OUT`, `SAVING`, `SHOPPING`).
+  - `reference` — string, optional, `minLength: 0`, `maxLength: 35`, "Reference to be included with the transfer".
+  - `accountTransfer` — `AccountTransfer` (required when `transferType = ACCOUNT`): `accountNumber` string **required** `minLength: 1` `pattern: [\d]{5,9}`; `bsb` string **required** `minLength: 1` `pattern: [\d]{6}`; `recipientName` string **required** 1–140; `senderName` string 0–140; `reference` string 0–35 **deprecated** (use top-level `reference`).
+  - `internalTransfer` — `InternalTransfer` (required when `INTERNAL`): `recipientAccountHayId` uuid **required**; `recipientName` string **required** 1–140; `senderName` string **required** 1–140.
+  - `payIdTransfer` — `PayIdTransfer` (required when `PAY_ID`): `payId` string **required** `minLength: 1`; `recipientName` string **required** 1–140; `senderName` string 0–140; `reference` string 0–35 **deprecated**.
+  - Spec example (named "Inbound Direct Credit request", attached to the 200 response but shaped like a request): `{"idempotencyKey":"fbdd45c3-…","senderCustomerHayId":"f385a29e-…","description":"Table booking","reference":"140295","category":"EATING_OUT","amount":5.97,"transferType":"PAY_ID","payIdTransfer":{"recipientName":"Felix Reynolds Jr.","payId":"haas1709811448764@yopmail.com","senderName":"Ollie"}}` [spec].
+- Response: `200 Success` → `TransactionOutcome` = `{ outcome: enum, transactionId: uuid ("Unique identifier (UUID) of the Transaction") }` [spec]. `outcome` enum (21 values, verbatim order): `ACCEPTED`, `INTERNAL_ERROR`, `REFUSED_LIMIT_BREACH`, `REFUSED_FRAUD`, `REFUSED_CUSTOMER_PREFERENCE`, `REFUSED_INSUFFICIENT_FUNDS`, `REFUSED_ACCOUNT_BLOCKED`, `REFUSED_RECIPIENT_ACCOUNT_BLOCKED`, `REFUSED_ACCOUNT_CLOSED`, `REFUSED_RECIPIENT_ACCOUNT_CLOSED`, `REFUSED_INVALID_PAY_ID`, `UNKNOWN`, `REFUSED_DAILY_TRANSFERS_OUT_LIMIT_BREACHED`, `REFUSED_MAX_BALANCE_EXCEEDED`, `REFUSED_TOTAL_INBOUND_DIRECT_DEBIT_DAILY_LIMIT_BREACHED`, `REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED`, `REFUSED_TOTAL_NET_VISA_DAILY_LIMIT_BREACHED`, `REFUSED_TOTAL_NON_SCHEME_DAILY_LIMIT_BREACHED`, `REFUSED_SENDER_ACCOUNT_NOT_VERIFIED`, `REFUSED_CAPABILITY_NOT_ENABLED`, `REFUSED_QUOTE_EXPIRED` [spec]. Refusals are returned as **HTTP 200 with a REFUSED_* outcome**, not as 4xx [inferred from schema; docs:payment-transaction-outcome describe them as outcomes]. Common error responses for malformed requests.
+- Behaviour [docs:payments unless noted]:
+  - Routing: `PAY_ID` → platform resolves the PayID to BSB/account and sends via NPP. `ACCOUNT` → if the recipient BSB is a Shaype BSB the transfer is converted to `INTERNAL`; else if the recipient is NPP-enabled → NPP; else → Direct Entry (DE). `INTERNAL` → executed inside the platform ("ShaypePay").
+  - Preconditions on the sender account [spec outcomes + docs:account-status/payment-transaction-outcome]: status `LOCKED` → `REFUSED_ACCOUNT_BLOCKED`; `CLOSED` → `REFUSED_ACCOUNT_CLOSED`; `availableBalance < amount` → `REFUSED_INSUFFICIENT_FUNDS` (stacks never draw down [docs:stack]); risk level `HIGH` → all limits 0 → limit refusal [docs:account-limits]; `PAYMENT_TO_ACCOUNT_NUMBER` (per-transfer max) and `TOTAL_SPEND_PER_YEAR` / daily transfers-out limits → `REFUSED_LIMIT_BREACH` or `REFUSED_DAILY_TRANSFERS_OUT_LIMIT_BREACHED`.
+  - Preconditions on an INTERNAL recipient: `LOCKED` → `REFUSED_RECIPIENT_ACCOUNT_BLOCKED`; `CLOSED` → `REFUSED_RECIPIENT_ACCOUNT_CLOSED`; recipient would exceed `MAX_BALANCE` → `REFUSED_MAX_BALANCE_EXCEEDED` [docs:payment-transaction-outcome].
+  - FX child accounts: "FX accounts cannot access any domestic payment rails and if an `accountId` for an FX account is passed in a account transfer request then the call will be rejected"; capability table: Initiate Cash Transfer is "partially disabled — Only `internalTransfer` are accepted" for FX accounts [docs:multi-currency-onboarding-and-account-structure]. `REFUSED_CAPABILITY_NOT_ENABLED` is the natural outcome [inferred]. `REFUSED_QUOTE_EXPIRED` relates to FX conversions [inferred].
+  - Balance effects on `ACCEPTED` [inferred from docs:account-balances and webhook samples]: sender `totalBalance` and `availableBalance` decrease by `amount`; INTERNAL recipient's increase; the account transitions `APPROVED → ACTIVE` on its first transaction [docs:account-status].
+  - The `senderCustomerHayId` must be the holder (or a group member) of `accountId` [inferred].
+  - Idempotency: `idempotencyKey` recognises retries [spec]; optional, so without it every call is a new transfer [inferred].
+- Webhooks [docs:payments]: `TRANSACTION` events with `transactionEvent.transactionType` `INTRABANK_TRANSFER_OUT` (sender, internal), `INTRABANK_TRANSFER_IN` (recipient, internal), `INTERBANK_TRANSFER_OUT` (sender, external), `INTERBANK_TRANSFER_IN` (external inbound). Reversal webhooks include `returnReason`. `transactionEvent.accountBalances` = `{ totalBalance, heldBalance, lockedBalance, stacksBalance, availableBalance }` each a `CurrencyAmount`, plus `updatedBalance` [webhook-spec AccountBalancesDto; docs:payments sample]. `ACCOUNT_STATUS_CHANGE` (`APPROVED → ACTIVE`) on first transaction [inferred].
