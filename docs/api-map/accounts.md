@@ -8,7 +8,7 @@ Conventions used below:
 - No 404 is declared on any Accounts operation [spec]. Unknown-account behaviour is an open question (section 7).
 - No `security` section and no `securitySchemes` exist in the spec [spec]; auth is out of scope for this map.
 - `GenericMessage` = `{ message: string ("Message indicating operation result") }` [spec].
-- Currency enums: `HayAccount.currency`, `CurrencyAmount.currency`, `HomeCurrencyBalanceEquivalent.currency`, `ChildAccountsDataRequest.currencies[]` use the full 163-value ISO 4217 list (AED … ZWL, including CNH, XCG, ZWG). `CreateAccountRequestBody.currency` uses a restricted 31-value list (given verbatim under createAccount). Verified by jq.
+- Currency enums: `HayAccount.currency`, `CurrencyAmount.currency`, `HomeCurrencyBalanceEquivalent.currency`, `ChildAccountsDataRequest.currencies[]` use the full 162-value ISO 4217 list (AED … ZWL, including CNH, XCG, ZWG). `CreateAccountRequestBody.currency` uses a restricted 31-value list (given verbatim under createAccount). Verified by jq.
 
 ## 1. Operations
 
@@ -181,7 +181,7 @@ Conventions used below:
   - `fx` — `AccountFxDataRequest` ("FX-specific data passed through when creating an account"), optional:
     - `childAccounts` — `ChildAccountsDataRequest` ("Sub-accounts to create alongside the account"), required inside: `initMode`.
       - `initMode` — string, **required when `childAccounts` present**, enum `ALL` | `CUSTOM` | `NONE` ("**ALL**: create a child account for every Shaype-supported FX currency; **CUSTOM**: create a child account for each currency in `currencies`; **NONE**: create no child accounts"), example `CUSTOM`.
-      - `currencies` — array of ISO-4217 enum strings (full 163 list), `minItems: 1`, `maxItems: 2147483647`, "Required when initMode is CUSTOM. Only currencies that Shaype supports for FX are accepted."
+      - `currencies` — array of ISO-4217 enum strings (full 162 list), `minItems: 1`, `maxItems: 2147483647`, "Required when initMode is CUSTOM. Only currencies that Shaype supports for FX are accepted."
     - `compliance` — `FxComplianceDataRequest` ("FX compliance data passed through when creating an account"), all optional/nullable:
       - `countryOfCitizenship` — string, ISO 3166-1 alpha-3, example `AUS`, "Must be a country that transacts in a Shaype-supported currency."
       - `customerRisk` — enum `LOW` | `MEDIUM` | `HIGH`, example `LOW`.
@@ -350,3 +350,129 @@ Conventions used below:
   - The `senderCustomerHayId` must be the holder (or a group member) of `accountId` [inferred].
   - Idempotency: `idempotencyKey` recognises retries [spec]; optional, so without it every call is a new transfer [inferred].
 - Webhooks [docs:payments]: `TRANSACTION` events with `transactionEvent.transactionType` `INTRABANK_TRANSFER_OUT` (sender, internal), `INTRABANK_TRANSFER_IN` (recipient, internal), `INTERBANK_TRANSFER_OUT` (sender, external), `INTERBANK_TRANSFER_IN` (external inbound). Reversal webhooks include `returnReason`. `transactionEvent.accountBalances` = `{ totalBalance, heldBalance, lockedBalance, stacksBalance, availableBalance }` each a `CurrencyAmount`, plus `updatedBalance` [webhook-spec AccountBalancesDto; docs:payments sample]. `ACCOUNT_STATUS_CHANGE` (`APPROVED → ACTIVE`) on first transaction [inferred].
+
+## 2. Entities and fields
+
+### HayAccount ("Details of an account") [spec]
+
+`required: ["customData"]` — the only required property (odd but verbatim). All numbers are "to 2 decimal places". Example values from [docs:sample-requests-responses] create-account response.
+
+| property | type | nullable | enum / constraint | description (spec) | example |
+|---|---|---|---|---|---|
+| `accountHayId` | string uuid | — | | Unique identifier (UUID) of the Account | `7bd7479d-787a-9876-8a11-d8424f1ea078` |
+| `accountHolderId` | string uuid | — | | Unique identifier (UUID) of the account holder | `997d394b-e22f-0000-a69d-0b209671baab` |
+| `accountHolderType` | string | — | `CUSTOMER` \| `GROUP` | CUSTOMER: accountHolderId is a Customer ID; GROUP: a Group ID | `CUSTOMER` |
+| `accountNumber` | string | — | "5-9 digits in length" | Account number | `66090672` |
+| `bsb` | string | — | "6 digits in length" | BSB (Bank State Branch) of Account | `636220` |
+| `currency` | string | — | ISO 4217 (162 values) | Account currency | `AUD` |
+| `productId` | string uuid | — | | Unique identifier (UUID) of the Product | `997d394b-e22f-8467-a69d-0b209671brre` |
+| `status` | string | — | `PENDING_APPROVAL` \| `APPROVED` \| `ACTIVE` \| `LOCKED` \| `DORMANT` \| `CLOSED` \| `ACTIVE_IN_ARREARS` | see section 3 | `PENDING_APPROVAL` (sample) |
+| `blockedBy` | string | — | `CLIENT` \| `PLATFORM` | The type of entity that is responsible for the blocked account | — |
+| `parentAccountId` | string uuid | yes | | Unique identifier (UUID) of the parent Account. Only present for child (e.g. non-AUD FX) accounts. | — |
+| `customData` | object | yes | required key | Contains custom metadata stored with the Account | `{"key":"value"}` |
+| `totalBalance` | number | — | | Total value of all funds on the Account (this amount will also include unused overdraft limit and Stacks, held and locked value). | `0` |
+| `availableBalance` | number | — | | Total balance available for use on Account. Funds that are held, locked and allocated to a Stack will not be available. | `0` |
+| `heldBalance` | number | — | "Positive value" | Total value of all authorised but not yet cleared transactions for all Cards on Account | `0` |
+| `lockedBalance` | number | — | "Positive value" | The value that has been locked and unavailable for use, typically as a result of an operations team action | `0` |
+| `stacksBalance` | number | — | "Positive value" | Total value current held against any Stack(s) on the Account | `0` |
+| `overdraftLimit` | number | — | "Positive value" | Total value of the overdraft limit applied to Account | `0` |
+| `overdraftBalance` | number | — | "Positive value" | Total value of overdraft used where an overdraft limit exists on the Account | `0` |
+| `technicalOverdraftBalance` | number | — | | Total value that is in a negative position beyond the total deposits / overdraft limit on the Account | `0` |
+| `homeCurrencyBalanceEquivalent` | `HomeCurrencyBalanceEquivalent` | — | | Account balances expressed in the client's home currency | — (absent in sample) |
+| `creationDateTimeUtc` | string date-time | — | | DateTime in UTC format when the Account was created | `2024-03-12T23:54:30.491966Z` |
+| `closedDateTimeUtc` | string date-time | — | | DateTime in UTC format when the Account was closed | — |
+
+`HomeCurrencyBalanceEquivalent` = `{ currency: ISO-4217 enum ("Home currency code"), totalBalance: number, availableBalance: number, heldBalance: number }` — same semantics as the account fields, "expressed in the client's home currency" [spec]. [inferred] populated for FX child accounts (converted at cached rate) and equal to the native balances for the AUD parent.
+
+Fields not on `HayAccount` but managed by this tag: risk level (`RiskLevelResponse`), CoP opt-out flag, account-level limits (`ExternalLimitAmounts[]`), rules (`ExternalTransactionRuleResponse[]`). Fields the docs mention with no API surface: overdraft expiry date [docs:account-status].
+
+Created by: `createAccount` (also Customers API `createHayAccount`, Groups API `createHayAccountForGroup` → `HayJointAccount.hayAccount` is a `HayAccount`). Read by: `getHayAccount`, `searchAccounts`, Customers API `getAccountsForCustomerId`. Updated by: `blockAccount` (status, blockedBy), `unblockAccount` (status), `closeAccount` (status, closedDateTimeUtc), `updateOverdraftLimit` (overdraftLimit), `createAccountCustomData` / `deleteAccountCustomData` (customData), transactions/holds/stacks domains (all balance fields, status APPROVED→ACTIVE, ACTIVE↔ACTIVE_IN_ARREARS).
+
+### RiskLevelResponse [spec]
+`{ accountId: uuid, riskLevel: string }` — values `LOW` | `HIGH` by description only (no enum). Created implicitly with the account (default `HIGH` [docs:accounts-overview]); read by `getAccountRiskLevel`; updated by `changeAccountRiskLevel`.
+
+### ExternalLimitAmounts [spec]
+`{ type: LimitType, accountLimit: number, productLimit: number, effectiveLimit: number }`. `LimitType` (16): `MAX_BALANCE`, `MIN_BALANCE`, `TOTAL_SPEND_PER_YEAR`, `ATM_WITHDRAWAL_PER_DAY`, `TOP_UP_PER_DAY`, `CARD_TOP_UP_PER_DAY`, `BPAY_TOP_UP_PER_DAY`, `BANK_TRANSFER_TOP_UP_PER_DAY`, `PAYMENT_TO_ACCOUNT_NUMBER`, `PAYMENT_TO_PAY_ID`, `CARD_PAYMENTS_DAILY`, `SINGLE_CARD_TRANSACTION`, `MIN_STACK_BALANCE`, `DIRECT_DEBIT_PER_DAY`, `OVERDRAFT_PRODUCT_LIMIT`, `BPAY_DAILY_LIMIT`. Read by `getAccountLimits`; `accountLimit` written by `setAccountLimit` (11 settable types) and `updateMaxBalanceLimit` (`MAX_BALANCE`, [inferred]); cleared by `deleteAccountLimit`; `productLimit` is product configuration (agreed with Shaype, not client-settable) [docs:account-limits].
+
+### ExternalTransactionRuleResponse ("Details of the transaction rule") [spec]
+`{ id: uuid, name: string, ruleType: MERCHANT_CODE_BLOCK | MERCHANT_ID_BLOCK | MERCHANT_NAME_BLOCK, rule: object (opaque), ownerId: string, disabled: boolean, expiresAtUtc: date-time }`. Request-side `RuleDetails` = `{ blockedMerchantCategoryCodes: int32[] unique, blockedMerchantIds: string[] unique (≤15 alphanumeric each), blockedMerchantName: string, merchantNameMatchingOperator: CONTAINS | ENDS_WITH | EXACT | STARTS_WITH }`. Created by `addAccountRule`; read by `getAccountRules`, `getAccountRuleById`; `disabled` set by `disableRule`. Webhook example `ruleDetails: { ruleId: "f305cbfa-63db-4083-8819-24daac61fbf7" }` [docs:account-rules].
+
+### AuthorisationHold ("Details of an authorisation hold") [spec]
+Fields listed under getPendingHolds. `transactionChannel` enum (62, verbatim): `HAY_TO_HAY_TRANSFER_IN`, `HAY_TO_HAY_TRANSFER_OUT`, `HAAS_TRANSFER_EXTERNAL_IN`, `HAAS_TRANSFER_EXTERNAL_OUT`, `HAAS_TRANSFER_INTERNAL_IN`, `HAAS_TRANSFER_INTERNAL_OUT`, `CURRENCY_CLOUD_CLIENT_CONVERSION_IN`, `CURRENCY_CLOUD_CLIENT_CONVERSION_OUT`, `CURRENCY_CLOUD_CARD_CONVERSION_IN`, `CURRENCY_CLOUD_CARD_CONVERSION_OUT`, `VISA_CARD_NOT_PRESENT`, `VISA_CARD_NOT_PRESENT_INTERNATIONAL`, `VISA_CARD_PRESENT`, `VISA_CARD_PRESENT_INTERNATIONAL`, `VISA_REFUND_DOMESTIC`, `VISA_REFUND_INTERNATIONAL`, `VISA_OCT_DOMESTIC`, `VISA_OCT_INTERNATIONAL`, `VISA_CONTACTLESS`, `VISA_CONTACTLESS_INTERNATIONAL`, `VISA_ATM`, `VISA_ATM_INTERNATIONAL`, `VISA_OTHER`, `APPLE_PAY_CARD_NOT_PRESENT`, `APPLE_PAY_CARD_NOT_PRESENT_INTERNATIONAL`, `APPLE_PAY_CARD_PRESENT`, `APPLE_PAY_CARD_PRESENT_INTERNATIONAL`, `GOOGLE_PAY_CARD_NOT_PRESENT`, `GOOGLE_PAY_CARD_NOT_PRESENT_INTERNATIONAL`, `GOOGLE_PAY_CARD_PRESENT`, `GOOGLE_PAY_CARD_PRESENT_INTERNATIONAL`, `CUSCAL_DE_DEBIT_IN`, `CUSCAL_DE_DEBIT_OUT`, `CUSCAL_DE_CREDIT_IN`, `CUSCAL_DE_CREDIT_OUT`, `DE_DEBIT_RETURN_IN`, `CUSCAL_RTGS_TRANSFER_IN`, `CUSCAL_NPP_TRANSFER_IN`, `CUSCAL_NPP_TRANSFER_OUT`, `NPP_RETURN_IN`, `CUSCAL_BPAY_TRANSFER_IN`, `CUSCAL_BPAY_TRANSFER_OUT`, `BPAY_IN_REJECT`, `MANUAL_ADJUSTMENT`, `VALUE_TRANSFER`, `APPLE_REWARD`, `ACCOUNT_ADJUSTMENT`, `INTEREST_ADJUSTMENT`, `LOAN_ADJUSTMENT`, `LOAN_REPAYMENT`, `SERVICE_FEE`, `VISA_LEGACY`, `VISA_REFUNDS_LEGACY`, `FAT_ZEBRA_TRANSFER_IN`, `CARD_REFUNDS`, `CUSCAL_LEGACY`, `CUSCAL_DE_TRANSFER_IN`, `CUSCAL_DE_TRANSFER_OUT`, `CUSCAL_NPP_SOLICITED_RETURN`, `CUSCAL_DE_TRANSFER_OUT_RETURN`, `NPP_RETURN_OUT`, `HAY_CREDIT`. (The property description documents only the `*_DOMESTIC`/`*_INTERNATIONAL` VISA/Apple/Google names, several of which — e.g. `VISA_CARD_NOT_PRESENT_DOMESTIC` — are **not** in the enum; the enum is authoritative.) Read by `getPendingHolds`; created/updated by the cards/transactions domain and, in external-auth mode, by Shaype calling the client's `POST /holds` / `PATCH /holds/{holdId}` [ext-auth-spec].
+
+### HayCard [spec] — read by `getCardsForAccountId`; owned by the cards domain. `cardStatus` enum: `ACTIVE`, `AWAITING_ACTIVATION`, `BLOCKED`, `INACTIVE`, `EXPIRED`. Closing an account sets linked cards to `INACTIVE` [docs:account-closure].
+
+### Request/response DTOs (no persistent identity)
+`BlockAccountRequestBody`, `BlockAccountResponse`, `UnblockAccountRequestBody`, `CloseAccountRequestBody`, `CloseAccountResponse`, `ClosureCheckerError`, `UpdateOptOutRequestBody`, `UpdateMaxBalanceLimitRequestBody`, `UpdateOverdraftLimitRequestBody`, `ChangeHayAccountRiskLevelRequestBody`, `CreateAccountRequestBody` (+ `AccountFxDataRequest`, `ChildAccountsDataRequest`, `FxComplianceDataRequest`), `SearchAccountsRequestBody`, `CreateAccountCustomDataRequestBody`, `ExternalSetAccountLimitRequestBody`, `ExternalSetAccountLimitResponse`, `DeleteAccountLimitResponse`, `ExternalAddTransactionRuleRequest`, `DisableRuleResponse`, `TransferOutRequestBody` (+ `AccountTransfer`, `InternalTransfer`, `PayIdTransfer`), `TransactionOutcome`, `GenericMessage`, `ErrorResponse`, `CurrencyAmount` — all fully expanded in section 1.
+
+### Webhook DTOs touching accounts [webhook-spec]
+- Envelope `NotificationDto` (required `customerHayId`, `idempotencyKey`, `type`): `type` enum `ACCOUNT_STATUS_CHANGE`, `CUSTOMER_STATUS_UPDATED`, `CARD_ADDED_TO_WALLET`, `CARD_STATUS_CHANGE`, `CUSTOMER_DETAILS_CHANGE`, `ONBOARDING_PASSED`, `ONBOARDING_FAILED`, `REMINDER`, `SCHEDULED_PAYMENT`, `TRANSACTION`, `DIRECT_ENTRY`, `MANDATE`, `MANDATE_DUE_PAYMENT`, `MANDATE_PAYMENT`, `APPLE_PAY_REWARD_FOR_CUSTOMER`, `MANDATE_ACTION_EXPIRATION`, `DELEGATED_OTP_NOTIFICATION`; plus `actionOwner` enum `CLIENT` | `PLATFORM`, `productId`, `cardHayId` nullable, `firebaseDeviceToken`, and one event sub-object per type. Delivered to client `POST /api/hay/v0/communications/notification`; retried 18 times over up to 48 h with exponential backoff on 401/403/429/5XX [docs:webhook-notification].
+- `AccountStatusChangeEventDto` (`accountStatusChangeEvent`): `{ accountHayId: uuid, accountStatus: ACTIVE | BLOCKED | PENDING_APPROVAL | APPROVED | DORMANT | CLOSED | ACTIVE_IN_ARREARS }` — note `BLOCKED` here vs `LOCKED` on `HayAccount.status`; no `LOCKED` value in the webhook enum.
+- `CustomerStatusUpdatedEventDto`: `{ customerStatus: ACTIVE | INACTIVE | REJECTED | BLOCKED | PENDING_APPROVAL | REFERRED }`.
+- `CardStatusChangeEventDto`: `{ cardHayId, accountHayId, cardStatus: ACTIVE | BLOCKED | EXPIRED | INACTIVE | AWAITING_ACTIVATION, cardLastFourDigits }`.
+- `AccountBalancesDto` (inside `transactionEvent.accountBalances`): `{ totalBalance, heldBalance, lockedBalance, stacksBalance, availableBalance }` each `CurrencyAmount`.
+
+### External-authorisation view of an account [ext-auth-spec] (Shaype → client, only when the client holds balances)
+`Account` = `{ id: uuid, balance: CurrencyAmount ("Balance of the Account immediately before this transaction was applied. Money held in stacks is not included"), holder: { id: uuid, type: CUSTOMER | GROUP }, statistics: { txn_count_last_10m: int32, txn_sum_last_24h: CurrencyAmount } }`, nullable. Client answers 200 or **470** with `Response = { errorCode: REFUSED_MAX_BALANCE_EXCEEDED | REFUSED_NOT_ENOUGH_FUNDS | REFUSED_SENDER_ACCOUNT_NOT_VERIFIED, reason: string }`; anything else → outcome `INTERNAL_ERROR`; timeouts 1.2 s (card) / 10 s (non-scheme) [docs:external-authorisation-and-balance]. Not needed for the local re-implementation unless external-balance mode is simulated.
+
+## 3. State machines
+
+### Account status (`HayAccount.status`) [spec enum; transitions from docs]
+
+Values (spec descriptions): `PENDING_APPROVAL` "Account is created but not yet approved (Note: Accounts created through this API are automatically set as APPROVED)"; `APPROVED` "Account is approved and ready for use"; `ACTIVE` "Account is approved and has had a transactional action performed on it"; `LOCKED` "Account is blocked"; `DORMANT` "Account is dormant due to inactivity on Account for a specific period of time"; `CLOSED` "Account is closed"; `ACTIVE_IN_ARREARS` "Account balance is in a negative position beyond the total deposits / overdraft limit on the Account".
+
+| from | to | via | source |
+|---|---|---|---|
+| (none) | `APPROVED` | `createAccount` | [spec] status description ("automatically set as APPROVED") — docs sample shows `PENDING_APPROVAL` [docs:sample-requests-responses]; conflict noted in section 7 |
+| (none) | `PENDING_APPROVAL` | account creation outside this API / per docs sample | [docs:sample-requests-responses]; no API transitions it to APPROVED |
+| `PENDING_APPROVAL` | `APPROVED` | platform approval (no client operation) | [inferred from enum descriptions] |
+| `APPROVED` | `ACTIVE` | first deposit, withdrawal or transfer on the account ("Once deposit or withdrawal happens account automatically changes status to Active") | [docs:account-status] |
+| `ACTIVE` | `ACTIVE_IN_ARREARS` | overdraft: negative balance after overdraft expiry date, `updateOverdraftLimit` decreasing the limit below the current negative balance, or technical overdraft (overdrawn with no overdraft set) | [docs:account-status] |
+| `ACTIVE_IN_ARREARS` | `ACTIVE` | deposit that covers the overdraft balance | [docs:account-status] |
+| `APPROVED` / `ACTIVE` / `ACTIVE_IN_ARREARS` | `LOCKED` | `blockAccount` (client) or platform block ("Blocked by Shaype or the Client") | [docs:accounts-overview, docs:account-status]; which source statuses are blockable is [inferred] |
+| `LOCKED` | `ACTIVE` | `unblockAccount` ("will become ACTIVE") | [docs:accounts-overview] |
+| `ACTIVE` | `DORMANT` | platform inactivity timer ("for a specific period of time") — no API, period unspecified | [spec enum description] |
+| `DORMANT` | `ACTIVE` | presumably a transaction — not documented | [inferred] |
+| any non-`CLOSED` (validation passing) | `CLOSED` | `closeAccount` | [docs:account-closure] |
+| `CLOSED` | — | terminal: "CLOSED is a final status and there is no way to re-activate a closed account" | [docs:account-status] |
+
+Terminal: `CLOSED`. Blocking from `LOCKED` is a no-op success (idempotent) [spec]. Blocking a `CLOSED` account: it "ends … closed" so counts as success within a hierarchy [spec].
+
+### Webhook `accountStatus` (`AccountStatusChangeEventDto`) [webhook-spec]
+`ACTIVE`, `BLOCKED`, `PENDING_APPROVAL`, `APPROVED`, `DORMANT`, `CLOSED`, `ACTIVE_IN_ARREARS` — same machine, with `LOCKED` rendered as `BLOCKED`. Implementer must map `LOCKED → BLOCKED` when emitting.
+
+### Risk level [docs:account-limits]
+| from | to | via |
+|---|---|---|
+| (none) | `HIGH` | `createAccount` (default) [docs:accounts-overview] |
+| `HIGH` | `LOW` | `changeAccountRiskLevel { level: LOW }` |
+| `LOW` | `HIGH` | `changeAccountRiskLevel { level: HIGH }` |
+No terminal state. Same-value set is [inferred] a success.
+
+### Rule lifecycle [spec + inferred]
+| from | to | via |
+|---|---|---|
+| (none) | enabled (`disabled: false`) | `addAccountRule` |
+| enabled | `disabled: true` | `disableRule` |
+| enabled | expired (`expiresAtUtc` passed) | time (`expiresIn`) |
+Whether expired rules are reported as `disabled: true` is [open].
+
+### Account-level limit [docs:account-limits]
+| from | to | via |
+|---|---|---|
+| none (effective = product) | set (effective = account) | `setAccountLimit` / `updateMaxBalanceLimit` |
+| set | set (new value) | `setAccountLimit` |
+| set | none (effective = product) | `deleteAccountLimit` |
+
+### Customer status changes caused by this domain [docs:account-closure, docs:customer-status-flow, spec]
+| from | to | via |
+|---|---|---|
+| `ACTIVE` | `BLOCKED` | `blockAccount` with `accountBlockStyle` absent or `ACCOUNT_AND_CUSTOMER` [spec] |
+| `ACTIVE` (or `BLOCKED`) | `INACTIVE` | `closeAccount` when it closes the customer's last non-CLOSED account (async) [docs:account-closure] |
+`INACTIVE` customers must re-onboard as a new customer record; duplicate checks ignore `INACTIVE` records unless the closure `reason` was `SUSPICIOUS` or `DECEASED` [docs:account-closure]. `unblockAccount` → customer `ACTIVE`: not documented [open].
+
+### Card status changes caused by this domain
+| from | to | via |
+|---|---|---|
+| any | `INACTIVE` | `closeAccount` (async, all linked cards; processor status "voided") [docs:account-closure] |
+`blockAccount` does **not** change card status per any source; `LOCKED` blocks transactions at the account level [docs:account-status].
