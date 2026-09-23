@@ -91,7 +91,7 @@ Ops with a non-boilerplate 422 description but still `ErrorResponse`: `createHay
 }
 ```
 
-- The reference pages under `developer.shaype.com/reference/*` only repeat the `ErrorResponse` schema. `[docs]`
+- The per-operation reference pages embed only that operation's slice of the OpenAPI document (same `ErrorResponse` schema and, where present, the same 422 `examples`) with no additional prose or error samples — checked on `createhayaccount`, `verifybranchidentifier`, `getallcustomers`. `[docs:reference/createhayaccount]` `[docs:reference/verifybranchidentifier]` `[docs:reference/getallcustomers]`
 - The **one real error body** in the fetched docs, from the PayTo staging test suite (a `createMandate` rejection): `[docs:payto-staging-testing-suite]`
 
 ```json
@@ -103,7 +103,7 @@ Ops with a non-boilerplate 422 description but still `ErrorResponse`: `createHay
 }
 ```
 
-What the four samples (3 spec + 1 docs) establish: `status` is the numeric HTTP code **as a string** (`"422"` in all four); `traceId` is a UUID; `details` is the same constant sentence in all four ("Please refer to the API documentation or contact Shaype for more info with the traceId."); `message` is free text. Three of four start with a `<REASON_CODE>: ` prefix (`NOT_FOUND:`, `PERMISSION_DENIED:` ×2) but the `verifyBranchIdentifier` sample does **not** (`branchIdentifier format is not correct.`), so the prefix is not universal. All four are 422s — nothing shows a 400/403/500 body. `[spec]+[docs]`
+What the four samples (3 spec + 1 docs) establish: `status` is the numeric HTTP code **as a string** (`"422"` in all four); `traceId` is a UUID; `details` is the same constant sentence in all four ("Please refer to the API documentation or contact Shaype for more info with the traceId."); `message` is free text. Three of four start with a `<REASON_CODE>: ` prefix (`NOT_FOUND:`, `PERMISSION_DENIED:` ×2) but the `verifyBranchIdentifier` sample does **not** (`branchIdentifier format is not correct.`), so the prefix is not universal. All four are 422s — nothing shows a 400/403/500 body. `[spec]+[docs:payto-staging-testing-suite]`
 
 ### 1.5 What is unknown about errors
 
@@ -166,7 +166,7 @@ There is **no single pagination convention**. Five query-param families exist, a
 
 ### 3.1 Family A — `offset` / `limit` (12 ops) `[spec]`
 
-Two sub-flavours; the response is always a **bare JSON array** of the entity, with no count or wrapper.
+Two sub-flavours; the response is a **bare JSON array** of the entity, with no count or wrapper, on 11 of the 12 ops — the exception is `retrieveBillers` (see its row).
 
 | Op | Route | Params (verbatim schema + description) |
 |---|---|---|
@@ -176,7 +176,7 @@ Two sub-flavours; the response is always a **bare JSON array** of the entity, wi
 | `searchCustomers` | `POST /v0/customers/search` | `limit`: req=true, integer/int32 — "List fetch limit, value between 1 and 1000"<br>`offset`: req=true, integer/int32 — "Offset used for paging results" |
 | `getDirectDebitsV0` | `GET /v0/direct-debits` | `offset`: req=true, integer/int32 — "Offset used for paging results"<br>`limit`: req=true, integer/int32 — "List fetch limit, value between 1 and 1000" |
 | `searchTransactions` | `POST /v0/transactions/search` | `limit`: req=true, integer/int32 — "List fetch limit, value between 1 and 1000"<br>`offset`: req=true, integer/int32 — "Offset used for paging results" |
-| `retrieveBillers` | `GET /v1/accounts/{accountId}/bpay-billers` | `limit`: req=true, integer/int32 — ""<br>`offset`: req=true, integer/int32 — "" |
+| `retrieveBillers` | `GET /v1/accounts/{accountId}/bpay-billers` | `limit`: req=true, integer/int32 — ""<br>`offset`: req=true, integer/int32 — ""<br>200 → single `BPayBillerResponse` object despite limit/offset `[spec]` (almost certainly a generator artefact — implementer must decide whether to serve the declared object or an array) `[inferred]` |
 | `getDirectDebitsV1` | `GET /v1/direct-debits` | `offset`: req=true, integer/int32 — "Offset used for paging results"<br>`limit`: req=true, integer/int32 — "List fetch limit, value between 1 and 1000" |
 | `getCountries` | `GET /v1/perks/countries` | `limit`: req=false, integer/int32, default 20, min 1, max 100 — "Maximum results to return (page size); defaults to 20, max 100"<br>`offset`: req=false, integer/int32, default 0, min 0 — "Number of results to skip; defaults to 0" |
 | `getOperators` | `GET /v1/perks/operators` | `limit`: req=false, integer/int32, default 20, min 1, max 100 — "Maximum results to return (page size); defaults to 20, max 100"<br>`offset`: req=false, integer/int32, default 0, min 0 — "Number of results to skip; defaults to 0" |
@@ -221,7 +221,7 @@ Semantics (verbatim): `from` — "If omitted, then this time defaults to the mom
 
 ### 3.7 Ops returning bare arrays (28) `[spec]`
 
-All list/search endpoints return `type: array` at the top level, never an envelope: getCardsForAccountId, getPendingHolds, getScheduledPayments, getAllStacks, getAllStackTransactions, getTransactionsForStack, getAllCustomers, searchCustomers, getAccountsForCustomerId, getCardsForCustomerId, getDirectDebitsV0, getAllMerchantCategoryCodes, getPayIdDeregisterHistory, searchTransactions, searchAccounts, getAccountLimits, getPayIdsForAccount, getAccountRules, getDirectDebitsV1, searchConversions, getClientLiquidityThresholds, getMandateIdsByInitiator (array of uuid strings), getCountries, getOperators, lookupOperators, getOrders, getProducts, getAllProducts.
+These 28 ops return a top-level `type: array`. The wrapped exceptions are `getMandates` (`GetMandatesResponseBody`, §3.2), `searchPaymentsInstructions` (`PaymentInstructionsSummaryResponseBody`, §8) and `retrieveBillers` (single `BPayBillerResponse`, §3.1). `[spec]` The 28: getCardsForAccountId, getPendingHolds, getScheduledPayments, getAllStacks, getAllStackTransactions, getTransactionsForStack, getAllCustomers, searchCustomers, getAccountsForCustomerId, getCardsForCustomerId, getDirectDebitsV0, getAllMerchantCategoryCodes, getPayIdDeregisterHistory, searchTransactions, searchAccounts, getAccountLimits, getPayIdsForAccount, getAccountRules, getDirectDebitsV1, searchConversions, getClientLiquidityThresholds, getMandateIdsByInitiator (array of uuid strings), getCountries, getOperators, lookupOperators, getOrders, getProducts, getAllProducts.
 
 ---
 
@@ -265,7 +265,10 @@ Implementer default `[inferred]`: generate v4 UUIDs; accept any RFC-4122 string 
 | `accountNumber` | CreateAccountRequestBody | `string`, `pattern: ^[1-9][0-9]{7,8}$`, "Account number, 8-9 digits in length", nullable (client-chosen number) |
 | `accountNumber` | PayTo: CreateDebtorDetailsDto (`minLength 11 / maxLength 15`, no pattern; CreateCreditorDetailsDto has no `accountNumber` — it uses `accountId`); the six GetMandateActionsDetails{Creation,Amendment,Porting}{Creditor,Debtor}InformationDto (`pattern: ^[ -~]{11,15}$`); GetMandateDebtorDetailsDto (unconstrained `string`) | all three shapes share the description "BSB (Bank State Branch) of Account, 6 digits in length combined with account number, 5-9 digits in length." — **BSB+account concatenated** |
 | `branchNumber` + `accountNumber` | BasicAccountNumber, PayIdAccountDetails | `branchNumber` "BSB (Bank State Branch) of Account, 6 digits in length" |
-| `senderBsb`/`recipientBsb`, `senderAccountNumber`/`recipientAccountNumber` | Direct-debit / DE schemas | `\d{6}` and `\d{5,9}` (utility mocks: `[0-9]{6}`, `[0-9]{6,9}`, `[0-9]{8}`) |
+| `senderBsb`/`recipientBsb`, `senderAccountNumber`/`recipientAccountNumber` | CreateDirectDebitRequestBody, GenerateInboundDeRequestBody (requests) | `string`, `pattern: \d{6}` (BSBs) / `\d{5,9}` (account numbers) |
+| `senderBsb`/`recipientBsb`, `senderAccountNumber`/`recipientAccountNumber` | DeTransactionDetails, DeTransactionDetailsV1 (responses) | `string`, **no pattern** — description only ("… 6 digits in length" / "… 5-9 digits in length") |
+| `senderBsb`/`receiverBsb`, `senderAccountNumber`, `receiverAccountNumber` | GenerateInboundNppTransactionRequestBody (utility mock) | `senderBsb`/`receiverBsb` `pattern: [0-9]{6}`; `senderAccountNumber` `[0-9]{6,9}`; `receiverAccountNumber` `[0-9]{8}` (note `receiver*`, not `recipient*`) |
+| `accountNumber` | PartyIdentifier (perks) | `string`, "Account number" — unconstrained |
 | path `{bsbNumber}`, `{branchIdentifier}` | NPP eligibility | `pattern: ^\d{6}$` |
 
 Docs example `[docs:sample-requests-responses]`: `"accountNumber": "66090672"`, `"bsb": "636220"`. Spec examples: `senderBsb "302227"`, `senderAccountNumber "112836327"`, `recipientAccountNumber "522843"`, `recipientBsb "35022223"` (sic — 8 digits, contradicts its own `\d{6}` pattern). `[spec]`
@@ -305,9 +308,9 @@ Three distinct enums exist — do not conflate them:
 
 ### 5.3 Dates and times `[spec]`
 
-- **Timestamps**: `type: string, format: date-time`, field names end in `Utc` — `creationDateTimeUtc`, `lastUpdatedDateTimeUtc`, `closedDateTimeUtc`, `approvedDateTimeUtc`, `issuedDateTimeUtc`, `voidDateTimeUtc`, `transactionTimeUtc`, `clearingTimeUtc`, `expiresAtUtc`, `createdAtUtc`, `closedAtUtc`, `registrationDateTimeUtc`, `lastResolutionDateTimeUtc`, `lastProcessedDateTimeUtc`, `fromDateTimeUtc`/`toDateTimeUtc`. Description boilerplate "DateTime in UTC format when …". Docs render them with **microseconds and `Z`**: `"creationDateTimeUtc": "2024-03-12T22:59:48.357089Z"`; the create-case sample uses millis: `"timestamp": "2024-03-12T23:00:17.559Z"`. `[docs:sample-requests-responses]`
+- **Timestamps**: `type: string, format: date-time`, field names end in `Utc` — `creationDateTimeUtc`, `lastUpdatedDateTimeUtc`, `closedDateTimeUtc`, `approvedDateTimeUtc`, `issuedDateTimeUtc`, `voidDateTimeUtc`, `transactionTimeUtc`, `clearingTimeUtc`, `expiresAtUtc`, `createdAtUtc`, `closedAtUtc`, `registrationDateTimeUtc`, `lastResolutionDateTimeUtc`, `lastProcessedDateTimeUtc`, `fromDateTimeUtc`/`toDateTimeUtc`, `conversionTimestampUtc`/`quoteTimestampUtc` (ConversionDetailsResponse), `lastRefreshedAtUtc` (FxRateEntry) — this is the complete set of `*Utc` `date-time` property names. Description boilerplate "DateTime in UTC format when …". Docs render them with **microseconds and `Z`**: `"creationDateTimeUtc": "2024-03-12T22:59:48.357089Z"`; the create-case sample uses millis: `"timestamp": "2024-03-12T23:00:17.559Z"`. `[docs:sample-requests-responses]`
 - Exceptions without the suffix — `format: date-time`: `PaymentInstruction.creationDateTime`, `UserConsentRequestBody.consentObtainedAt`, `ApiDigitalWallet.createdAt`, `ExternalCase.timestamp`, `GetMandateResponseBody.registrationDateTime`, `LiquidityConversion.{conversionDate, createdAt, depositRequiredAt, settlementDate, updatedAt}`, `LiquidityDetailedRate.settlementCutOffTime` (these eleven are the complete set of un-suffixed `date-time` properties). Not `date-time` at all: perks `createdAt`/`confirmedAt`/`dueDate` (plain string "ISO 8601"), PayTo action `time` (regex-constrained `…Z`, "UTC expressed without offset"), `OemProvisioningData.expiryDate` (plain string), and `accessExpiresUtc`, which is an **`integer int64`** (epoch — units not stated).
-- **Dates**: `format: date` (`YYYY-MM-DD`) — `dateOfBirth`, `identityDocumentExpiry` (ex `2030-06-15`), card `expiryDate` (`format: date` on HayCard — "Expiry date of the Card (date of the last day of the expiry month and year)" — and on ChangeCardExpiryDateRequestBody, ex `2027-09-30`; a plain `string` only on OemProvisioningData), `processingDate`, `startDate`/`endDate`, `validityStartDate`/`validityEndDate` (PayTo DTOs use a leap-year-aware regex instead; end-date semantics "valid until 23:59:59.999 Australia Sydney time"), query `fromUtc`/`toUtc`/`date`/`conversionDate`.
+- **Dates**: `format: date` (`YYYY-MM-DD`) — `dateOfBirth`, `identityDocumentExpiry` (ex `2030-06-15`), card `expiryDate` (`format: date` on HayCard — "Expiry date of the Card (date of the last day of the expiry month and year)" — and on ChangeCardExpiryDateRequestBody, ex `2027-09-30`; a plain `string` only on OemProvisioningData), `processingDate`, `startDate`/`endDate`, `validityStartDate`/`validityEndDate` (PayTo DTOs use a leap-year-aware regex instead; end-date semantics "valid until 23:59:59.999 Australia Sydney time"), `ClientLiquidity.date` (no description), `PaymentDto.date` ("The date of the payment."), `ApiDigitalWallet.expiresAt` — **`format: date` although described as "DateTime in UTC format when the wallet will expire (card expiry date)"; implementer trap** — and query `fromUtc`/`toUtc`/`date`/`conversionDate`. With these, the list covers every `format: date` property and query parameter in the spec.
 - Timezone: everything is UTC unless the field says otherwise (only the PayTo validity dates reference Australia/Sydney). `[spec]`
 
 ---
@@ -445,7 +448,7 @@ Unstated `[spec]`: combination semantics of multiple filters (AND is the only se
 | `createHayAccount` | `POST /v0/customers/{customerHayId}/account` | **unset (absent)** | Create Account for Customer - (To be DEPRECATED - Use POST /v1/accounts instead) | `createAccount` |
 | `createHayAccountForGroup` | `POST /v0/groups/{groupHayId}/account` | **unset (absent)** | Create Account for Group - (To be DEPRECATED - Use POST /v1/accounts instead) | `createAccount` |
 
-Field-level: `CreateHayCustomerRequestBody.journeyId` — "Deprecated: Please do not use this field for customer creation, please refer to identityVerificationCaseId". All six ops remain fully declared and must be served.
+Field-level: `CreateHayCustomerRequestBody.journeyId` — "Deprecated: Please do not use this field for customer creation, please refer to identityVerificationCaseId". `deprecated: true` is also set on `AccountTransfer.reference` and `PayIdTransfer.reference` (string 0–35, "Reference to be included with the transfer") and on `FinancialTransaction.counterpartName` ("Counterpart name"); none of their descriptions names a replacement. These four are the only schema properties flagged `deprecated`. `[spec]` All six ops remain fully declared and must be served.
 
 ---
 

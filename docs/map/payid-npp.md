@@ -6,11 +6,11 @@ Shared shapes used by every operation below [spec]:
 
 - `ErrorResponse` (all 400/403/422/500/501 responses): `{ details: string, message: string, status: string (HTTP status as a string, e.g. "422"), traceId: string }`. All fields optional in the spec.
 - `GenericMessage` (200 for the three mutating PayID ops): `{ message: string }` — "Message indicating operation result". No documented message text.
-- `payIdType` enum, verbatim and in spec order everywhere it appears: `["EMAIL","TELEPHONE","INDIVIDUAL_AUSTRALIAN_BUSINESS","ORGANISATION"]`.
+- `payIdType` enum, verbatim and in spec order everywhere it appears: `["EMAIL","TELEPHONE","INDIVIDUAL_AUSTRALIAN_BUSINESS","ORGANISATION"]`. Spec value descriptions (present on all 8 occurrences: the 3 query parameters and the 5 schema properties) — EMAIL: Email Address; INDIVIDUAL_AUSTRALIAN_BUSINESS: Australian business identifier; ORGANISATION: Organisation identifier; TELEPHONE: Telephone number [spec]. The description text lists them in that alphabetical order, whereas the enum array order is EMAIL, TELEPHONE, INDIVIDUAL_AUSTRALIAN_BUSINESS, ORGANISATION [spec].
 - `reason` enum, verbatim and in spec order: `["FROD","CUST","DECD","LEGL","PART"]` — CUST: Customer initiated, DECD: Customer deceased, FROD: Fraud suspected, LEGL: Legal reasons, PART: NPP participant initiated.
 - PayID `status` / `payIdStatus` enum, verbatim and in spec order: `["ACTIVE","DEREGISTERED","DISABLED","PORTABLE"]`.
-- Every op declares responses 200, 400 "Bad Request", 403 "Forbidden", 422 "Unprocessable Content", 500 "Internal Server Error", 501 "Not Implemented" [spec]. No 404 and no 409 is declared on any op in this domain [spec]. No op has a `description`, `deprecated` flag, or `security` block [spec]; no header parameters are declared [spec].
-- Staging-only: the docs describe a `callFlags: BSB=<6 digits>` request header used by the mock PayID service to decide which BSB "owns" the PayID; when absent, the client's own assigned BSB is used [docs:payid]. Not in the spec.
+- The 8 PayID ops declare responses 200 "Success", 400 "Bad Request", 403 "Forbidden", 422 "Unprocessable Content", 500 "Internal Server Error", 501 "Not Implemented" [spec]. verifyBranchIdentifier differs: 200 "Branch Identifier eligibility check completed", 422 "Branch Identifier format is invalid" (documented example, see its heading); its 400/403/500/501 descriptions are the same generic ones [spec]. No 404 and no 409 is declared on any op in this domain [spec]. No op has a `description`, `deprecated` flag, or `security` block [spec]; no header parameters are declared [spec].
+- Staging-only: the docs describe a request header with format `callFlags: BSB=BSBValue` (docs example `callFlags: BSB=123456`) [docs:payid]; that the value is a 6-digit BSB is [inferred]. "The BSB value is used internally by our mock service to resolve the PayID details. If the `callFlags` header is not provided with a BSB value, the platform will use the BSB assigned to you" and "use your BSB to test a successful scenario, or use a different BSB to test a failure scenario" [docs:payid]. That the mock decides which BSB "owns" the PayID by comparing the PayID's BSB with the `callFlags` BSB is [inferred]. Not in the spec.
 
 ## 1. Operations
 
@@ -26,7 +26,7 @@ Shared shapes used by every operation below [spec]:
   - `payIdDetails: PayIdDetailsResponse` → `{ lastResolutionDateTimeUtc: date-time, lastUpdatedDateTimeUtc: date-time, payIdName: string, payIdType: enum, payIdValue: string, reason: enum, registrationDateTimeUtc: date-time, status: enum }`
   - 400/403/422/500/501 → `ErrorResponse`.
 - Behaviour:
-  - Ownership check: "you can only retrieve details of PayID's if the account belongs to you. You will not get the details of PayID registered externally" and "you can only retrieve the status and statusDetails of PayID's registered by you" [docs:payid]. On staging the ownership check compares the PayID's BSB with the `callFlags` BSB (or the client's BSB) [docs:payid]. Which HTTP status is returned when the PayID is not owned is **not documented** — 403 is declared and is the natural fit, 422 is also declared [inferred].
+  - Ownership check: "you can only retrieve details of PayID's if the account belongs to you. You will not get the details of PayID registered externally" and "you can only retrieve the status and statusDetails of PayID's registered by you" [docs:payid]. `statusDetails` is a docs-only name — no such property exists in the spec; the nearest spec fields are `payIdDetails.status` and `payIdDetails.reason` [spec vs docs:payid; discrepancy]. On staging, "The BSB value is used internally by our mock service to resolve the PayID details" and "use your BSB to test a successful scenario, or use a different BSB to test a failure scenario" [docs:payid]; that the ownership check compares the PayID's BSB with the `callFlags` BSB (or the client's BSB) is [inferred]. Which HTTP status is returned when the PayID is not owned is **not documented** — 403 is declared and is the natural fit, 422 is also declared [inferred].
   - Read-only; no state change [inferred].
   - `payIdType` is required here but optional on `availability` and `resolve` — the tuple (payId value, payIdType) is the identity of a PayID [inferred from the spec's parameter shapes].
   - Idempotent (GET) [inferred].
@@ -49,7 +49,7 @@ Shared shapes used by every operation below [spec]:
   - No field is marked required [spec].
   - 400/403/422/500/501 → `ErrorResponse`.
 - Behaviour:
-  - "If it is not available for registration this indicates it is held against another account. The customer will need to contact the financial institution where the account that it's currently linked resides and either de-register or make portable the PayID to make it available for registration elsewhere" [docs:payid]. So `availability=false` while the PayID is ACTIVE or DISABLED at any FI; deregistering or making PORTABLE makes it available [docs:payid]; a DEREGISTERED PayID "can be re-registered again with the same or different account at any point" [docs:payid].
+  - "If it is not available for registration this indicates it is held against another account. The customer will need to contact the financial institution where the account that it's currently linked resides and either de-register or make portable the PayID to make it available for registration elsewhere" [docs:payid]. Deregistering or making PORTABLE makes it available [docs:payid]; a DEREGISTERED PayID "can be re-registered again with the same or different account at any point" [docs:payid]. That `availability=false` while the PayID is ACTIVE or DISABLED at any FI is [inferred] (consistent with the `availability` derivation in section 3).
   - Whether a PayID that has never been registered returns `availability=true` with the other fields absent/null is **not documented** [inferred: yes, since there is no record to describe].
   - No ownership check is described for this endpoint (it is a lookup against the NPP Addressing Service, which spans all FIs) [inferred from docs:payid "Check PayID Availability" text].
   - Read-only; idempotent [inferred].
@@ -174,7 +174,7 @@ Shared shapes used by every operation below [spec]:
 ### GET /v1/npp/eligibility/branch-identifiers/{branchIdentifier} (verifyBranchIdentifier)
 
 - Purpose: "Check if a Branch Identifier is eligible for NPP payments" [spec summary]; tag "NPP API" — "APIs for NPP related operations" [spec]. Not deprecated.
-- Params [spec]: `branchIdentifier` (path, string, required, pattern `^\d{6}$`, example `636636`) — "Target Branch Identifier" (a BSB).
+- Params [spec]: `branchIdentifier` (path, string, required, pattern `^\d{6}$`, example `636636` — given in the spec as a JSON number, not a string; do not copy the type into fixtures [spec]) — "Target Branch Identifier" (a BSB).
 - Request body: none.
 - Response 200 `NppEligibilityCheckResponse` [spec] — "Response Body of a NPP (New Payments Platform) eligibility check"; description "Branch Identifier eligibility check completed":
   - `enabled: boolean` — "Describes whether a NPP (New Payments Platform) is enabled for the subject of the request".
@@ -186,13 +186,13 @@ Shared shapes used by every operation below [spec]:
 - Responses 400/403/500/501 → `ErrorResponse` [spec].
 - Behaviour:
   - Validation: `branchIdentifier` must match `^\d{6}$`, otherwise 422 with the message above [spec].
-  - The answer is a property of the BSB (target FI branch) — the same signal the transfer engine uses: for `transferType` ACCOUNT, "the platform verifies whether the recipient account is enabled for NPP. If it is, the payment will be executed via NPP; otherwise, it will be executed via DE" [docs:payments]. A local implementation needs a BSB → NPP-enabled lookup table [inferred].
+  - For `transferType` ACCOUNT, "the platform verifies whether the recipient account is enabled for NPP. If it is, the payment will be executed via NPP; otherwise, it will be executed via DE" [docs:payments]. That this is the same BSB-level signal verifyBranchIdentifier exposes, and that a local implementation needs a BSB → NPP-enabled lookup table, is [inferred].
   - Read-only; idempotent [inferred]. No documented relation to the staging multi-BSB brand BSBs (636383/636385 → 636380, DE only) [docs:multi-bsb-routing].
 - Webhooks: none documented.
 
 ## 2. Entities and fields
 
-The spec has no `example` values on any PayID/NPP schema or property [spec]; examples below come from the docs pages or the spec's response examples where noted. The spec models the PayID as a set of response views over one underlying record; the fields are consolidated first, then each schema is listed verbatim.
+The spec has no `example` values on any PayID/NPP schema or property [spec] (the only parameter-level example is verifyBranchIdentifier's `branchIdentifier: 636636`, a JSON number); examples below come from the docs pages or the spec's response examples where noted. The spec models the PayID as a set of response views over one underlying record; the fields are consolidated first, then each schema is listed verbatim.
 
 ### PayID (underlying record; not a named spec schema)
 
@@ -253,9 +253,9 @@ required `["payIdStatus","payIdType"]`; `payIdStatus` enum `["ACTIVE","DEREGISTE
 `details` string; `message` string; `status` string; `traceId` string. Example (verifyBranchIdentifier 422) in section 6.
 
 ### Cross-domain shapes that reference PayID (owned by the transfers domain, listed for completeness)
-- `PayIdTransfer` [spec] — "Details of a transfer to Account using PayID": required `["payId","recipientName"]`; `payId` string minLength 1 ("PayID of Account receiving the transfer"); `recipientName` string 1–140; `reference` string 0–35 **deprecated**; `senderName` string 0–140. Referenced only by `TransferOutRequestBody.payIdTransfer` (used by makeTransferV0 `POST /v0/accounts/{accountId}/transfer` and makeTransferV1 `POST /v1/accounts/{accountId}/transfer`) with `transferType: "PAY_ID"` ("requires payIdTransfer object to be provided") [spec]. Note it carries no `payIdType` [spec].
+- `PayIdTransfer` [spec] — "Details of a transfer to Account using PayID": required `["payId","recipientName"]`; `payId` string minLength 1 ("PayID of Account receiving the transfer"); `recipientName` string 1–140; `reference` string 0–35 **deprecated**; `senderName` string 0–140. Referenced only by `TransferOutRequestBody.payIdTransfer` (used by makeTransferV0 `POST /v0/accounts/{accountId}/transfer` (**deprecated** in the spec, summary 'Initiate Cash Transfer (DEPRECATED)') and makeTransferV1 `POST /v1/accounts/{accountId}/transfer` [spec]) with `transferType: "PAY_ID"` ("requires payIdTransfer object to be provided") [spec]. Note it carries no `payIdType` [spec].
 - `NppLiquidity` [spec]: required `["inbound","outbound","total"]`, all `number`; referenced only by `NonSchemeLiquidity.npp` (liquidity/reporting domain).
-- `GenerateInboundNppTransactionRequestBody` [spec] (Utilities API `POST /v0/utils/generate-npp-inbound`, generateInboundNppTransaction): required amount (>0), description (minLength 1), idempotencyKey (uuid), receiverAccountNumber `[0-9]{8}`, receiverBsb `[0-9]{6}`, receiverName, senderAccountNumber `[0-9]{6,9}`, senderBsb `[0-9]{6}`, senderName; optional `reference`. v2 (`/v0/utils/generate-inbound-npp-transaction-v2`, generateInboundNppTransactionV2) takes `GenerateRapRequestBody`. Both return `GenericMessage`. Neither addresses by PayID [spec].
+- `GenerateInboundNppTransactionRequestBody` [spec] (Utilities API `POST /v0/utils/generate-npp-inbound`, generateInboundNppTransaction): required amount (>0), description (minLength 1), idempotencyKey (uuid), receiverAccountNumber `[0-9]{8}`, receiverBsb `[0-9]{6}`, receiverName, senderAccountNumber `[0-9]{6,9}`, senderBsb `[0-9]{6}`, senderName; optional `reference`. v2 (`/v0/utils/generate-inbound-npp-transaction-v2`, generateInboundNppTransactionV2) takes `GenerateRapRequestBody`. Both return `GenericMessage`. v1 (`GenerateInboundNppTransactionRequestBody`) addresses by BSB + account number only [spec]. v2 (`GenerateRapRequestBody`) addresses via `creditorInformation.accountIdentification` (string 0–34, "Creditor's account identifier i.e. BSB and Account number") + `accountIdentificationTypeCode` (string, minLength/maxLength 4, "Creditor's account's scheme", no enum); `debtorInformation` mirrors this ("Debtor account scheme.") [spec]; whether a PayID/alias scheme code is accepted is **not documented**.
 
 ## 3. State machines
 
@@ -296,26 +296,26 @@ Boolean per BSB; no transitions are exposed by the API [spec].
 - **Uniqueness**: "A single PayID can only be linked to one account at a time, it cannot be shared between financial institutions and cannot be registered to multiple accounts" [docs:payid]. Locally: at most one non-DEREGISTERED record per (`payIdValue`, `payIdType`) [inferred].
 - **Many PayIDs per account** are allowed [spec `payIdName` description].
 - **NPP-enabled accounts only**: "PayIDs can only be registered against accounts that are NPP enabled" [docs:payid]. No account-level NPP flag exists in the spec; the transfer engine treats NPP capability as a property of the BSB [docs:payments], so locally "account's BSB is NPP-enabled" is the check [inferred].
-- **Transfers by PayID always go via NPP**: "any transfer using a PayID will only be sent via NPP" [docs:payid]; for `transferType` PAY_ID "the platform will resolve the PayID (to get the BSB and account number) and send the payment request via NPP" [docs:payments].
+- **Transfers by PayID always go via NPP**: "any transfer using a PayID will only be sent via NPP" [docs:payid]; for `transferType` PAY_ID "the platform will resolve the PayID (to get the BSB and account number) and send the payment request via NPP" [docs:payments]. Clients must use `transferType: "PAY_ID"` for PayID payments; taking the resolved `accountDetails` and sending a `transferType: "ACCOUNT"` transfer "should be avoided" [docs:payid 'Cash Transfer parameters']. Client obligation, not a platform validation [inferred].
 - **Format rules per `payIdType`** [docs:payid]: TELEPHONE `+<cc 1–3 chars>-<1-9><digits...>`; EMAIL ≤ 256 chars, lower case, contains `@` with chars either side, no whitespace; INDIVIDUAL_AUSTRALIAN_BUSINESS 9–11 digits (ABN/ACN/ARBN/ARSN); ORGANISATION free text containing the organisation name plus description and/or location. Regexes are not given; the docs description of TELEPHONE is [inferred] equivalent to `^\+\d{1,3}-[1-9]\d*$`.
 - **Timers** [docs:payid, docs:payid-image]: PORTABLE → ACTIVE after 14 days without registration elsewhere; DEREGISTERED record removed after 90 days; ACTIVE → DISABLED after 10 years without activity.
 - **Timestamps**: all `*DateTimeUtc` fields are ISO-8601 `date-time` in UTC [spec]. `registrationDateTimeUtc` set on register; `lastUpdatedDateTimeUtc` on details/status change; `lastResolutionDateTimeUtc` on resolve [inferred from descriptions].
 - **ID / value formats** [spec]: `accountId` UUID; `branchIdentifier` and `branchNumber` 6 digits (`^\d{6}$` on the NPP op; description-only on PayIdAccountDetails); `accountNumber` 5–9 digits (description-only); `servicer` BIC11 (11-character BIC); `traceId` UUID in the example.
 - **No monetary balances, limits or counters** live in this domain [spec]. NPP liquidity totals (`NppLiquidity.inbound/outbound/total`) belong to the liquidity report; `total` is presumably `inbound + outbound` or net — **not stated** [spec].
-- **Staging `callFlags` header**: `callFlags: BSB=<value>`; determines which BSB the mock service treats as owning the PayID; absent → the client's assigned BSB; a different BSB simulates the ownership-check failure [docs:payid].
+- **Staging `callFlags` header**: format verbatim `callFlags: BSB=BSBValue` (docs example `callFlags: BSB=123456`) [docs:payid]. "The BSB value is used internally by our mock service to resolve the PayID details"; absent → "the platform will use the BSB assigned to you"; "use your BSB to test a successful scenario, or use a different BSB to test a failure scenario" [docs:payid]. That it works by comparing the PayID's BSB with the supplied BSB is [inferred].
 - **Owner-name display rule**: only the PayID value and the owner name may be shown to end users; `accountDetails` is confidential [docs:payid]. Not enforceable server-side; noted for the implementer's fixtures.
 
 ## 5. Cross-domain dependencies
 
 - **Accounts** (reads): `accountId` (UUID) on getPayIdsForAccount / postPayIdRegister must be an existing account; the PayID's `accountDetails.branchNumber` / `accountNumber` come from `HayAccount.bsb` / `HayAccount.accountNumber` [spec]. Which `HayAccount.status` values (`["PENDING_APPROVAL","APPROVED","ACTIVE","LOCKED","DORMANT","CLOSED","ACTIVE_IN_ARREARS"]` [spec]) permit registration is **not documented**.
 - **Customers** (reads, implicit): `ownerName` "must be reflective of the account holder name" [docs:payid]; no spec-level link to `HayCustomer`.
-- **Transfers** (reads PayID): makeTransferV0/makeTransferV1 with `transferType: "PAY_ID"` and `payIdTransfer: PayIdTransfer` resolve the PayID and pay via NPP [docs:payments]; outcome enum on `TransactionOutcome` includes `REFUSED_INVALID_PAY_ID` [spec]. `transferType: "ACCOUNT"` uses the BSB's NPP eligibility (the same signal as verifyBranchIdentifier) to choose NPP vs DE, after first converting Shaype-BSB recipients to INTERNAL [docs:payments]. Docs recommend, and the UX rules require, `resolvePayId` before every PAY_ID transfer [docs:payid].
+- **Transfers** (reads PayID): makeTransferV0/makeTransferV1 with `transferType: "PAY_ID"` and `payIdTransfer: PayIdTransfer` resolve the PayID and pay via NPP [docs:payments]; outcome enum on `TransactionOutcome` includes `REFUSED_INVALID_PAY_ID` [spec]. `transferType: "ACCOUNT"` "verifies whether the recipient account is enabled for NPP" to choose NPP vs DE, after first converting Shaype-BSB recipients to INTERNAL [docs:payments]; that this is the same signal as verifyBranchIdentifier is [inferred]. Docs recommend, and the UX rules require, `resolvePayId` before every PAY_ID transfer [docs:payid].
 - **Transactions / webhooks** (writes indirectly): NPP payments surface as `FinancialTransaction.type` `INTERBANK_TRANSFER_IN` / `INTERBANK_TRANSFER_OUT` ("Cash transfer into/out of Account via Direct Credit or NPP") with `transactionChannel` `CUSCAL_NPP_TRANSFER_IN` / `CUSCAL_NPP_TRANSFER_OUT` / `NPP_RETURN_IN` [spec], and as `TRANSACTION` webhooks with `transactionType` `INTERBANK_TRANSFER_IN` / `INTERBANK_TRANSFER_OUT` [docs:payments, webhooks]. `reference` is "only applicable to NPP transactions, maximum 35 alphanumeric characters" [spec FinancialTransaction].
-- **Utilities** (staging): generateInboundNppTransaction / generateInboundNppTransactionV2 create mock inbound NPP transactions by BSB + account number, not by PayID [spec].
+- **Utilities** (staging): generateInboundNppTransaction (v1, `GenerateInboundNppTransactionRequestBody`) creates mock inbound NPP transactions by BSB + account number only [spec]. generateInboundNppTransactionV2 (`GenerateRapRequestBody`) addresses via `creditorInformation.accountIdentification` + `accountIdentificationTypeCode` (string, minLength/maxLength 4, "Creditor's account's scheme", no enum) [spec]; whether a PayID/alias scheme code is accepted is **not documented**.
 - **Liquidity**: `NonSchemeLiquidity.npp: NppLiquidity` [spec].
 - **Multi-BSB routing** [docs:multi-bsb-routing]: applies to inbound **DE** payments only (brand BSBs 636383/636385 → account BSB 636380 on staging); no PayID/NPP behaviour is described.
 - **External authorisation** (`external-balance.yaml`): contains no PayID or NPP content [spec grep].
-- **Payment outcomes**: `docs/payment-transaction-outcome` lists transaction outcomes; none is PayID-specific. `REFUSED_INVALID_PAY_ID` appears only in the spec's `TransactionOutcome` enum and is not described in that page [spec, docs:payment-transaction-outcome].
+- **Payment outcomes**: `docs/payment-transaction-outcome` lists transaction outcomes; none is PayID-specific. `REFUSED_INVALID_PAY_ID` appears in the spec's `TransactionOutcome.outcome` enum and in the `ConversionExecuteResponse.outcome` enum (FX domain, "FX conversion execution result"); it is not in the webhook spec and is not described in docs:payment-transaction-outcome [spec, webhooks, docs:payment-transaction-outcome].
 
 ## 6. Error catalogue
 
@@ -325,7 +325,7 @@ Documented verbatim:
 |---|---|---|---|---|
 | verifyBranchIdentifier | 422 | `branchIdentifier` does not match `^\d{6}$` | message `branchIdentifier format is not correct.`; details `Please refer to the API documentation or contact Shaype for more info with the traceId.`; status `"422"`; traceId UUID | [spec example] |
 
-Declared on every op with no documented condition or message [spec]: 400 "Bad Request", 403 "Forbidden", 422 "Unprocessable Content", 500 "Internal Server Error", 501 "Not Implemented". No op declares 404 or 409.
+Declared on the 8 PayID ops with no documented condition or message [spec]: 200 "Success", 400 "Bad Request", 403 "Forbidden", 422 "Unprocessable Content", 500 "Internal Server Error", 501 "Not Implemented". verifyBranchIdentifier differs: 200 "Branch Identifier eligibility check completed", 422 "Branch Identifier format is invalid" (documented example, see its heading and the table above); its 400/403/500/501 carry the same generic descriptions [spec]. No op declares 404 or 409.
 
 Conditions the docs/spec establish but whose status code and message are **not documented** (proposed mapping is [inferred] and must be decided — see section 7):
 
@@ -343,7 +343,7 @@ Conditions the docs/spec establish but whose status code and message are **not d
 | Status update on a DEREGISTERED PayID ("cannot have its status updated") | updatePayIdStatus | 422 |
 | Transition not in the state model (e.g. DISABLED → PORTABLE) | updatePayIdStatus | 422 |
 
-Related outcome outside this domain: makeTransfer with `transferType: "PAY_ID"` returns 200 `TransactionOutcome.outcome = "REFUSED_INVALID_PAY_ID"` when the PayID cannot be used [spec enum; behaviour text not documented].
+Related outcome outside this domain: makeTransfer with `transferType: "PAY_ID"` returns 200 `TransactionOutcome.outcome = "REFUSED_INVALID_PAY_ID"` when the PayID cannot be used [spec enum; behaviour text not documented]. The same value also sits in the `ConversionExecuteResponse.outcome` enum (FX domain); it is not in the webhook spec [spec, webhooks].
 
 ## 7. Open questions
 
@@ -353,7 +353,7 @@ Related outcome outside this domain: makeTransfer with `transferType: "PAY_ID"` 
 4. **`getPayIdDeregisterHistory` has no `payIdType`**: how a value shared across types (e.g. the same digits as TELEPHONE and INDIVIDUAL_AUSTRALIAN_BUSINESS) is disambiguated, and whether results are merged across types.
 5. **Optional `payIdType` on availability/resolve**: when omitted, is the type inferred from the value's shape, or are all types searched? Not documented.
 6. **`resolvePayId` on DISABLED / DEREGISTERED / PORTABLE**: error vs 200; docs imply PORTABLE still resolves and DISABLED/DEREGISTERED do not, but the response is not specified. Also whether resolve covers PayIDs registered locally but not yet at the NPP (all-local implementation can ignore).
-7. **`payIdOwnerCommonName`** is named in the docs but absent from the spec; the spec's field is `accountDetails.ownerName`. Implement the spec; note the docs discrepancy.
+7. **`payIdOwnerCommonName`** and **`statusDetails`** are named in the docs but absent from the spec; the spec's fields are `accountDetails.ownerName` (resolvePayId) and `payIdDetails.status` / `payIdDetails.reason` (getPayId). Implement the spec; note the docs discrepancies.
 8. **`getPayIdsForAccount` inclusion of DEREGISTERED records** (and of the record after a PORTABLE PayID has been ported away).
 9. **PORTABLE → ACTIVE via `updatePayIdStatus`**: the NPP diagram shows only the 14-day timer path; whether Shaype accepts an explicit re-activation is unknown.
 10. **Same-status update** (ACTIVE → ACTIVE) and **repeat registration of an already-ACTIVE value to the same account**: 200 no-op vs error.

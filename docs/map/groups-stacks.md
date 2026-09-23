@@ -192,7 +192,7 @@ Conventions common to every operation in this domain [spec]:
   | `customerHayIds` | array of string uuid | **yes** | no `minItems` declared; docs require ≥ 1 | "Unique identifiers (UUID) of the Customer(s) associated to this Group" |
   | `idempotencyKey` | string uuid | **yes** | — | "Unique value (UUID) used to identify this request and used to recognise any subsequent retries" |
   | `groupName` | string | no | none declared (contrast updateGroup: 1..100) | "Name of the Group, if not provided a generic name associated with the client will be generated" |
-  | `groupType` | string enum `["PERSONAL","BUSINESS"]` | no | default `PERSONAL` | "Group type. Possible values: **BUSINESS**: Non-individual / joint entity; **PERSONAL**: Joint account entity (default if no option selected)" |
+  | `groupType` | string enum `["PERSONAL","BUSINESS"]` | no | no `default` keyword; description says PERSONAL is the default if no option selected [spec description] | "Group type. Possible values: **BUSINESS**: Non-individual / joint entity; **PERSONAL**: Joint account entity (default if no option selected)" |
   | `businessIdentifiers` | `BusinessIdentifiers` object | no | see below | "Identifiers issued by the government to the entity represented by this Group" |
   `BusinessIdentifiers` [spec]: `businessNumber` string minLength 11 maxLength 11 "Australian Business Number (ABN)"; `companyNumber` string 9/9 "Australian Company Number (ACN)"; `registeredBodyNumber` string 9/9 "Australian Registered Body Number (ARBN)"; `registeredSchemeNumber` string 9/9 "Australian Registered Scheme Number (ARSN)". None required.
 - **Response 200:** `HayGroup` — "Details of a Group" [spec]: `businessIdentifiers` (BusinessIdentifiers), `customerHayIds` (array uuid), `groupHayId` (uuid, "Unique identifier (UUID) of the Group"), `groupName` (string), `groupType` (enum `["PERSONAL","BUSINESS"]`).
@@ -238,7 +238,7 @@ Conventions common to every operation in this domain [spec]:
   | `groupType` | string enum `["PERSONAL","BUSINESS"]` | no | — | as above |
 - **Response 200:** `HayGroup` (`businessIdentifiers`, `customerHayIds`, `groupHayId`, `groupName`, `groupType`) [spec].
 - **Behaviour:**
-  - Partial update: fields absent from the body are left unchanged; `businessIdentifiers`, when present, replaces the whole object (sub-fields omitted are cleared) [spec description].
+  - Partial update: "Only the provided information will be updated. Business identifiers will be replaced as a whole (no partial updates are possible)." [spec description] — i.e. fields absent from the body are left unchanged; `businessIdentifiers`, when present, replaces the whole object (sub-fields omitted are cleared) [inferred from the quoted description; not spec text].
   - Membership (`customerHayIds`) cannot be changed here — use addCustomersToGroup / removeCustomerFromGroup [spec: not in body].
   - Whether changing `groupType` after an account exists is allowed is undefined [open]. Whether `businessIdentifiers: null` clears is undefined [open].
 - **Webhooks:** none mentioned.
@@ -301,7 +301,7 @@ Conventions common to every operation in this domain [spec]:
 
 ## 2. Entities and fields
 
-No `required` arrays exist on any response schema in this domain; nullability is never declared (`nullable` appears only on `CreateHayAccountForGroupRequestBody.customData` and the `type` query param) — treat every response field as optional/omittable [spec]. No examples exist in the spec for these schemas except the one 422 body on createHayAccountForGroup [spec].
+No `required` arrays exist on any response schema owned by this domain; nullability is never declared on them (`nullable` appears only on `CreateHayAccountForGroupRequestBody.customData` and the `type` query param) — treat every response field as optional/omittable [spec]. The embedded `HayAccount` (returned inside `HayJointAccount`; owned by the Accounts domain) has `required: ["customData"]` and `nullable: true` on `customData` and `parentAccountId` [spec]. No examples exist in the spec for these schemas except the one 422 body on createHayAccountForGroup [spec].
 
 ### HayGroup — "Details of a Group" [spec]
 | field | type | enum / constraints | description |
@@ -403,7 +403,7 @@ Created by accountToStackTransfer, stackToAccountTransfer (one each), stackToSta
 | `OPEN` | `CLOSED` | closeStack | sets `closedAtUtc`; sweeps `balance` to account [docs:stack] |
 | `CLOSED` | — | — | **terminal**: "Closed stack can't be open again" [docs:stack] |
 
-Only `OPEN` stacks may receive/send transfers or be updated [inferred; docs say CLOSED "can no longer be used" — spec enum description].
+Only `OPEN` stacks may receive/send transfers or be updated [inferred from spec HayStack.status enum description: CLOSED = 'Stack is inactive and can no longer be used'].
 
 ### HayGroup — no status enum [spec]
 A group has no lifecycle state; the only mutable dimensions are membership (`customerHayIds`) and descriptive fields. There is no close/delete operation. Membership invariant: at least one member at all times (removal of the final member is rejected) [docs:customer-removal].
@@ -423,7 +423,7 @@ Customer status values for reference [spec HayCustomer.status]: `ACTIVE` "Custom
 ## 4. Invariants and calculations
 
 ### Account balance decomposition (docs:account-balances, verbatim formulas)
-- "**Available Balance** = Account Balance + (Overdraft Limit + Overdraft Balance) + Technical Overdraft Balance + Held Balance + Stacks balance" — where in that doc Held, Overdraft Balance, Technical Overdraft are "$0 or Negative" and Stack Balance is "$0 or Positive" but is being subtracted in effect ("Total balance of stacks within an account"). Read together with the spec: `availableBalance` = "Total balance available for use on Account. Funds that are held, locked and allocated to a Stack will not be available." [spec HayAccount].
+- "**Available Balance** = Account Balance + (Overdraft Limit + Overdraft Balance) + Technical Overdraft Balance + Held Balance + Stacks balance" — where in that doc Held, Overdraft Balance, Technical Overdraft are "$0 or Negative" and Stack Balance ("Total balance of stacks within an account") is "$0 or Positive"; the docs formula adds it literally, but read together with the spec `availableBalance` description — "Total balance available for use on Account. Funds that are held, locked and allocated to a Stack will not be available." [spec HayAccount] — it must act as a deduction [inferred — the docs formula text contradicts this].
 - "**Total Balance** = Total Available Balance + (Overdraft Limit + Overdraft Balance) + Technical Overdraft Balance + Stacks Balance" [docs:account-balances]; spec: `totalBalance` "will also include unused overdraft limit and Stacks, held and locked value" [spec].
 - Practical invariant for the local implementation [inferred from the above]: `availableBalance = totalBalance - stacksBalance - heldBalance - lockedBalance (± overdraft terms)`; a stack transfer changes `stacksBalance` and `availableBalance` by equal and opposite amounts and leaves `totalBalance` unchanged.
 - `stacksBalance` = "Total value current held against any Stack(s) on the Account. Positive value to 2 decimal places." [spec] = sum of `balance` over the account's stacks [inferred]; since CLOSED stacks have balance 0 after the sweep, sum over OPEN stacks is equivalent [inferred].
@@ -472,7 +472,7 @@ Customer status values for reference [spec HayCustomer.status]: `ACTIVE` "Custom
 | Stack transfers | Accounts API balances | move value between `availableBalance` and `stacksBalance`; `totalBalance` invariant | spec HayAccount; docs:account-balances |
 | Stacks | Accounts API (closeAccount) | `ACCOUNT_BALANCE_STACKS` closure-check error | spec ClosureCheckerError |
 | Stacks | Limits (setAccountLimit/deleteAccountLimit) | `MAX_BALANCE` includes stack funds; `MIN_STACK_BALANCE` platform-only limit; daily transfer limits exclude stack movements | docs:stack; spec limitType enums |
-| Stacks | Transactions API / webhooks | stack transactions have their own list endpoints and schema (`HayStackTransaction`), distinct from `HayTransaction`; webhook `TransactionEventDto.transactionType` has no stack value; `accountBalances.stacksBalance` is reported on transaction events | spec; webhooks |
+| Stacks | Transactions API / webhooks | stack transactions have their own list endpoints and schema (`HayStackTransaction`), distinct from `FinancialTransaction` (the account-level schema returned by searchTransactions `POST /v0/transactions/search` and getTransactionById `GET /v1/transactions/{transactionHayId}`); neither `FinancialTransaction.type` (enum `CARD_PRESENT_PAYMENT` … `BPAY_TRANSFER_IN`) nor `FinancialTransaction.transactionChannel` contains a stack-related value [spec]; webhook `TransactionEventDto.transactionType` has no stack value; `accountBalances.stacksBalance` is reported on transaction events | spec; webhooks |
 | Stacks | External authorisation | callback `account.balance` excludes stack money, so a client authoriser never sees stack funds as spendable | ext-auth |
 | Stacks | Payments (NPP/DE/BPAY/internal), Cards | never draw from stacks; insufficient main balance fails the payment | docs:stack |
 | Group accounts | External authorisation | `account.holder.type = GROUP`, `holder.id = groupHayId`; `customer` set to the initiating member when "a group account transaction was triggered by one" | ext-auth |
@@ -526,7 +526,7 @@ Declared per operation (all 15): `400 Bad Request`, `403 Forbidden`, `422 Unproc
 19. **addCustomersToGroup**: duplicates (ignore vs error), unknown ids, non-ACTIVE customers; empty array.
 20. **removeCustomerFromGroup**: status for last-member rejection; non-member `customerId`; whether the INACTIVE assessment treats "no linked accounts at all" as inactive; synchronous vs asynchronous card cancellation and status update; which card statuses count as "cancel".
 21. **Webhooks**: no event is documented for any group/stack operation. Decide whether the local server emits `CARD_STATUS_CHANGE` / `CUSTOMER_STATUS_UPDATED` for removeCustomerFromGroup side effects, `ACCOUNT_STATUS_CHANGE` on group-account creation, and whether stack transfers produce any `TRANSACTION` notification (the webhook `transactionType` enum has no stack value — suggests none).
-22. **Do stack transactions appear in the main account transaction list** (`HayTransaction`)? "Historical transactions will still be visible within transaction list" is ambiguous between the stack transaction endpoints and the account-level list.
+22. **Do stack transactions appear in the main account transaction list** (`FinancialTransaction`, via searchTransactions / getTransactionById)? "Historical transactions will still be visible within transaction list" is ambiguous between the stack transaction endpoints and the account-level list.
 23. **`updateGroup` semantics** for `businessIdentifiers: null` / `{}` (clear vs ignore) and changing `groupType` once an account exists.
 24. **`ROUND_UP` transactions**: no API creates them; decide whether the local server needs a test hook to seed them.
 25. **`Stack` vs `HayStack` shape**: updateStack returns `hayId`; everything else returns `stackHayId`. Confirm both shapes are served verbatim.

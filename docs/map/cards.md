@@ -2,7 +2,7 @@
 
 Domain: Shaype B2B Operations API, tag **"Cards API"** ("Set of APIs related to managing Cards" [spec]). 19 operations.
 
-Source labels used throughout: `[spec]` = `b2b-operations-api.json`; `[webhook-spec]` = `notification-webhooks.json`; `[ext-auth-spec]` = `external-balance.yaml`; `[docs:<slug>]` = `https://developer.shaype.com/docs/<slug>` (or `page/<slug>`, `reference/<slug>`); `[inferred]` = my reading, not stated anywhere.
+Source labels used throughout: `[spec]` = `b2b-operations-api.json`; `[webhook-spec]` = `notification-webhooks.json`; `[ext-auth-spec]` = `external-balance.yaml`; `[docs:<slug>]` = `https://developer.shaype.com/docs/<slug>` — except `[docs:create-card]`, `[docs:card-unblock-cvv]`, `[docs:card-unblock-pin]`, which live at `https://developer.shaype.com/page/<slug>`; `[inferred]` = my reading, not stated anywhere. **`[docs:card-lifecycle-stauts]` is a single image**, `https://files.readme.io/9abfc1e-Screenshot_2024-04-18_at_3.31.08_PM.png` (2176×1064) — the `.md` page has no text, so every state, edge and `cardEnabled` annotation attributed to it below is transcribed from that PNG. The convert diagram in `[docs:card-operations]` is `https://files.readme.io/2803552-Screenshot_2024-04-17_at_1.40.46_PM.png`.
 
 Conventions common to every Cards API operation [spec]:
 - Path parameter `cardId` — `string`, `format: uuid`, required, "Unique identifier (UUID) of the Card". Present on all 18 `/v0/cards/{cardId}/...` operations; `POST /v0/cards/create` has no path params.
@@ -68,9 +68,9 @@ Spec example for `Address`: `{"administrativeRegion":"SA","countryCodeIso":"AUS"
 - Card designs / sub-designs are agreed with the CSM; `cardSubDesign` selects among them [docs:card-creation]. Note: `cardSubDesign` is **not** echoed back in `HayCard` [spec].
 - **Cardholder (billing) address** is *not* taken from the request: "When creating a new card, we use the address stored against the customer linked to the card" (used for Visa AVS checks) [docs:card-creation]. `deliveryAddress` is a separate, request-supplied address used only for shipping [docs:card-creation]. Neither address is exposed on `HayCard` [spec].
 - Virtual cards "still require a delivery address ... virtual cards are always created with the ability to convert to physical in the future" [docs:card-creation].
-- `deliveryMethod` omitted → `STANDARD` [spec][docs:card-creation][page:create-card].
-- **Default name-on-card logic** when `nameOnCard` omitted [docs:card-creation]: "If smaller than 23 characters combined => card name = first name + ' ' + last name. Otherwise => card name = initial of first name + ' ' + last name." If supplied, `nameOnCard`/`nameOnCardLine2` override the default; `nameOnCardLine2` omitted → nothing extra printed [page:create-card].
-- Default payment preferences after creation [spec `CardPaymentPreferences` descriptions]: `cardEnabled=true`, `mobileWalletPaymentsEnabled=true`, `cardNotPresentEnabled=false`, `cashWithdrawalEnabled=false`, `contactlessEnabled=false`, `magneticStripeEnabled=false`. Docs add: "To enable card preferences by default during the card creation, please contact our CSM" [docs:card-operations] — i.e. per-client configurable, not via API.
+- `deliveryMethod` omitted → `STANDARD` [spec][docs:card-creation][docs:create-card].
+- **Default name-on-card logic** when `nameOnCard` omitted [docs:card-creation]: "If smaller than 23 characters combined => card name = first name + ' ' + last name. Otherwise => card name = initial of first name + ' ' + last name." If supplied, `nameOnCard`/`nameOnCardLine2` override the default; `nameOnCardLine2` omitted → nothing extra printed [docs:create-card].
+- Default payment preferences after creation [spec `CardPaymentPreferences` descriptions]: `cardEnabled=true`, `mobileWalletPaymentsEnabled=true`, `cardNotPresentEnabled=false`, `cashWithdrawalEnabled=false`, `contactlessEnabled=false`, `magneticStripeEnabled=false`. Docs add: "To enable card preferences by default during the card creation, please contact our CSM or CI team. This approach is preferable to migrate your existing data to Shaype platform." [docs:card-operations] — i.e. per-client configurable, not via API [inferred].
 - `idempotencyKey` "used to recognise any subsequent retries" [spec]. What a retry with the same key returns (same `HayCard`? 200? conflict?) is **not documented** (§7).
 - Validation the local implementation must apply [spec]: presence of the 9 required fields; `minLength`/`maxLength` above; `format: uuid` on `accountId`, `customerHayId`, `idempotencyKey`; enum membership for `cardType`, `cardSubDesign`, `deliveryMethod`. Which failing condition maps to 400 vs 422 is **not documented** [spec lists both without conditions].
 - Cross-domain preconditions (account/customer must exist and be in a usable status) — nothing in the cards docs states which account/customer statuses permit card creation (§5, §7).
@@ -89,7 +89,7 @@ Spec example for `Address`: `{"administrativeRegion":"SA","countryCodeIso":"AUS"
 
 **Response:** `200` → `HayCard`. `400/403/422/500/501` → `ErrorResponse`.
 
-**Behaviour:** Read-only. "Each card is generated with a unique card ID. You can use this ID to retrieve the card's details." [docs:card-operations]. No `404` is declared — response for an unknown id is undocumented (§7). Example `HayCard` payload shown in [page:create-card] (see §2).
+**Behaviour:** Read-only. "Each card is generated with a unique card ID. You can use this ID to retrieve the card's details." [docs:card-operations]. No `404` is declared — response for an unknown id is undocumented (§7). Example `HayCard` payload shown in [docs:create-card] (see §2).
 
 **Webhooks:** none.
 
@@ -109,7 +109,7 @@ Spec example for `Address`: `{"administrativeRegion":"SA","countryCodeIso":"AUS"
 - Precondition: `cardStatus == AWAITING_ACTIVATION` [spec][docs:card-operations]. Any other status → error; the code is not documented (422 "Unprocessable Content" is the natural fit [inferred]).
 - State change: `cardStatus` → `ACTIVE`; "Move the card into a status that allows the customer to start carrying out transactions." [docs:card-operations]. Diagram: `cardEnabled` becomes `true` on activation (Physical `AWAITING_ACTIVATION / cardEnabled: false` → Activated `ACTIVE / cardEnabled: true`) [docs:card-lifecycle-stauts].
 - Side effect when the card being activated is a **renewal** card: "Once the new card is received and activated, the old card is disabled" [docs:card-operations]; diagram shows the old card as `INACTIVE`, `cardEnabled: true` ("old card after activation of new card") [docs:card-lifecycle-stauts]. So activating card B where some card A has `renewedIntoCardId == B` must set A.`cardStatus = INACTIVE` [inferred from the two sources combined].
-- Applies to physical cards created via `createHayCard`, `reissueHayCard`, `renewCard`, and to cards converted via `convertCard` (all of which land in `AWAITING_ACTIVATION`) [docs:card-operations].
+- Applies to physical cards created via `createHayCard` and `reissueHayCard`, and to cards converted via `convertCard` — all documented as landing in `AWAITING_ACTIVATION` [docs:card-operations]; also to physical cards from `renewCard` [inferred by analogy; docs say only "in transit ... received and activated"].
 - Idempotency: not documented; a second call would fail the precondition (status now `ACTIVE`) [inferred].
 
 **Webhooks:** `CARD_STATUS_CHANGE` with `cardStatusChangeEvent.cardStatus = ACTIVE` ("Card has been activated") [webhook-spec enum description]. Emission on activation is [inferred] from that enum text; the cards docs do not list it explicitly.
@@ -129,7 +129,7 @@ Spec example for `Address`: `{"administrativeRegion":"SA","countryCodeIso":"AUS"
 **Behaviour:**
 - "Stops the use of the card for any type of payment. The customer must get in touch with the relevant support. Used in instances that require investigation into the use of the card." [docs:card-operations]
 - State change: `cardStatus` → `BLOCKED`; reversible via `unblockCard` [docs:card-operations]. Diagram: Activated (`ACTIVE`) → Blocked (`BLOCKED`, `cardEnabled: false`) [docs:card-lifecycle-stauts].
-- `HayCard.blockedBy` should be set to `CLIENT` ("The card was blocked by the Client") when blocked through this API [inferred from the enum description]; `PLATFORM` is reserved for Shaype-initiated blocks [spec enum description].
+- `HayCard.blockedBy` should be set to `CLIENT` ("The card was blocked by the Client") when blocked through this API [inferred from the enum description]; `PLATFORM` = "The card was blocked by the Platform" [spec]; that this denotes a Shaype-initiated block with no client API is [inferred].
 - Precondition: the diagram only draws `block` from the Activated (`ACTIVE`) state [docs:card-lifecycle-stauts]. Whether `AWAITING_ACTIVATION` cards can be blocked is undocumented (§7).
 - The `note` is not exposed on any response schema [spec].
 - Transactions on a blocked card are refused with `cardPreferenceOutcome = CARD_BLOCKED` / processor response `REFUSED_CARD_BLOCKED` [webhook-spec enums; mapping is inferred from names].
@@ -192,7 +192,7 @@ Spec example for `Address`: `{"administrativeRegion":"SA","countryCodeIso":"AUS"
 
 **Response:** `200` → `CardCvvStatus` = `{ cvvRemainingTries: integer (int32) — "Number of remaining tries for the Card CVV. When the number reaches 0, the CVV is blocked." }` [spec]. `400/403/422/500/501` → `ErrorResponse`.
 
-**Behaviour:** Read-only. Initial/maximum value is 3 [inferred from unblockCardCvv: "Blocking of a card's CVV occurs after the cardholder has incorrectly entered their card CVV 3 times" [spec]]. The counter is decremented by the card processor on failed CVV checks during transactions (`cardProcessorResponse` values `CVV_FAIL`, `CVV2_FAILURE` exist [webhook-spec]) — there is no B2B API to decrement it, so the local implementation needs a test hook (§7).
+**Behaviour:** Read-only. Initial/maximum value is 3 [inferred from unblockCardCvv: "Blocking of a card's CVV occurs after the cardholder has incorrectly entered their card CVV 3 times" [spec]]. The counter is decremented by the card processor on failed CVV checks during transactions (`cardProcessorResponse` values `CVV_FAIL`, `CVV2_FAILURE` exist [webhook-spec]). No Cards API operation decrements CVV tries or blocks the PIN; the Utilities mock endpoints (`generateAuthHold`, `generateCardTransaction`, `generateHoldAndUpdateHoldTransactions`) accept `declineReason = WRONG_CVV / CVV_BLOCKED / INCORRECT_PIN / ALLOWED_PIN_RETRIES_EXCEEDED` [spec] — whether these mutate `cvvRemainingTries` / `CardPinStatus.enabled` is undocumented [inferred] (§5, §7).
 
 **Webhooks:** none.
 
@@ -208,7 +208,7 @@ Spec example for `Address`: `{"administrativeRegion":"SA","countryCodeIso":"AUS"
 
 **Response:** `200` → `GenericMessage`. `400/403/422/500/501` → `ErrorResponse`.
 
-**Behaviour:** Resets `cvvRemainingTries` so the cardholder can retry; the back-office equivalent is labelled "Reset CVV Retries" [page:card-unblock-cvv], suggesting the counter is reset to its maximum (3) [inferred]. Whether calling it when the CVV is not blocked is an error or a no-op: undocumented. Does not change `cardStatus` [inferred — nothing says it does].
+**Behaviour:** Resets `cvvRemainingTries` so the cardholder can retry; the back-office equivalent is labelled "Reset CVV Retries" [docs:card-unblock-cvv], suggesting the counter is reset to its maximum (3) [inferred]. Whether calling it when the CVV is not blocked is an error or a no-op: undocumented. Does not change `cardStatus` [inferred — nothing says it does].
 
 **Webhooks:** none documented.
 
@@ -364,7 +364,7 @@ Spec example for `Address`: `{"administrativeRegion":"SA","countryCodeIso":"AUS"
 
 **Response:** `200` → `CardPinStatus` — "Status of the Card PIN" = `{ enabled: boolean — "False indicates the Card PIN is blocked" }` [spec]. `400/403/422/500/501` → `ErrorResponse`.
 
-**Behaviour:** Read-only. "view the Card PIN status, whether enabled or disabled" [docs:card-operations]. The PIN becomes blocked (`enabled=false`) "after the cardholder has incorrectly entered their card PIN **3 times**" [spec][docs:card-operations] — this happens at the processor during transactions (`cardProcessorResponse` values `INCORRECT_PIN`, `ALLOWED_PIN_RETRIES_EXCEEDED`, `ALLOWED_NUMBER_OF_PIN_TRIES_EXCEEDED` [webhook-spec]); no B2B API blocks a PIN, so the local implementation needs a test hook (§7). Unlike CVV, there is no remaining-tries counter exposed for PIN [spec].
+**Behaviour:** Read-only. "view the Card PIN status, whether enabled or disabled" [docs:card-operations]. The PIN becomes blocked (`enabled=false`) "after the cardholder has incorrectly entered their card PIN **3 times**" [spec][docs:card-operations] — this happens at the processor during transactions (`cardProcessorResponse` values `INCORRECT_PIN`, `ALLOWED_PIN_RETRIES_EXCEEDED`, `ALLOWED_NUMBER_OF_PIN_TRIES_EXCEEDED` [webhook-spec]). No Cards API operation decrements CVV tries or blocks the PIN; the Utilities mock endpoints (`generateAuthHold`, `generateCardTransaction`, `generateHoldAndUpdateHoldTransactions`) accept `declineReason = WRONG_CVV / CVV_BLOCKED / INCORRECT_PIN / ALLOWED_PIN_RETRIES_EXCEEDED` [spec] — whether these mutate `cvvRemainingTries` / `CardPinStatus.enabled` is undocumented [inferred] (§5, §7). Unlike CVV, there is no remaining-tries counter exposed for PIN [spec].
 
 **Webhooks:** none.
 
@@ -380,7 +380,7 @@ Spec example for `Address`: `{"administrativeRegion":"SA","countryCodeIso":"AUS"
 
 **Response:** `200` → `GenericMessage`. `400/403/422/500/501` → `ErrorResponse`.
 
-**Behaviour:** Sets PIN status `enabled = true` [inferred from `CardPinStatus` semantics]. Back-office equivalent "UNBLOCK CARD PIN" [page:card-unblock-pin]. Whether calling on an already-enabled PIN is an error or no-op: undocumented. Does not change `cardStatus` [spec: "blocking a card and unblocking a PIN is possible through other endpoints" — they are independent].
+**Behaviour:** Sets PIN status `enabled = true` [inferred from `CardPinStatus` semantics]. Back-office equivalent "UNBLOCK CARD PIN" [docs:card-unblock-pin]. Whether calling on an already-enabled PIN is an error or no-op: undocumented. Does not change `cardStatus` [spec: "blocking a card and unblocking a PIN is possible through other endpoints" — they are independent].
 
 **Webhooks:** none documented.
 
@@ -489,7 +489,7 @@ Docs table [docs:rewards]: `200` = "The card is ACTIVE in PokitPal but the card 
 
 **Behaviour:**
 - "Unblock card is a reverse operation of Block Card. Upon unblocking the card, the card status would be ACTIVE" [docs:card-operations]. Diagram: Blocked --unblock--> Activated (`ACTIVE`, `cardEnabled: true`) [docs:card-lifecycle-stauts].
-- Precondition: `cardStatus == BLOCKED` [inferred from "reverse operation"; diagram]. Error code otherwise: undocumented.
+- Precondition: `cardStatus == BLOCKED` [inferred from "reverse operation"; docs:card-lifecycle-stauts]. Error code otherwise: undocumented.
 - `blockedBy` presumably cleared (null) after unblock [inferred].
 - Whether a client may unblock a card with `blockedBy = PLATFORM`: undocumented (§7).
 - Validation: missing/empty `note` → 400 or 422 (undocumented which).
@@ -504,7 +504,7 @@ Docs table [docs:rewards]: `200` = "The card is ACTIVE in PokitPal but the card 
 
 No `required` array on the schema: every field is nominally optional in responses. Only `renewedIntoCardId` and `voidDateTimeUtc` are marked `nullable: true`.
 
-| field | type | nullable | enum (verbatim) | description [spec] | example [page:create-card] |
+| field | type | nullable | enum (verbatim) | description [spec] | example [docs:create-card] |
 |---|---|---|---|---|---|
 | `cardHayId` | string (uuid) | – | | "Unique identifier (UUID) of the Card" | `3fa85f64-5717-4562-b3fc-2c963f66afa6` |
 | `accountHayId` | string (uuid) | – | | "Unique identifier (UUID) of the Account" | `3fa85f64-5717-4562-b3fc-2c963f66afa6` |
@@ -562,7 +562,7 @@ Envelope `NotificationDto` (POST `/api/hay/v0/communications/notification`, oper
 - `type = CARD_STATUS_CHANGE` → `cardStatusChangeEvent: CardStatusChangeEventDto { cardHayId: uuid, accountHayId: uuid, cardStatus: enum [ACTIVE, BLOCKED, EXPIRED, INACTIVE, AWAITING_ACTIVATION], cardLastFourDigits: string }` — "ACTIVE: Card has been activated; BLOCKED: Card has been blocked; EXPIRED: Card has been expired; INACTIVE: Card has been cancelled; AWAITING_ACTIVATION: Card is awaiting activation". Also present on `SmsDto.cardStatusChangeEvent`.
 - `type = CARD_ADDED_TO_WALLET` → `cardAdditionToWalletEvent: CardAdditionToWalletEventDto { cardHayId: uuid, cardLastFourDigits: string, walletType: enum [DEFAULT_WALLET, APPLE_WALLET, ANDROID_WALLET, SAMSUNG_WALLET], activationCode: string ("Payment-token activation code") }`. Docs example [docs:apple-and-google-pay-notifications]: `{"customerHayId":"e818093c-…","idempotencyKey":"7ed153c1-…","type":"CARD_ADDED_TO_WALLET","cardAdditionToWalletEvent":{"cardHayId":"b91826b8-…","cardLastFourDigits":"7927","walletType":"APPLE_WALLET"}}`.
 - `type = REMINDER`, `reminderType ∈ CARD_EXPIRY_MONTH_REMINDER | CARD_EXPIRY_2_WEEK_REMINDER | CARD_EXPIRY_DAY_REMINDER` → `cardExpiryReminderEvent: CardExpiryReminderEventDto { cardId: uuid, expirationMonth: int32, expirationYear: int32 }`.
-- `type = REMINDER`, wallet-provisioning reminders (top-level `cardHayId` + `reminderType`): `APPLE_PAY_ADD_TO_WALLET_REMINDER_30_DAYS`, `APPLE_PAY_ADD_TO_WALLET_REMINDER_60_DAYS`, `APPLE_PAY_ADD_TO_WALLET_REMINDER_90_DAYS`, `APPLE_PAY_REMINDER_24_HRS`, `APPLE_PAY_REMINDER_7_DAYS`, `APPLE_PAY_SPEND_REMINDER_7_DAYS`, `APPLE_PAY_SPEND_REMINDER_14_DAYS`, `GOOGLE_PAY_24_HRS_PARTIAL_PROVISIONING`, `GOOGLE_PAY_7_DAYS_PARTIAL_PROVISIONING`, `GOOGLE_PAY_7_DAYS_SPEND_REMINDER`, `GOOGLE_PAY_14_DAYS_SPEND_REMINDER`, `REMINDER_TO_PROVISION_DIGITAL_CARD` [webhook-spec enum; examples in docs:apple-and-google-pay-notifications, some carrying `emailAddress` and `customerDetails {customerHayId, firstName, lastName, preferredName}`].
+- `type = REMINDER`, wallet-provisioning reminders (top-level `cardHayId` + `reminderType`): `APPLE_PAY_ADD_TO_WALLET_REMINDER_30_DAYS`, `APPLE_PAY_ADD_TO_WALLET_REMINDER_60_DAYS`, `APPLE_PAY_ADD_TO_WALLET_REMINDER_90_DAYS`, `APPLE_PAY_REMINDER_24_HRS`, `APPLE_PAY_REMINDER_7_DAYS`, `APPLE_PAY_SPEND_REMINDER_7_DAYS`, `APPLE_PAY_SPEND_REMINDER_14_DAYS`, `GOOGLE_PAY_24_HRS_PARTIAL_PROVISIONING`, `GOOGLE_PAY_7_DAYS_PARTIAL_PROVISIONING`, `GOOGLE_PAY_7_DAYS_SPEND_REMINDER`, `GOOGLE_PAY_14_DAYS_SPEND_REMINDER`, `REMINDER_TO_PROVISION_DIGITAL_CARD` [webhook-spec enum; examples in docs:apple-and-google-pay-notifications]. On the notification channel the docs examples show `customerHayId`, `idempotencyKey`, `type`, `reminderType`, and (for the `ADD_TO_WALLET` reminders) `cardHayId` — the `APPLE_PAY_SPEND_REMINDER_7_DAYS` / `_14_DAYS` examples carry no `cardHayId` [docs:apple-and-google-pay-notifications]; the schema additionally allows `actionOwner`, `productId` and `firebaseDeviceToken` on any event, and has no `emailAddress` or `customerDetails` property [webhook-spec]. The docs examples that do carry `emailAddress` and `customerDetails {customerHayId, firstName, lastName, preferredName}` are **email-channel** payloads matching `EmailDto` (`POST /api/hay/v0/communications/email`; `EmailDto.type = REMINDER`, `EmailDto.reminderType`, `EmailDto.cardHayId`, `EmailDto.emailAddress`, `EmailDto.customerDetails → CustomerDetails`), not `NotificationDto` [webhook-spec].
 - Email channel (`EmailDto.type`): `CARD_PIN_CHANGE` → `cardPinChangeEvent: CardPinChangeEventDto { cardHayId: uuid, cardLastFourDigits: string }`; `CARD_ADDED_TO_WALLET` → `cardAdditionToWalletEvent`.
 - Transaction notifications (`type = TRANSACTION`, `transactionEvent: TransactionEventDto`) carry `cardHayId`, `cardPreferenceOutcome`, `cardProcessorResponse`, `cardUsageDetails { isMagneticStripePayment, isContactless, isCardPresent, isMobileWalletPayment, isAtmWithdrawal }` — transactions domain; listed here because they consume card state.
 
@@ -570,23 +570,23 @@ Envelope `NotificationDto` (POST `/api/hay/v0/communications/notification`, oper
 
 ### `HayCard.cardStatus` — values `ACTIVE`, `AWAITING_ACTIVATION`, `BLOCKED`, `INACTIVE`, `EXPIRED` [spec]
 
-Sources: lifecycle diagram [docs:card-lifecycle-stauts] (states drawn: Created{Virtual, Physical}, Activated, Frozen, Blocked, Cancelled, Replaced, Expired, Renewed), [docs:card-operations], [docs:card-creation].
+Sources: lifecycle diagram [docs:card-lifecycle-stauts] (a PNG — URL in the header; states drawn: Created{Virtual, Physical}, Activated, Frozen, Blocked, Cancelled, Replaced, Expired, Renewed), [docs:card-operations], [docs:card-creation].
 
 | from | to | via | source |
 |---|---|---|---|
 | (none) | `AWAITING_ACTIVATION` | `createHayCard` with `cardType=PHYSICAL` (or omitted) | [docs:card-creation] |
-| (none) | `ACTIVE` | `createHayCard` with `cardType=VIRTUAL` ("virtual cards are issued already active") | [docs:card-creation][diagram] |
+| (none) | `ACTIVE` | `createHayCard` with `cardType=VIRTUAL` ("virtual cards are issued already active") | [docs:card-creation][docs:card-lifecycle-stauts] |
 | (none) | `AWAITING_ACTIVATION` / `ACTIVE` | `reissueHayCard` → new card (PHYSICAL / VIRTUAL) | [docs:card-operations] |
 | (none) | `AWAITING_ACTIVATION` / `ACTIVE` | `renewCard` → new card (PHYSICAL / VIRTUAL) | [docs:card-operations] + [inferred for VIRTUAL] |
-| `ACTIVE` (cardType VIRTUAL) | `AWAITING_ACTIVATION` (cardType → PHYSICAL) | `convertCard` | [diagram][docs:card-operations "temporarily inactive during shipment"] |
-| `AWAITING_ACTIVATION` | `ACTIVE` | `activateCard` | [spec][docs:card-operations][diagram] |
-| `ACTIVE` | `BLOCKED` (`blockedBy=CLIENT`) | `blockCard` | [docs:card-operations][diagram]; `blockedBy` value [inferred] |
-| `ACTIVE` | `BLOCKED` (`blockedBy=PLATFORM`) | Shaype-side block (no client API) | [spec enum description] |
-| `BLOCKED` | `ACTIVE` | `unblockCard` | [docs:card-operations][diagram] |
-| `ACTIVE` | `INACTIVE` (terminal) | `cancelCard` | [docs:card-operations][diagram] |
-| `ACTIVE` | `INACTIVE` (terminal) | `reissueHayCard` on this (old) card | [docs:card-operations][diagram "replaceLostOrStolen"] |
-| `ACTIVE` | `INACTIVE` (terminal) | `activateCard` on the card named in this card's `renewedIntoCardId` | [docs:card-operations][diagram "Renewed: old card after activation of new card"] |
-| `ACTIVE` | `EXPIRED` | platform "scheduled job to retrieve expired cards" — no client API | [diagram] |
+| `ACTIVE` (cardType VIRTUAL) | `AWAITING_ACTIVATION` (cardType → PHYSICAL) | `convertCard` | [docs:card-lifecycle-stauts][docs:card-operations "temporarily inactive during shipment"] |
+| `AWAITING_ACTIVATION` | `ACTIVE` | `activateCard` | [spec][docs:card-operations][docs:card-lifecycle-stauts] |
+| `ACTIVE` | `BLOCKED` (`blockedBy=CLIENT`) | `blockCard` | [docs:card-operations][docs:card-lifecycle-stauts]; `blockedBy` value [inferred] |
+| `ACTIVE` | `BLOCKED` (`blockedBy=PLATFORM`) | Shaype-side block (no client API) | [inferred] — from the `blockedBy` enum gloss "The card was blocked by the Platform" [spec]; the diagram draws a single unattributed `block` edge |
+| `BLOCKED` | `ACTIVE` | `unblockCard` | [docs:card-operations][docs:card-lifecycle-stauts] |
+| `ACTIVE` | `INACTIVE` (terminal) | `cancelCard` | [docs:card-operations][docs:card-lifecycle-stauts] |
+| `ACTIVE` | `INACTIVE` (terminal) | `reissueHayCard` on this (old) card | [docs:card-operations][docs:card-lifecycle-stauts "replaceLostOrStolen"] |
+| `ACTIVE` | `INACTIVE` (terminal) | `activateCard` on the card named in this card's `renewedIntoCardId` | [docs:card-operations][docs:card-lifecycle-stauts "Renewed: old card after activation of new card"] |
+| `ACTIVE` | `EXPIRED` | platform "scheduled job to retrieve expired cards" — no client API | [docs:card-lifecycle-stauts] |
 | `ACTIVE` | `ACTIVE` (renew) | `renewCard` — old card unchanged, `renewedIntoCardId` set | [docs:card-operations][spec field] |
 
 Terminal states: `INACTIVE` ("final state and cannot be reverted" [docs:card-operations]). `EXPIRED` has no outgoing edge in the diagram [docs:card-lifecycle-stauts] — treat as terminal unless renewal from EXPIRED is later confirmed (§7).
@@ -600,7 +600,7 @@ Undocumented transitions the implementer must decide (§7): `AWAITING_ACTIVATION
 | `VIRTUAL` | `PHYSICAL` | `convertCard` | [spec][docs:card-operations] |
 | `PHYSICAL` | `VIRTUAL` | **not possible** ("can only be achieved by creating a new card") | [docs:cards] |
 
-### Preferences "freeze" (`cardEnabled`) — not a `cardStatus` change [diagram]
+### Preferences "freeze" (`cardEnabled`) — not a `cardStatus` change [docs:card-lifecycle-stauts]
 
 | from | to | via |
 |---|---|---|
@@ -639,18 +639,18 @@ No un-enrol transition exists [spec].
 ## 4. Invariants and calculations
 
 - **IDs:** `cardHayId`, `accountHayId`/`accountId`, `customerHayId`, `renewedIntoCardId`, `idempotencyKey` are all `format: uuid` [spec]. Docs examples use v4-style UUIDs.
-- **`cardToken`:** "Public token of the Card, maximum 9 digits in length" [spec]. Preserved on renew ("new card created with same token") [diagram]; new on re-issue [inferred, since the PAN changes]; unchanged on convert [docs:card-operations]. Used by Utilities mock-transaction endpoints (`cardToken` field) [spec].
+- **`cardToken`:** "Public token of the Card, maximum 9 digits in length" [spec]. Preserved on renew ("new card created with same token") [docs:card-lifecycle-stauts]; new on re-issue [inferred, since the PAN changes]; unchanged on convert [docs:card-operations]. Used by Utilities mock-transaction endpoints (`cardToken` field) [spec].
 - **`lastFourDigits`:** last 4 digits of the PAN [spec]; same on renew (same PAN) and convert; new on re-issue [docs:card-operations].
 - **`expiryDate`:** "date of the last day of the expiry month and year" [spec] — i.e. always a month-end date. Expiry period length (years from issue) is **not documented**. `OemProvisioningData.expiryDate` and `ApiDigitalWallet.expiresAt` equal the card expiry date [spec].
 - **Renew window:** allowed only "within 2 months of the expiry date of the card" [docs:card-operations] → `today >= expiryDate − 2 months` [inferred formalisation].
 - **Expiry reminders:** sent at 1 month, 2 weeks, 1 day before expiry (`CARD_EXPIRY_MONTH_REMINDER`, `CARD_EXPIRY_2_WEEK_REMINDER`, `CARD_EXPIRY_DAY_REMINDER`) [webhook-spec names; exact schedule inferred from the names].
-- **Expiry:** a platform scheduled job moves `ACTIVE` cards past `expiryDate` to `EXPIRED` [diagram]. Staging: no automatic path except asking Shaype or using `PATCH /v0/utils/cards/{cardId}/expiry-date` [docs:card-operations][spec].
-- **`nameOnCard` default** [docs:card-creation]: `len(firstName + " " + lastName) < 23` → `firstName + " " + lastName`; else `firstName[0] + " " + lastName`. Explicit `nameOnCard` (≤ 23 chars) overrides. Docs example shows upper-case `M SMITH` [page:create-card] — casing rule undocumented.
-- **`nameOnCardLine2`:** ≤ 23 chars; omitted → nothing printed [page:create-card].
+- **Expiry:** a platform scheduled job moves `ACTIVE` cards past `expiryDate` to `EXPIRED` [docs:card-lifecycle-stauts]. Staging: no automatic path except asking Shaype or using `PATCH /v0/utils/cards/{cardId}/expiry-date` [docs:card-operations][spec].
+- **`nameOnCard` default** [docs:card-creation]: `len(firstName + " " + lastName) < 23` → `firstName + " " + lastName`; else `firstName[0] + " " + lastName`. Explicit `nameOnCard` (≤ 23 chars) overrides. Docs example shows upper-case `M SMITH` [docs:create-card] — casing rule undocumented.
+- **`nameOnCardLine2`:** ≤ 23 chars; omitted → nothing printed [docs:create-card].
 - **PIN:** create `pin` "typically 4 digits but supports 4-12 digits" (schema only enforces minLength 1) [spec]; `changeCardPin.newPin` pattern `\d{4}` [spec]. PIN copied from old card on re-issue [spec]. PIN blocked after 3 incorrect entries [spec].
 - **CVV:** 3 incorrect entries → blocked; `cvvRemainingTries` reaches 0 [spec].
 - **`otp`:** 6 digits, one-time [spec].
-- **Preference defaults:** `cardEnabled=true`, `mobileWalletPaymentsEnabled=true`, `cardNotPresentEnabled=false`, `cashWithdrawalEnabled=false`, `contactlessEnabled=false`, `magneticStripeEnabled=false` [spec]; overridable per client by CSM [docs:card-operations].
+- **Preference defaults:** `cardEnabled=true`, `mobileWalletPaymentsEnabled=true`, `cardNotPresentEnabled=false`, `cashWithdrawalEnabled=false`, `contactlessEnabled=false`, `magneticStripeEnabled=false` [spec]; "To enable card preferences by default during the card creation, please contact our CSM or CI team. This approach is preferable to migrate your existing data to Shaype platform." [docs:card-operations] — i.e. overridable per client, not via API [inferred].
 - **Preference precedence:** `cardEnabled=false` overrides every other flag except `mobileWalletPaymentsEnabled` [docs:card-operations].
 - **Preference editability:** only when `cardStatus == ACTIVE` [docs:card-operations]; per-type/phase table in §1.
 - **Idempotency:** `createHayCard.idempotencyKey` and `reissueHayCard.idempotencyKey` are required UUIDs "used to recognise any subsequent retries" [spec]; replay behaviour undocumented. `rewards` is idempotent via 200-vs-201 [spec]. `renewCard` has no key [spec].
@@ -669,7 +669,7 @@ No un-enrol transition exists [spec].
 **Exposes to other domains**
 - **Accounts API:** `GET /v0/accounts/{accountId}/cards` (`getCardsForAccountId`) → `HayCard[]` [spec].
 - **Customers API:** `GET /v0/customers/{customerHayId}/cards` (`getCardsForCustomerId`) → `HayCard[]` [spec].
-- **Utilities API (staging mocks):** `PATCH /v0/utils/cards/{cardId}/expiry-date` (`changeCardExpiryDate`, body `ChangeCardExpiryDateRequestBody { expiryDate!: date, example "2027-09-30" }` → `GenericMessage`) mutates `HayCard.expiryDate` [spec]; mock transaction generators (`generateAuthHold`, `generateCardTransaction`, `generateHoldAndUpdateHoldTransactions`, `generateAtmTransaction`, `generateRefundTransaction`) take `cardToken` and `cardUsage ∈ MAGNETIC_STRIPE | CONTACTLESS | CARD_PRESENT` [spec] — they need card status/preferences to decide `cardPreferenceOutcome`.
+- **Utilities API (staging mocks):** `PATCH /v0/utils/cards/{cardId}/expiry-date` (`changeCardExpiryDate`, body `ChangeCardExpiryDateRequestBody { expiryDate!: date, example "2027-09-30" }` → `GenericMessage`) mutates `HayCard.expiryDate` [spec]; mock transaction generators (`generateAuthHold`, `generateCardTransaction`, `generateHoldAndUpdateHoldTransactions`, `generateAtmTransaction`, `generateRefundTransaction`) all take `cardToken` (required); `cardUsage ∈ MAGNETIC_STRIPE | CONTACTLESS | CARD_PRESENT` (optional) exists only on `generateAuthHold` (`GenerateCardHoldTransactionRequestBody`), `generateCardTransaction` (`GenerateCardHoldAndSettleTransactionRequestBody`) and `generateHoldAndUpdateHoldTransactions` (`GenerateUpdateHoldTransactionRequestBody`); those same three schemas also carry `declineReason` (string, optional, `nullable: true`, "The reason for which the card transaction was automatically declined by the payment processor.", enum verbatim `CARD_EXPIRED | WRONG_CVV | CVV_BLOCKED | INCORRECT_PIN | ALLOWED_PIN_RETRIES_EXCEEDED | INVALID_MERCHANT | CARD_IS_NOT_ACTIVE | RESTRICTED_CARD`) [spec] — whether a `WRONG_CVV` / `CVV_BLOCKED` / `INCORRECT_PIN` / `ALLOWED_PIN_RETRIES_EXCEEDED` decline mutates `cvvRemainingTries` / `CardPinStatus.enabled` is undocumented [inferred]; `generateAtmTransaction` and `generateRefundTransaction` share `GenerateCardTransactionRequestBody`, whose only properties are `amount`, `cardToken`, `currency`, `merchantDetails` — no `cardUsage`, no `declineReason` [spec] — they need card status/preferences to decide `cardPreferenceOutcome`.
 - **Click to Pay API:** `POST /v0/cards/{cardId}/ctp` (`enrolCard`, body `EnrolCardToClickToPayRequestBody { email?: email ≤255 }`), `DELETE /v0/cards/{cardId}/ctp` (`unenrolCard`) — both no-op success when already in the target state [spec]. Separate domain; not part of the "Cards API" tag.
 - **Transactions / Holds:** `AuthorisationHold.cardId`, `FinancialTransaction.cardId` [spec]; webhook `TransactionEventDto.cardHayId`, `cardPreferenceOutcome`, `cardProcessorResponse`, `cardUsageDetails` [webhook-spec]. Authorisation checks consume `cardStatus` (BLOCKED → `CARD_BLOCKED`; not ACTIVE → processor `CARD_IS_NOT_ACTIVE`/`EXPIRED_CARD` [webhook-spec enum names; mapping inferred]) and the six preference flags (→ `CARD_FROZEN`, `CARD_NOT_PRESENT_DISABLED`, `CASH_WITHDRAWAL_DISABLED`, `CONTACTLESS_DISABLED`, `MAGNETIC_STRIPE_PAYMENT_DISABLED`, `MOBILE_WALLET_PAYMENT_DISABLED`) with overall `outcome = REFUSED_CARD_PREFERENCE` [docs:payment-transaction-outcome][webhook-spec].
 - **External authorisation (Shaype → client):** `POST /holds` body `Hold { holdId!, accountId!, cardId!, customerId, amount!, merchantDetails, rawExternalProcessorRequest }` — `cardId` is the card's UUID, `customerId` "Identifier of the customer who owns the card" [ext-auth-spec]. The client-side authoriser therefore needs card → account/customer lookup.
@@ -713,7 +713,7 @@ Related non-API error vocabularies (transactions domain, for completeness): `car
 11. **`cardEnabled` reported in non-ACTIVE states:** diagram shows `cardEnabled:false` for `AWAITING_ACTIVATION`/`BLOCKED`/`INACTIVE`/`EXPIRED` but `true` for the renewed old card. Is the stored flag mutated by status changes, or is the read value derived? Also: does activation restore a pre-existing `cardEnabled=false` (set on a virtual card before convert)?
 12. **`blockedBy` after unblock:** cleared to null, or left as last blocker? And may a client `unblockCard` a `PLATFORM`-blocked card?
 13. **Block/unblock/cancel repeated calls:** error or idempotent no-op? (Compare `enrolCard`/`unenrolCard` in Click to Pay which are explicitly no-op successes.)
-14. **PIN/CVV blocking triggers:** no B2B API decrements CVV tries or blocks the PIN; the local implementation needs a test-only hook (or Utilities-style mock) to simulate 3 failed entries. Also `unblockCardCvv`/`unblockCardPin` on an unblocked card: error or no-op?
+14. **PIN/CVV blocking triggers:** no Cards API operation decrements CVV tries or blocks the PIN; the Utilities mock endpoints (`generateAuthHold`, `generateCardTransaction`, `generateHoldAndUpdateHoldTransactions`) accept `declineReason = WRONG_CVV / CVV_BLOCKED / INCORRECT_PIN / ALLOWED_PIN_RETRIES_EXCEEDED` [spec], but whether those decline reasons mutate `cvvRemainingTries` / `CardPinStatus.enabled` is undocumented [inferred]. Decide whether the local Utilities mock decrements/blocks on them, or add a test-only hook to simulate 3 failed entries. Also `unblockCardCvv`/`unblockCardPin` on an unblocked card: error or no-op?
 15. **PIN length mismatch:** create accepts 4–12 digits (description) with only `minLength: 1` enforced; change-PIN enforces exactly 4. Decide validation for create (`^\d{4,12}$` [inferred]).
 16. **`nameOnCard` default details:** "smaller than 23 characters combined" — is 23 exactly allowed? Upper-casing (example `M SMITH`)? Applied to `OemProvisioningData.cardHolderName` too?
 17. **Expiry period:** years from `issuedDateTimeUtc` to `expiryDate` undocumented (typical Visa 3–5 years). Also the `page:create-card` example `expiryDate` (`2025-08-27`) is not a month-end, contradicting the field description.
