@@ -434,3 +434,88 @@ Whether `DISMISSED` billers count toward uniqueness is not stated.
 - Amount mode: alert "If amount ($) + Total Outbound BPAY Running Balance <= 0".
 - Percent mode: alert "If BPAY_DAILY_LIMIT * percentage (%) + Total Outbound BPAY Running Balance <= 0"; the percentage base for this type is `BPAY_DAILY_LIMIT`.
 - Alerts are emails, not webhooks, and do not refuse transactions. `LiquidityThreshold`: `percent` 1–100 int32 nullable, `amount` ≥ 1 nullable, `active`, `percental`, `external`, `clientReference`, `id` [spec].
+
+## 5. Cross-domain dependencies
+
+| other domain | what BPAY reads | what BPAY writes / triggers | source |
+|---|---|---|---|
+| **Accounts** (`Accounts API`) | `accountId` must resolve to an account for `retrieveBillers`, `createBPayBiller`, `makeBpayPayment` (all take `{accountId}`); account `status` (`HayAccount.status` enum: `PENDING_APPROVAL`, `APPROVED`, `ACTIVE`, `LOCKED`, `DORMANT`, `CLOSED`, `ACTIVE_IN_ARREARS`) — `LOCKED` "will block all transactions and transfers", `CLOSED` "is a final status" [docs:account-status]; the account's `availableBalance`; the `BPAY_DAILY_LIMIT` effective limit (`getAccountLimits`, `setAccountLimit`, `deleteAccountLimit` — `PUT/DELETE /v1/accounts/{accountId}/limits/{limitType}`, `limitType` enum includes `BPAY_DAILY_LIMIT`); risk level (`HIGH` zeroes all limits) | On `ACCEPTED` payment: debits `totalBalance`/`availableBalance`/`updatedBalance` by `amount` | [spec][docs:bpay][docs:account-status][docs:account-limits] |
+| **Customers** | `senderCustomerHayId` "Unique identifier (UUID) of the Customer (initiator of the transfer)"; echoed as webhook `customerHayId` and top-level `NotificationDto.customerHayId` | — | [spec][docs:bpay example] |
+| **Transactions** (`getTransactionById`, `searchTransactions`, tags) | — | Creates a `FinancialTransaction` with `type: BPAY_TRANSFER_OUT`, `transactionChannel: CUSCAL_BPAY_TRANSFER_OUT`, `originType: CUSTOMER`; returns its id as `transactionId`. `BPAY_IN_REJECT` channel exists for reversals/rejections. `BPAY_TRANSFER_IN` and `CUSCAL_BPAY_TRANSFER_IN` are "not currently in use" | [spec] |
+| **Scheduled payments** (`getScheduledPayments`, `getScheduledPaymentById`, `cancelScheduledPayment`) | — | A schedule with `recipient.recipientType: "BPAY"` and `recipient.bpayDetails` (`billerCode`, `billerReference`, `billerName`, `billerImage`, `category`) produces BPAY payments with `originType: SCHEDULED_PAYMENT` when due; schedule creation is GraphQL/UI only | [spec][docs:scheduled-payments] |
+| **Liquidity** (`getClientLiquidity`, `createLiquidityThreshold`, `updateLiquidityThreshold`, `getClientLiquidityThresholds`) | — | Accepted payments feed `ClientLiquidity.nonScheme.bpay` {`inbound`, `outbound`, `total`} and the `TOTAL_DAILY_OUTBOUND_BPAY` running balance used by email alerts | [spec][docs:liquidity-monitoring-and-alerting-1] |
+| **Holds** (`AuthorisationHold`) | — | Spec enum lists `BPAY_TRANSFER_OUT`/`BPAY_TRANSFER_IN` hold types; no doc says BPAY creates holds; webhook example has `isPending: false` and no `holdHayId` | [spec][docs:bpay] |
+| **External authorisation** (Shaype → client, `external-balance.yaml`) | For clients holding balances externally, Shaype calls client `POST /transactions` with `Transaction{transactionId, authorisationTransactionType: "BPAY_TRANSFER_OUT", accountId, amount{amount: string, currency}, counterpartDetails{name, basicAccountNumber}, description, reference, account{id, balance, holder{id, type: CUSTOMER|GROUP}, statistics{txn_count_last_10m, txn_sum_last_24h}}, customer{id, details, address, tenure_days}, transactionTimeUtc}` plus headers `Shaype-Version`, `Shaype-Trace-Id`, `Shaype-Idempotency-Key`, `Shaype-Timestamp`, `Shaype-Signature`, `Shaype-Key-Id`. Client answers 200 (approve) or 470 `Response{errorCode ∈ REFUSED_MAX_BALANCE_EXCEEDED | REFUSED_NOT_ENOUGH_FUNDS | REFUSED_SENDER_ACCOUNT_NOT_VERIFIED, reason}` or 500. Timeout for non-scheme = 10 s → `INTERNAL_ERROR`. Platform limit checks run first and "reject the transaction without performing a balance check on the client's side" (the listed limits are card/NPP ones; `BPAY_DAILY_LIMIT` is not in that list) | — | [ext-auth-spec][docs:external-authorisation-and-balance] |
+| **Webhooks** (`notification-webhooks.json`, client `/notification` endpoint) | — | `NotificationDto{type: "TRANSACTION", transactionEvent{transactionType: "BPAY_TRANSFER_OUT", …}}`; platform retries 18 times over up to 48 h with exponential backoff on client 401/403/429/5XX | [webhook-spec][docs:webhook-notification] |
+| **External biller directory / Look Who's Charging** (not a Shaype API) | Biller existence + active flag, `shortName`, `longName`, `industryAnzsicCode`, CRN rules, amount limits; logo `image`/`billerImage` and enriched `longName` from Look Who's Charging | — | [docs:bpay] |
+
+## 6. Error catalogue
+
+No source gives any `ErrorResponse.message`/`details` text for BPAY. The Staging mock returns an "error message … specific to the Staging environment" when the payload does not match the fixtures [docs:bpay], text not shown.
+
+### HTTP-level errors (all bodies `ErrorResponse`) [spec]
+
+| operation | 400 | 403 | 404 | 409 | 422 |
+|---|---|---|---|---|---|
+| `retrieveBillers` | declared | declared | not declared | not declared | declared |
+| `createBPayBiller` | declared | declared | not declared | **declared** ("Conflict") | declared |
+| `makeBpayPayment` | declared | declared | not declared | not declared | declared |
+| `validateBpay` | declared | declared | not declared | not declared | declared |
+| `retrieveBpayBiller` | declared | declared | not declared | not declared | declared |
+| `updateBpayBiller` | declared | declared | not declared | not declared | declared |
+
+Plus `500 Internal Server Error` and `501 Not Implemented` on all six. No operation declares 404 — unknown `accountId`/`billerId` must map to 400/403/422 [inferred].
+
+### Documented failing conditions and their (partly inferred) mapping
+
+| condition | operation(s) | result | source |
+|---|---|---|---|
+| Body/param fails schema (missing required, length, uuid format, `amount <= 0`) | all | 400 [inferred] | [spec constraints] |
+| "active biller is not found for that biller code" | `createBPayBiller` | error; 422 [inferred] | [docs:bpay] |
+| `reference` duplicates another saved biller's reference | `createBPayBiller` (and `updateBpayBiller reference`) | error; 409 on create [inferred], unstated on update | [docs:bpay] |
+| `name` "must not match an existing record with same nickname" | `createBPayBiller` (and `updateBpayBiller name`) | error; 409 on create [inferred] | [docs:bpay] |
+| biller code / reference fail biller rules | `validateBpay` | error; 422 [inferred] | [docs:bpay] |
+| `status` not in {ACTIVE, DISMISSED} | `updateBpayBiller` | error; 400/422 [inferred] | [spec description] |
+| BPAY_DAILY_LIMIT breached (rolling 24 h incl. this txn) | `makeBpayPayment` | 200 `outcome: REFUSED_DAILY_BPAY_LIMIT_BREACHED` [spec enum] — docs text: `REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED` "Transaction declined because the total daily BPAY_DAILY_LIMIT limit for outbound BPAY transactions has been exceeded." | [spec][docs:bpay][docs:payment-transaction-outcome] |
+| `amount` "cannot be zero and must not exceed the available balance" | `makeBpayPayment` | 200 `REFUSED_INSUFFICIENT_FUNDS` [spec enum]; zero amount fails schema first (400) [inferred] | [docs:bpay][spec] |
+| "amount must exactly match the expected amount due" / outside biller Lower–Upper limit | `makeBpayPayment` | 200 `REFUSED_BPAY_INVALID_PAYMENT` — "Transaction declined because the BPAY payment details are incorrect or invalid." [inferred mapping] | [docs:bpay][docs:payment-transaction-outcome] |
+| Unknown/inactive biller code | `makeBpayPayment` | 200 `REFUSED_BPAY_INVALID_BILLER_CODE` — "Transaction declined due to an invalid BPAY biller code provided." | [docs:payment-transaction-outcome] |
+| CRN fails length/check-digit | `makeBpayPayment` | 200 `REFUSED_BPAY_INVALID_REFERENCE` — "Transaction declined due to an invalid BPAY reference number." | [docs:payment-transaction-outcome] |
+| Gateway rejection | `makeBpayPayment` | 200 `REFUSED_BPAY_REJECTED` — "Transaction declined because the BPAY payment was rejected by the payment gateway." | [docs:payment-transaction-outcome] |
+| Account `LOCKED` | `makeBpayPayment` | 200 `REFUSED_ACCOUNT_BLOCKED` — "Transaction declined as the account is currently blocked." | [docs:payment-transaction-outcome][docs:account-status] |
+| Account `CLOSED` | `makeBpayPayment` | 200 `REFUSED_ACCOUNT_CLOSED` — "Transaction declined because the account has been closed." | [docs:payment-transaction-outcome] |
+| Recipient blocked/closed (Shaype-to-Shaype only; no BPAY meaning) | `makeBpayPayment` | `REFUSED_RECIPIENT_ACCOUNT_BLOCKED` / `REFUSED_RECIPIENT_ACCOUNT_CLOSED` — "This occurs when transferring funds between Shaype accounts." | [docs:payment-transaction-outcome] |
+| Capability not enabled | `makeBpayPayment` | `REFUSED_CAPABILITY_NOT_ENABLED` — in enum, undocumented | [spec] |
+| Internal failure / external-auth timeout (10 s) | `makeBpayPayment` | `INTERNAL_ERROR` — "Transaction failed due to a system internal error within the payment processing service." | [docs:payment-transaction-outcome][docs:external-authorisation-and-balance] |
+| `INVALID_PAYMENT` | `makeBpayPayment` | in enum; no description anywhere | [spec] |
+| External-balance client refuses | `makeBpayPayment` (via callback) | client HTTP 470 `errorCode` `REFUSED_MAX_BALANCE_EXCEEDED` / `REFUSED_NOT_ENOUGH_FUNDS` / `REFUSED_SENDER_ACCOUNT_NOT_VERIFIED`; resulting API `outcome` not stated (`REFUSED_INSUFFICIENT_FUNDS` for the second [inferred]) | [ext-auth-spec] |
+| Post-acceptance Cuscal rejection, error codes 100–199 | async | "an issue with the transaction itself which may or may not be related to customer input"; surfacing undocumented | [docs:bpay] |
+
+Outcomes documented as "not currently in use" (never emit) [docs:payment-transaction-outcome]: `REFUSED_ACCOUNT_PREFERENCE`, `REFUSED_DAILY_LIMIT_EXCEEDED`, `REFUSED_AML`, `REFUSED_ACCOUNT_NOT_FOUND_FOR_CARD_TOKEN`, `REFUSED_UNDETERMINED_BALANCE_FOR_ACCOUNT`, `REFUSED_ACCOUNT_NOT_FOUND_FOR_CURRENCY`, `REFUSED_UNDETERMINED_SPENDING_FOR_ACCOUNT`, `REFUSED_UNDETERMINED_TOP_UPS_FOR_ACCOUNT`, `REFUSED_UNDETERMINED_ATM_WITHDRAWALS_FOR_ACCOUNT`.
+
+## 7. Open questions
+
+Decisions the implementer must make; none of these is answered by spec or docs.
+
+1. **`retrieveBillers` response shape.** Spec says a single `BPayBillerResponse` object, but the operation is a paged list (`limit`/`offset` required, summary plural). Almost certainly an array (or a wrapper) in reality. Decide: return `BPayBillerResponse[]`.
+2. **Daily-limit outcome name.** Sync enum has `REFUSED_DAILY_BPAY_LIMIT_BREACHED`; the outcome catalogue, `TransactionOutcome`, and the webhook enum only have `REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED`. Suggested: sync response uses `REFUSED_DAILY_BPAY_LIMIT_BREACHED` (this endpoint's own enum); if a webhook is emitted for refusals, use the webhook enum's value.
+3. **Are webhooks emitted for refused payments?** Only an `ACCEPTED` example exists. Three sync outcomes (`REFUSED_DAILY_BPAY_LIMIT_BREACHED`, `REFUSED_INSUFFICIENT_FUNDS`, `INVALID_PAYMENT`) have no webhook-enum counterpart, which suggests refusals are sync-only. Decide: no webhook on refusal.
+4. **`transactionId` on refusal.** Populated or absent when `outcome != ACCEPTED`? Decide (suggest absent/null).
+5. **Idempotency semantics of `idempotencyKey`.** Same key + same body → return the original response? Same key + different body → 409/422? Retention window? None stated. Decide (suggest: replay original response; mismatched body → 422).
+6. **Duplicate-rule HTTP codes on `createBPayBiller`.** Which of duplicate `reference`, duplicate `name`, biller-not-found maps to 409 vs 422 vs 400. Suggested mapping in §1.
+7. **Uniqueness scope.** Per account (assumed) or per client/customer? Do `DISMISSED` billers still block reuse of their `name`/`reference`?
+8. **Initial biller `status`** and whether `DISMISSED → ACTIVE` is permitted; whether `retrieveBillers` returns `DISMISSED` billers; and whether `status` should be added to `BPayBillerResponse` (the spec omits it — a strict cleanroom keeps it hidden).
+9. **`retrieveBpayBiller` semantics.** Spec: lookup by saved-biller UUID. Docs: "based on the Biller Code" via the Look Who's Charging SearchAPI. Follow the spec (UUID) — but then the docs' "lookup a merchant by the biller code" has no endpoint.
+10. **Does `makeBpayPayment` require a saved biller?** Request carries `billerCode`+`reference` directly and no biller id; treat saved billers as purely a convenience (no precondition). Should a successful payment auto-save the biller when `name` is supplied? Not stated; suggest no.
+11. **Does `senderCustomerHayId` have to own/be linked to `accountId`?** Not stated; what error if not (403? `INVALID_PAYMENT`?).
+12. **Biller directory and CRN rules.** `MOD10V01`, `MOD11V09`, `ICRNAMT` are named but unspecified here; Staging accepts only the enumerated Valid CRNs. Decide whether to implement the real mod-10/mod-11 algorithms or a fixture whitelist (fixture whitelist matches Staging behaviour). Seed with the §2 fixtures; note their internal inconsistencies (fixture `1016` CRN length, webhook CRN `271682361223` not in `93880`'s list, five-digit industry code `94540`).
+13. **`image`/`billerImage` source.** Look Who's Charging is external; the local implementation must fabricate a URL (or leave null). Also whether `PATCH image` can override the enriched value.
+14. **Where BPAY details live on the stored `FinancialTransaction`.** `ExternalCounterpartDetails` has no `bpayDetails`; `reference` is documented as NPP-only. Decide what `getTransactionById` returns for a BPAY transaction (suggest `counterpartDetails.name` = payer-supplied `name`, and expose biller code/CRN in `description`/`reference` or extend the schema).
+15. **Post-acceptance rejection.** The Cuscal result-file rejection (codes 100–199) has no documented surface. Options: emit a `TRANSACTION` webhook with `outcome: REFUSED_BPAY_REJECTED`, and/or create a `BPAY_IN_REJECT`-channel credit reversing the debit. Suggest making this a test-controllable hook rather than a default behaviour.
+16. **Authorisation hold.** `AuthorisationHold.type` includes `BPAY_TRANSFER_OUT`; the webhook example is `isPending: false`. Suggest no hold: debit immediately.
+17. **`REFUSED_RECIPIENT_ACCOUNT_*`, `REFUSED_CAPABILITY_NOT_ENABLED`, `INVALID_PAYMENT`** — in the enum with no BPAY trigger documented. Suggest never emitting the first two; use `INVALID_PAYMENT` only if a generic non-`REFUSED_BPAY_*` validation failure is needed.
+18. **Amount-vs-balance vs external balance.** For an external-balance client, does the platform still enforce "must not exceed the available balance" itself, or delegate wholly to the callback? The doc lists only card/NPP limits as pre-checks; BPAY_DAILY_LIMIT is not in that list though the BPAY doc says it is checked.
+19. **Currency.** `BPayPaymentRequestBody` has no currency; multi-currency accounts exist elsewhere in the spec (FX). Assume the account's currency (AUD).
+20. **`updateBpayBiller` 204 body.** Spec declares a JSON `object` content on 204; send no body.
+21. **Unknown ids.** No 404 anywhere; choose 400 vs 422 for unknown `accountId`/`billerId`, and 403 for a `billerId` outside the caller's client.
+22. **`limit`/`offset` validation** on `retrieveBillers` (missing, negative, max) — undefined; suggest 400 when missing/negative.
