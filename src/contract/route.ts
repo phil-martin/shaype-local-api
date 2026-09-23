@@ -17,8 +17,16 @@ export function defineRoute<P = any, Q = any, B = any>(app: FastifyInstance, ctx
   if (ctx.handled.has(operationId)) throw new Error(`Duplicate handler for operation ${operationId}`)
   ctx.handled.add(operationId)
 
+  // Only compile serializers for the success body and for the few 4xx responses that declare a domain
+  // schema; ErrorResponse bodies are produced by the error handler, so compiling them per route
+  // (5 codes x 169 routes) would only slow startup.
   const response: Record<string, JsonSchema> = {}
-  for (const [code, schema] of Object.entries(op.responses)) if (schema) response[code] = schema
+  for (const [code, schema] of Object.entries(op.responses)) {
+    if (!schema) continue
+    const isError = code.startsWith('4') || code.startsWith('5')
+    if (isError && (schema as { $ref?: string }).$ref === 'res:ErrorResponse#') continue
+    response[code] = schema
+  }
 
   const schema: Record<string, unknown> = { response }
   if (op.params) schema.params = op.params
