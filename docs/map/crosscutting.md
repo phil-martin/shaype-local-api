@@ -38,7 +38,7 @@ Counts from `jq` over every operation's `responses` keys:
 | 200 | 166 | 163× `Success`; 1× `Card was already enrolled.` (rewards); 1× `Branch Identifier eligibility check completed` (checkBsbIsSupportedByPayTo); 1× `Success (response may include per-pair errors)` (getFxRates) | per-op |
 | 201 | 2 | `Card successfully enrolled.` (rewards); `Created` (createOrder) | per-op |
 | 202 | 1 | `Accepted` (closeAccount) | per-op |
-| 204 | 1 | `Success` (updateBpayBiller) | none |
+| 204 | 1 | `Success` (updateBpayBiller) | `{type: object}` (application/json, empty object) |
 | 400 | 169 | 168× `Bad Request`; 1× `Invalid request - tag validation failed, list is empty, or operation is missing` | `ErrorResponse` (169/169) |
 | 403 | 169 | `Forbidden` | `ErrorResponse` (169/169) |
 | 404 | 2 | `Operator not found` (getOperatorById); `Product not found` (getProductById) | `OperatorSummary` / `ProductSummary` (**not** ErrorResponse — almost certainly a generator artefact) |
@@ -63,13 +63,36 @@ Implementer default `[inferred]`: 400 for malformed JSON / schema violations, 42
 | `getOperatorById` | 404 | `Operator not found` | `OperatorSummary` |
 | `getProductById` | 404 | `Product not found` | `ProductSummary` |
 
-Ops with a non-boilerplate 422 description but still `ErrorResponse`: `createHayAccount`, `createHayAccountForGroup` (`Unprocessable Entity`), `verifyBranchIdentifier` (`Branch Identifier format is invalid`). The single non-boilerplate 400 (`Invalid request - tag validation failed, list is empty, or operation is missing`) is on `modifyTagsForTransaction (/v1/transactions/{transactionHayId}/tags)`. `[spec]`
+Ops with a non-boilerplate 422 description but still `ErrorResponse`: `createHayAccount`, `createHayAccountForGroup` (`Unprocessable Entity`), `verifyBranchIdentifier` (`Branch Identifier format is invalid`) — these three are also the only error responses with an `examples` body (§1.4). The single non-boilerplate 400 (`Invalid request - tag validation failed, list is empty, or operation is missing`) is on `modifyTagsForTransaction (/v1/transactions/{transactionHayId}/tags)`. `[spec]`
 
 ### 1.4 Example error bodies
 
-- The B2B spec contains **no** `example`/`examples` on any 4xx/5xx response (all 250 example nodes in the spec sit on 2xx bodies or schema properties). `[spec]`
+- Exactly **three** 4xx/5xx responses carry an `examples` node, each a full `ErrorResponse` body: the 422 of `createHayAccount`, `createHayAccountForGroup` and `verifyBranchIdentifier`. No other 4xx/5xx response has `example`/`examples` (the spec has 91 `example` + 7 `examples` nodes in total; the other four `examples` sit on 2xx responses or request bodies). `[spec]`
+- `createHayAccount` 422, example key `Not enough permissions`: `[spec]`
+
+```json
+{
+  "message": "PERMISSION_DENIED: Account cannot be created for customer with id eed1e718-b1ca-4b94-a508-3d2d41c2e96b as their status is currently BLOCKED",
+  "details": "Please refer to the API documentation or contact Shaype for more info with the traceId.",
+  "status": "422",
+  "traceId": "b24daeb7-4242-4ff1-ba50-9825d5deedd8"
+}
+```
+
+- `createHayAccountForGroup` 422, example key `Not enough permissions` — identical `details`/`status`/`traceId`, `message`: `"PERMISSION_DENIED: Account cannot be created for group with id f64f41eb-41f4-4619-9fc4-68d292aeb0f9, all members of the group should have an ACTIVE status"`. `[spec]`
+- `verifyBranchIdentifier` 422, example key `Invalid Branch Identifier format`: `[spec]`
+
+```json
+{
+  "message": "branchIdentifier format is not correct.",
+  "details": "Please refer to the API documentation or contact Shaype for more info with the traceId.",
+  "status": "422",
+  "traceId": "97e1bc06-ba16-4718-9bdd-d6d78ecdc3ea"
+}
+```
+
 - The reference pages under `developer.shaype.com/reference/*` only repeat the `ErrorResponse` schema. `[docs]`
-- The **one real error body** found in all fetched docs, from the PayTo staging test suite (a `createMandate` rejection): `[docs:payto-staging-testing-suite]`
+- The **one real error body** in the fetched docs, from the PayTo staging test suite (a `createMandate` rejection): `[docs:payto-staging-testing-suite]`
 
 ```json
 {
@@ -80,7 +103,7 @@ Ops with a non-boilerplate 422 description but still `ErrorResponse`: `createHay
 }
 ```
 
-What that single example establishes: `status` is the numeric HTTP code **as a string** (`"422"`); `traceId` is a UUID; `details` is a generic constant sentence; `message` is free text of the shape `<REASON_CODE>: <upstream code> - <text>`. Whether `message` always starts with a `REASON_CODE:` prefix is unknown — one sample. `[docs]`+`[inferred]`
+What the four samples (3 spec + 1 docs) establish: `status` is the numeric HTTP code **as a string** (`"422"` in all four); `traceId` is a UUID; `details` is the same constant sentence in all four ("Please refer to the API documentation or contact Shaype for more info with the traceId."); `message` is free text. Three of four start with a `<REASON_CODE>: ` prefix (`NOT_FOUND:`, `PERMISSION_DENIED:` ×2) but the `verifyBranchIdentifier` sample does **not** (`branchIdentifier format is not correct.`), so the prefix is not universal. All four are 422s — nothing shows a 400/403/500 body. `[spec]+[docs]`
 
 ### 1.5 What is unknown about errors
 
@@ -206,7 +229,7 @@ All list/search endpoints return `type: array` at the top level, never an envelo
 
 ### 4.1 Entity IDs `[spec]`
 
-Every entity identifier is `type: string, format: uuid`, in path params, bodies and responses alike. No pattern and no example on any path param (only `branchIdentifier` has an example, `636636`). Naming is inconsistent between "…HayId" (response objects) and "…Id" (path params / request bodies) for the same thing:
+All entity-ID path params are `type: string, format: uuid`, and entity IDs in bodies/responses likewise. The non-uuid path params are: `{payId}` (plain string, 7 ops), `{instructionId}` (plain string, `getMandatePaymentStatus`), `{limitType}` (enum — 11 values on `setAccountLimit`, 16 on `deleteAccountLimit`, see §10), and `{bsbNumber}`/`{branchIdentifier}` (`pattern: ^\d{6}$`, §4.2; `branchIdentifier` is the only path param with an `example`, `636636`). No other path param carries a pattern or example. Naming is inconsistent between "…HayId" (response objects) and "…Id" (path params / request bodies) for the same thing:
 
 | Concept | Response field | Path / request field | Notes |
 |---|---|---|---|
@@ -223,6 +246,7 @@ Every entity identifier is `type: string, format: uuid`, in path params, bodies 
 | Product (perks) | `id`, `productId` | path `{id}` | |
 | Scheduled payment | `hayId` | path `{paymentId}`; one `{accountId}` is mis-described as "Unique identifier (UUID) of the Scheduled Payment" | |
 | Rule / Threshold / Conversion / Quote | `id`, `conversionId`, `quoteId` | `{ruleId}`, `{thresholdId}`, `{conversionId}` | |
+| Instruction (PayTo payment) | `instructionId` — plain string: MakeAdhocPaymentResponseBody (minLength 1), ExternalMandatePaymentDetails (minLength 1, maxLength 35) | path `{instructionId}` plain string (`getMandatePaymentStatus`) | not a UUID |
 | Idempotency | `idempotencyKey` uuid | body only | §7.2 |
 | Trace | `traceId` string — ErrorResponse: "TraceID that can be used by HAY for troubleshooting the request"; DirectDebitResponse[V1]: "Unique identifier (UUID) of the request used by Shaype to troubleshoot" | | docs example is a UUID |
 
@@ -239,7 +263,7 @@ Implementer default `[inferred]`: generate v4 UUIDs; accept any RFC-4122 string 
 | `accountNumber` | HayAccount | `string`, "Account number, 5-9 digits in length" |
 | `accountNumber` | SearchAccountsRequestBody, AccountTransfer | `string`, `pattern: [\d]{5,9}` |
 | `accountNumber` | CreateAccountRequestBody | `string`, `pattern: ^[1-9][0-9]{7,8}$`, "Account number, 8-9 digits in length", nullable (client-chosen number) |
-| `accountNumber` | PayTo Create*DetailsDto / GetMandateActions*Dto | `string`, `pattern: ^[ -~]{11,15}$` (or minLength 11 / maxLength 15), "BSB (Bank State Branch) of Account, 6 digits in length combined with account number, 5-9 digits in length." — **BSB+account concatenated** |
+| `accountNumber` | PayTo: CreateDebtorDetailsDto (`minLength 11 / maxLength 15`, no pattern; CreateCreditorDetailsDto has no `accountNumber` — it uses `accountId`); the six GetMandateActionsDetails{Creation,Amendment,Porting}{Creditor,Debtor}InformationDto (`pattern: ^[ -~]{11,15}$`); GetMandateDebtorDetailsDto (unconstrained `string`) | all three shapes share the description "BSB (Bank State Branch) of Account, 6 digits in length combined with account number, 5-9 digits in length." — **BSB+account concatenated** |
 | `branchNumber` + `accountNumber` | BasicAccountNumber, PayIdAccountDetails | `branchNumber` "BSB (Bank State Branch) of Account, 6 digits in length" |
 | `senderBsb`/`recipientBsb`, `senderAccountNumber`/`recipientAccountNumber` | Direct-debit / DE schemas | `\d{6}` and `\d{5,9}` (utility mocks: `[0-9]{6}`, `[0-9]{6,9}`, `[0-9]{8}`) |
 | path `{bsbNumber}`, `{branchIdentifier}` | NPP eligibility | `pattern: ^\d{6}$` |
@@ -250,7 +274,7 @@ Implementer default `[inferred]`: issue one fixed 6-digit BSB (e.g. `636220` fro
 
 ### 4.3 Other formatted identifiers `[spec]`
 
-`businessNumber` ABN 11 chars; `companyNumber` ACN / `registeredBodyNumber` ARBN / `registeredSchemeNumber` ARSN 9 chars; `merchantCategoryCode` `^\d{4}$`; `merchantId` "maximum 15 characters", `terminalId` "maximum 8 characters"; `mobileNumber` E.164 `^\+[1-9][0-9]{6,14}$`; `endToEndId`/`instructionId` ≤35 chars; `partyReference` `^[ -~]{1,35}$`; `initgPtyIdOrgId` BIC11 `^[A-Z0-9]{4}[A-Z]{2}[A-Z0-9]{2}[A-Z0-9]{3}$`; Cuscal `paymentId` = BIC11 + 23 digits; `externalCustomerId` ≤64 chars; `identityDocumentCardNumber` `^[a-zA-Z0-9]{6,10}$`.
+`businessNumber` ABN 11 chars; `companyNumber` ACN / `registeredBodyNumber` ARBN / `registeredSchemeNumber` ARSN 9 chars; `merchantCategoryCode` `^\d{4}$` string (MerchantDetails, nullable) **but `integer int32` on ExternalMerchantDetails**; `merchantId` "maximum 15 characters", `terminalId` "maximum 8 characters"; `mobileNumber` E.164 `^\+[1-9][0-9]{6,14}$`; `endToEndId`/`instructionId` ≤35 chars; `partyReference` `^[ -~]{1,35}$`; `initgPtyIdOrgId` BIC11 `^[A-Z0-9]{4}[A-Z]{2}[A-Z0-9]{2}[A-Z0-9]{3}$`; Cuscal `paymentId` = BIC11 + 23 digits; `externalCustomerId` ≤64 chars; `identityDocumentCardNumber` `^[a-zA-Z0-9]{6,10}$`.
 
 ---
 
@@ -260,7 +284,7 @@ Implementer default `[inferred]`: issue one fixed 6-digit BSB (e.g. `636220` fro
 
 Three representations coexist:
 
-1. **Plain `number`, 2 dp, no currency** — the dominant form. `amount` on CreateTransactionRequestBody, CreateDirectDebitRequestBody, AccountToStackTransferRequestBody, HayStackTransaction, DeTransactionDetails[V1] ("Value of the Transaction, to 2 decimal places"); all `HayAccount` balances (`totalBalance`, `availableBalance`, `heldBalance`, `lockedBalance`, `stacksBalance`, `overdraftBalance`, `overdraftLimit`, `technicalOverdraftBalance`), `FinancialTransaction.rollingAccountBalance`, limits (`limitAmount`, `maxBalanceLimit`, `overdraftLimit`), stack `balance`/`targetAmount` (`format: double` on CreateHayStackRequestBody). Request amounts usually carry `minimum: 0, exclusiveMinimum: true`. Utility mock card amounts are **negative** (`maximum: 0, exclusiveMaximum: true`, "Transaction amount."). Docs show balances serialised as bare `0` (`"totalBalance": 0`). `[docs:sample-requests-responses]`
+1. **Plain `number`, 2 dp, no currency** — the dominant form. `amount` on CreateTransactionRequestBody, CreateDirectDebitRequestBody, AccountToStackTransferRequestBody, HayStackTransaction, DeTransactionDetails[V1] ("Value of the Transaction, to 2 decimal places"); all `HayAccount` balances (`totalBalance`, `availableBalance`, `heldBalance`, `lockedBalance`, `stacksBalance`, `overdraftBalance`, `overdraftLimit`, `technicalOverdraftBalance`), `FinancialTransaction.rollingAccountBalance`, limits (`limitAmount`, `maxBalanceLimit`, `overdraftLimit`), stack `balance`/`targetAmount` (`format: double` on CreateHayStackRequestBody). Numeric constraints are the exception, not the rule: `minimum: 0, exclusiveMinimum: true` (strictly positive) is declared only on BPayPaymentRequestBody.amount, TransferOutRequestBody.amount, StackToStackTransferRequestBody.amount, ConversionQuoteRequest.amount, LiquidityConversionRequest.amount, GenerateInboundDeRequestBody.amount, GenerateInboundNppTransactionRequestBody.amount, ExternalSetAccountLimitRequestBody.limitAmount and UpdateMaxBalanceLimitRequestBody.maxBalanceLimit; CreateHayStackRequestBody / UpdateStackRequestBody `targetAmount` have `minimum: 0` (inclusive); threshold `amount`s have `minimum: 1`. The `amount` on CreateTransactionRequestBody, CreateDirectDebitRequestBody, AccountToStackTransferRequestBody and StackToAccountTransferRequestBody is **unconstrained** — the spec does not reject 0 or negative there. Utility mock card amounts are **negative** (`maximum: 0, exclusiveMaximum: true`, "Transaction amount."). Docs show balances serialised as bare `0` (`"totalBalance": 0`). `[docs:sample-requests-responses]`
 
 2. **`CurrencyAmount`** `{ amount: number "Amount of the transaction to 2 decimal places", currency: enum(162 ISO-4217 codes) }`, both required, description "Monetary value and currency". Embedded by 14 schemas: AuthorisationHold (`currencyAmount`, `originalCurrencyAmount`), FinancialTransaction (same two), HayScheduledPayment / HayArchivedScheduledPayment, PaymentDto, MakeAdhocPaymentRequestBody, SetScheduledPaymentInitiationAmountRequestBody, Create/GetPaymentTermsDto(+Summary), Conversion{Quote,Execute,Details}Response, LiquidityBalancesResponse (example `[{"amount":1250.75,"currency":"AUD"},{"amount":99.1,"currency":"USD"}]`). Docs example: `"amount": { "amount": 2.10, "currency": "AUD" }`. `[docs:payto-staging-testing-suite]`
 
@@ -272,13 +296,18 @@ Implementer note `[inferred]`: store a decimal string or minor units internally;
 
 ### 5.2 Currency `[spec]`
 
-`currency` is a 162-value ISO-4217 enum (`AED, AFN, ALL, …` incl. `CNH`, `XCG`, `ZWG`) on CurrencyAmount, HayAccount, HomeCurrencyBalanceEquivalent and the FX schemas; `nullable: true` on CreateAccountRequestBody and the mock-card bodies ("Transaction currency. Defaults to AUD if not provided."). Non-enum `string` on Money / MonetaryValue and CurrencyAmountDto (`^[A-Z]{3}$`).
+Three distinct enums exist — do not conflate them:
+
+- **162-value ISO-4217 enum** (`AED, AFN, ALL, …` incl. `CNH`, `XCG`, `ZWG`) on CurrencyAmount, HayAccount, HomeCurrencyBalanceEquivalent, the four `Generate*TransactionRequestBody` mock-card bodies (`nullable: true`, "Transaction currency. Defaults to AUD if not provided."), and the FX fields `buyCurrency`/`sellCurrency`/`depositCurrency`/`clientBuyCurrency`/`clientSellCurrency` on ConversionQuoteRequest, FxRateEntry, LiquidityConversion, LiquidityConversionRequest, LiquidityDetailedRate.
+- **`CreateAccountRequestBody.currency` — a separate 31-value enum, `nullable: true`** ("Account currency as three letter code as per ISO 4217."): `AED, AUD, BHD, CAD, CHF, CNY, CZK, DKK, EUR, GBP, HKD, HUF, ILS, JPY, KES, KWD, MXN, NOK, NZD, OMR, PLN, QAR, RON, SAR, SEK, SGD, THB, TRY, UGX, USD, ZAR`. An account can therefore only be *created* in one of these 31, even though HayAccount.currency can *represent* any of the 162.
+- **`FxComplianceDataRequest.expectedTransactionCurrency` — its own 193-value enum, `nullable: true`** ("Only one Shaype-supported currency is accepted.").
+- Non-enum `string` on Money / MonetaryValue and CurrencyAmountDto (`^[A-Z]{3}$`).
 
 ### 5.3 Dates and times `[spec]`
 
 - **Timestamps**: `type: string, format: date-time`, field names end in `Utc` — `creationDateTimeUtc`, `lastUpdatedDateTimeUtc`, `closedDateTimeUtc`, `approvedDateTimeUtc`, `issuedDateTimeUtc`, `voidDateTimeUtc`, `transactionTimeUtc`, `clearingTimeUtc`, `expiresAtUtc`, `createdAtUtc`, `closedAtUtc`, `registrationDateTimeUtc`, `lastResolutionDateTimeUtc`, `lastProcessedDateTimeUtc`, `fromDateTimeUtc`/`toDateTimeUtc`. Description boilerplate "DateTime in UTC format when …". Docs render them with **microseconds and `Z`**: `"creationDateTimeUtc": "2024-03-12T22:59:48.357089Z"`; the create-case sample uses millis: `"timestamp": "2024-03-12T23:00:17.559Z"`. `[docs:sample-requests-responses]`
-- Exceptions without the suffix: `creationDateTime` (PaymentInstruction, date-time), perks `createdAt`/`confirmedAt`/`dueDate` (plain string "ISO 8601"), PayTo action `time` (regex-constrained `…Z`, "UTC expressed without offset"), `UserConsentRequestBody.consentObtainedAt`, and `accessExpiresUtc`, which is an **`integer int64`** (epoch — units not stated).
-- **Dates**: `format: date` (`YYYY-MM-DD`) — `dateOfBirth`, `identityDocumentExpiry` (ex `2030-06-15`), card `expiryDate` (ex `2027-09-30`, "date of the last day of the expiry month and year" — but on HayCard it is a plain `string`), `processingDate`, `startDate`/`endDate`, `validityStartDate`/`validityEndDate` (PayTo DTOs use a leap-year-aware regex instead; end-date semantics "valid until 23:59:59.999 Australia Sydney time"), query `fromUtc`/`toUtc`/`date`/`conversionDate`.
+- Exceptions without the suffix — `format: date-time`: `PaymentInstruction.creationDateTime`, `UserConsentRequestBody.consentObtainedAt`, `ApiDigitalWallet.createdAt`, `ExternalCase.timestamp`, `GetMandateResponseBody.registrationDateTime`, `LiquidityConversion.{conversionDate, createdAt, depositRequiredAt, settlementDate, updatedAt}`, `LiquidityDetailedRate.settlementCutOffTime` (these eleven are the complete set of un-suffixed `date-time` properties). Not `date-time` at all: perks `createdAt`/`confirmedAt`/`dueDate` (plain string "ISO 8601"), PayTo action `time` (regex-constrained `…Z`, "UTC expressed without offset"), `OemProvisioningData.expiryDate` (plain string), and `accessExpiresUtc`, which is an **`integer int64`** (epoch — units not stated).
+- **Dates**: `format: date` (`YYYY-MM-DD`) — `dateOfBirth`, `identityDocumentExpiry` (ex `2030-06-15`), card `expiryDate` (`format: date` on HayCard — "Expiry date of the Card (date of the last day of the expiry month and year)" — and on ChangeCardExpiryDateRequestBody, ex `2027-09-30`; a plain `string` only on OemProvisioningData), `processingDate`, `startDate`/`endDate`, `validityStartDate`/`validityEndDate` (PayTo DTOs use a leap-year-aware regex instead; end-date semantics "valid until 23:59:59.999 Australia Sydney time"), query `fromUtc`/`toUtc`/`date`/`conversionDate`.
 - Timezone: everything is UTC unless the field says otherwise (only the PayTo validity dates reference Australia/Sydney). `[spec]`
 
 ---
@@ -322,7 +351,7 @@ Computed with jq over `$ref`s inside each operation (direct) and inside each com
 
 **HayAccount** (22 props; `required: ["customData"]` — sic): `accountHayId, accountHolderId, accountHolderType{CUSTOMER,GROUP}, productId, parentAccountId(nullable), accountNumber, bsb, currency{enum}, status{PENDING_APPROVAL,APPROVED,ACTIVE,LOCKED,DORMANT,CLOSED,ACTIVE_IN_ARREARS}, blockedBy{CLIENT,PLATFORM}, totalBalance, availableBalance, heldBalance, lockedBalance, stacksBalance, overdraftBalance, overdraftLimit, technicalOverdraftBalance, homeCurrencyBalanceEquivalent→HomeCurrencyBalanceEquivalent, customData(object,nullable), creationDateTimeUtc, closedDateTimeUtc`. The docs create-account sample returns **no** `customData` key despite the schema marking it required, and `getHayAccount` has `?expand=customData` "Includes Custom Data with returned Account object". `[docs:sample-requests-responses]`+`[spec]`
 
-**HayCard** (15 props, none required): `cardHayId, accountHayId, customerHayId, cardStatus{ACTIVE,AWAITING_ACTIVATION,BLOCKED,INACTIVE,EXPIRED}, blockedBy{CLIENT,PLATFORM}, cardType{enum}, deliveryMethod{enum}, cardToken, lastFourDigits, nameOnCard, nameOnCardLine2, expiryDate(string), issuedDateTimeUtc, voidDateTimeUtc(nullable), renewedIntoCardId(nullable)`.
+**HayCard** (15 props, none required): `cardHayId, accountHayId, customerHayId, cardStatus{ACTIVE,AWAITING_ACTIVATION,BLOCKED,INACTIVE,EXPIRED}, blockedBy{CLIENT,PLATFORM}, cardType{enum}, deliveryMethod{enum}, cardToken, lastFourDigits, nameOnCard, nameOnCardLine2, expiryDate(date), issuedDateTimeUtc, voidDateTimeUtc(nullable), renewedIntoCardId(nullable)`.
 
 **HayJointAccount** — `groupHayId, groupType{PERSONAL,BUSINESS}, name, customerHayIds[uuid], businessIdentifiers→BusinessIdentifiers, hayAccount→HayAccount`.
 
@@ -349,7 +378,8 @@ The B2B API carries idempotency in the request **body**, never a header. 18 requ
 
 | Schema | Required | Description (verbatim) |
 |---|---|---|
-| CreateHayCustomerRequestBody, CreateHayGroupRequestBody, CreateAccountRequestBody, CreateHayAccountRequest, CreateHayAccountForGroupRequestBody, CreateHayCardRequestBody, ReissueHayCardRequestBody, CreateTransactionRequestBody, CreateDirectDebitRequestBody, ConversionQuoteRequest, LiquidityConversionRequest | yes | "Unique value (UUID) used to identify this request and used to recognise any subsequent retries" |
+| CreateHayCustomerRequestBody, CreateHayGroupRequestBody, CreateAccountRequestBody, CreateHayAccountRequest, CreateHayAccountForGroupRequestBody, CreateHayCardRequestBody, ReissueHayCardRequestBody, CreateTransactionRequestBody, CreateDirectDebitRequestBody, ConversionQuoteRequest | yes | "Unique value (UUID) used to identify this request and used to recognise any subsequent retries" |
+| LiquidityConversionRequest | yes | "Unique value (UUID) used to identify this request and to recognise any subsequent retries." |
 | ConversionExecuteRequest | yes | "Unique value (UUID) used to identify this execution and used to recognise any subsequent retries" |
 | CreateMandateRequestBody, MakeAdhocPaymentRequestBody | yes | "Idempotency key generated by the client of the API. Used for request duplication check." |
 | GenerateInboundNppTransactionRequestBody | yes | "Idempotency key to uniquely represent this request and prevent duplication." |
@@ -362,7 +392,7 @@ Related: `LiquidityConversion.uniqueRequestId` — "The idempotency key echoed b
 
 ### 7.3 Contrast: outbound External Authorisation API (Shaype → client) `[spec:ext-balance]`
 
-`external-balance.yaml` (JSON body; OpenAPI 3.0.0, title "External authorisation API", server `localhost/external-balance`, `securitySchemes: {}`, `x-readme: {explorer-enabled: false}`). Three ops — `POST /holds` (authoriseHold), `PATCH /holds/{holdId}` (updateHoldAmount), `POST /transactions` (authoriseTransaction) — each declaring the same six **path-level** header params, all `required: false`:
+`external-balance.yaml` (JSON body; OpenAPI 3.0.0, title "External authorisation API", server `localhost/external-balance`, `securitySchemes: {}`, `x-readme: {explorer-enabled: false}`). Three ops — `POST /holds` (authoriseHold), `PATCH /holds/{holdId}` (updateHoldAmount), `POST /transactions` (authoriseTransaction) — each operation declaring the same six header params (operation-level, inside each `post`/`patch` `parameters`; the only path-level parameter in the file is `holdId` on `/holds/{holdId}`; `required` is **unset** on all six → optional). Example values are `schema.example` (`Shaype-Signature` has none):
 
 | Header | Example (verbatim) | Description (verbatim) |
 |---|---|---|
@@ -412,8 +442,8 @@ Unstated `[spec]`: combination semantics of multiple filters (AND is the only se
 | `createDirectDebitV0` | `POST /v0/direct-debits` | true | Create outbound Direct Debit (Deprecated) | "This endpoint is deprecated and will be removed in a future release. Use `/v1/direct-debits` instead." |
 | `createCreditTransactionV0` | `POST /v0/transactions/credit/create` | true | Create Credit Transaction for Account (DEPRECATED) | V1 — "If a limit is breached, REFUSED_LIMIT_BREACH outcome will be returned. To get the detailed limit that has been breached please use V1 of this endpoint." |
 | `createDebitTransactionV0` | `POST /v0/transactions/debit/create` | true | Create Debit Transaction for Account (DEPRECATED) | same as above |
-| `createHayAccount` | `POST /v0/customers/{customerHayId}/account` | **false** | Create Account for Customer - (To be DEPRECATED - Use POST /v1/accounts instead) | `createAccount` |
-| `createHayAccountForGroup` | `POST /v0/groups/{groupHayId}/account` | **false** | Create Account for Group - (To be DEPRECATED - Use POST /v1/accounts instead) | `createAccount` |
+| `createHayAccount` | `POST /v0/customers/{customerHayId}/account` | **unset (absent)** | Create Account for Customer - (To be DEPRECATED - Use POST /v1/accounts instead) | `createAccount` |
+| `createHayAccountForGroup` | `POST /v0/groups/{groupHayId}/account` | **unset (absent)** | Create Account for Group - (To be DEPRECATED - Use POST /v1/accounts instead) | `createAccount` |
 
 Field-level: `CreateHayCustomerRequestBody.journeyId` — "Deprecated: Please do not use this field for customer creation, please refer to identityVerificationCaseId". All six ops remain fully declared and must be served.
 
@@ -422,19 +452,20 @@ Field-level: `CreateHayCustomerRequestBody.journeyId` — "Deprecated: Please do
 ## 10. Vendor extensions, nullable, additionalProperties, other structural conventions `[spec]`
 
 - **`x-*`**: exactly one, at the document root: `"x-explorer-enabled": false`. No operation- or schema-level extensions. (ext-balance has `x-readme: {"explorer-enabled": false}`; the webhooks spec has none.)
-- **`nullable`**: 61 occurrences, every one `nullable: true`. 6 on query params (`type` on the two stack-transaction ops, `conversionDate`, `currencyPairs`, `date`, `active`) and 55 on schema properties, clustered in: CreateAccountRequestBody (`accountNumber`, `currency`, `customData`, `parentAccountId`); CreateHayCustomerRequestBody (`customData`, `identityDocumentExpiry`, `identityVerificationCaseId`, `journeyId`); HayAccount (`customData`, `parentAccountId`); HayCustomer (`customData`); HayCard (`renewedIntoCardId`, `voidDateTimeUtc`); the four utility mock-card bodies (`cardUsage`, `currency`, `declineReason`); MerchantDetails ×3, ExternalMerchantDetails ×2, Tag ×3; threshold schemas (`amount`, `percent` ×3); FxComplianceDataRequest ×5; FxRateEntry ×2; CloseAccountRequestBody.reason; ConversionQuoteRequest.marginPercentage; UpdatePayIdDetailsRequestBody (`ownerName`, `payIdName`); UpdatePayIdStatusRequestBody.reason; UserConsentRequestBody ×4. Everything else is non-nullable by omission. The docs samples **omit** absent optional keys (no `customData`, no `closedDateTimeUtc`, no `line2`) rather than emitting `null`. `[docs:sample-requests-responses]` Implementer default `[inferred]`: omit undefined fields; emit `null` only for the nullable set when the value is explicitly null.
+- **`nullable`**: 61 occurrences, every one `nullable: true`. 6 on query params (`type` on the two stack-transaction ops, `conversionDate`, `currencyPairs`, `date`, `active`) and 55 on schema properties, clustered in: CreateAccountRequestBody (`accountNumber`, `currency`, `customData`, `parentAccountId`); CreateHayAccountRequest (`customData`); CreateHayAccountForGroupRequestBody (`customData`); CreateHayCustomerRequestBody (`customData`, `identityDocumentExpiry`, `identityVerificationCaseId`, `journeyId`); HayAccount (`customData`, `parentAccountId`); HayCustomer (`customData`); HayCard (`renewedIntoCardId`, `voidDateTimeUtc`); the utility mock-card bodies (`cardUsage`, `currency`, `declineReason` on GenerateCardHoldTransactionRequestBody, GenerateCardHoldAndSettleTransactionRequestBody, GenerateUpdateHoldTransactionRequestBody; only `currency` on GenerateCardTransactionRequestBody); MerchantDetails ×3, ExternalMerchantDetails ×2, Tag ×3; threshold schemas (`amount`, `percent` ×3); FxComplianceDataRequest ×5; FxRateEntry ×2; CloseAccountRequestBody.reason; ConversionQuoteRequest.marginPercentage; UpdatePayIdDetailsRequestBody (`ownerName`, `payIdName`); UpdatePayIdStatusRequestBody.reason; UserConsentRequestBody ×4. Everything else is non-nullable by omission. The docs samples **omit** absent optional keys (no `customData`, no `closedDateTimeUtc`, no `line2`) rather than emitting `null`. `[docs:sample-requests-responses]` Implementer default `[inferred]`: omit undefined fields; emit `null` only for the nullable set when the value is explicitly null.
 - **`additionalProperties`**: zero occurrences in the B2B spec. Free-form objects are expressed as bare `type: object` with no `properties` — that is exactly the seven `customData` fields ("Contains custom metadata stored with the Account. Needs to be a valid JSON" / "Custom data associated with customer").
 - **`required`**: most response schemas declare no `required` at all (HayCustomer, HayCard, GenericMessage, ErrorResponse, FinancialTransaction) — any field may be absent; oddities are `HayAccount.required = ["customData"]` and `LiquidityThreshold.required = ["id","clientReference","type"]`.
-- **Enum documentation style**: enums are listed twice — in `enum` and in the description as "Possible values:\n * **VALUE**: text". Treat the `enum` array as authoritative; descriptions occasionally list values the enum lacks (e.g. `limitType` path param on one op omits `MIN_BALANCE`, `MIN_STACK_BALANCE`, `OVERDRAFT_PRODUCT_LIMIT`, `CARD_TOP_UP_PER_DAY`, `BPAY_TOP_UP_PER_DAY` from `enum` while still describing them).
+- **Enum documentation style**: enums are listed twice — in `enum` and in the description as "Possible values:\n * **VALUE**: text". Treat the `enum` array as authoritative (after the split described in the next bullet); descriptions occasionally list values the enum lacks (e.g. `limitType` path param on `setAccountLimit` omits `MIN_BALANCE`, `MIN_STACK_BALANCE`, `OVERDRAFT_PRODUCT_LIMIT`, `CARD_TOP_UP_PER_DAY`, `BPAY_TOP_UP_PER_DAY` from `enum` while still describing them; `deleteAccountLimit` has all 16). Other description/enum mismatches: `BpayPaymentResponseBody.outcome` description says `INSUFFICIENT_FUNDS` while the enum has `REFUSED_INSUFFICIENT_FUNDS` (and the enum carries `REFUSED_ACCOUNT_BLOCKED`, `REFUSED_RECIPIENT_ACCOUNT_BLOCKED`, `REFUSED_CAPABILITY_NOT_ENABLED` that the description omits); `AuthorisationHold.transactionChannel` description lists eight `*_DOMESTIC` values (`APPLE_PAY_CARD_NOT_PRESENT_DOMESTIC`, `APPLE_PAY_CARD_PRESENT_DOMESTIC`, `GOOGLE_PAY_CARD_NOT_PRESENT_DOMESTIC`, `GOOGLE_PAY_CARD_PRESENT_DOMESTIC`, `VISA_ATM_DOMESTIC`, `VISA_CARD_NOT_PRESENT_DOMESTIC`, `VISA_CARD_PRESENT_DOMESTIC`, `VISA_CONTACTLESS_DOMESTIC`) absent from the enum, which uses the un-suffixed names (`VISA_CARD_PRESENT`, `VISA_ATM`, …) for the domestic case. `[spec]`
+- **Generator artefact — comma-joined enums**: 45 schema properties declare a single-element `enum` whose one value is a comma-joined list, e.g. `GetMandateActionsActionDto.status.enum = ["COMPLETED,DECLINED,PENDING,RECALLED,TIMED_OUT"]`, `.type = ["AMEND,CREATE,PORT,STATUS_CHANGE"]`, `.notificationPriority = ["NORMAL,UNATTENDED"]`, `GenerateRapainTransactionStatusInformation.transactionStatus = ["ACCP,RJCT"]`. All 45 sit on `GetMandateActions*Dto` (ActionDto, CreationEventDto, ResolutionEventDto, DetailsCreationDto, DetailsStatusChangeDto and the Details{Creation,Amendment,Porting}{Creditor,Debtor,PaymentInitiator}Information / PaymentInformation / MandateDetailsCxExtension DTOs: `partyType`, `partyRole`, `accountAliasTypeCode`, `accountIdentificationTypeCode`, `partyIdentificationTypeCode`, `paymentFrequency`, `paymentAmountType`, `reasonCode`, `mandateType`, `establishmentScheme`, `mandatePurposeCode`, `change`, …), plus `GenerateInitiatorMandateNotificationRequestBody.trigger`, `GeneratePayerMandateNotificationRequestBody.trigger` and `GenerateRapainTransactionStatusInformation.transactionStatus`. Taking the array verbatim would yield a one-value enum: **split on `,`** to get the real value set — for all 45 the split result equals the description's `**VALUE**` list exactly. `[spec]`
 - **Versioning / shape**: 83 `/v0/*` paths and 67 `/v1/*` paths coexist with no header-based versioning; methods 76 POST, 61 GET, 21 PATCH, 6 PUT, 5 DELETE; 23 tags (PayID, BPAY, Stacks, PayTo, Transactions, Scheduled Payments, KYC, Click to Pay, Customers, Direct Debits, Merchant Category Codes, Direct Entry, Perks, Liquidity, NPP, Utilities, Cards, Tokens, Products, Accounts, Groups, FX, Holds — each suffixed " API").
-- **Integer formats**: `int32` on paging/percent fields; `int64` only on `accessExpiresUtc`.
-- **Examples**: 250 `example` nodes, all on schema properties or 2xx bodies; none on error responses.
+- **Integer formats**: `int32` on paging/percent fields (and `ExternalMerchantDetails.merchantCategoryCode`); `int64` on `ExchangeExternalTokenResponse.accessExpiresUtc` and `ExternalAddTransactionRuleRequest.expiresIn` (minimum 1, "Number of seconds until the Rule expires after it is created").
+- **Examples**: 91 `example` + 7 `examples` nodes; 3 of the `examples` sit on 422 responses (see §1.4), the rest on schema properties, 2xx bodies or request bodies.
 
 ---
 
 ## 11. Open questions for the implementer
 
-1. **ErrorResponse content** — `status` is confirmed as the numeric code-as-string by one docs sample (`"422"`); is `details` always the constant "Please refer to the API documentation or contact Shaype for more info with the traceId."? Is `message` always `<REASON_CODE>: <text>`? No second sample exists. `[docs:payto-staging-testing-suite]`
+1. **ErrorResponse content** — four samples (three spec 422 `examples` + one docs sample, §1.4) all confirm `status` as the numeric code-as-string (`"422"`) and `details` as the constant "Please refer to the API documentation or contact Shaype for more info with the traceId."; `message` is **not** always prefixed with a reason code (`verifyBranchIdentifier`: `branchIdentifier format is not correct.`). Still unknown: whether `details` stays constant on 400/403/500, and what `message` looks like for schema violations. `[spec]+[docs:payto-staging-testing-suite]`
 2. **Unauthenticated / expired-token response** — nothing documents it. The spec declares 403 (never 401) on every op; the API-Gateway Cognito authorizer in front likely answers on its own before reaching the app `[inferred]`. Pick: 401 or 403, and body shape (ErrorResponse vs gateway `{"message":"Unauthorized"}`).
 3. **400 vs 422 split** — the spec gives identical boilerplate on all 169 ops. Which failures (malformed JSON, schema violation, bad UUID in path, business rule, unknown ID) map to which code is unspecified.
 4. **404 for unknown IDs** — only the two perks lookups declare 404 (and with the entity schema as body, which looks like a generator artefact). What the other 167 ops return for a non-existent `{accountId}` etc. is unknown (404? 422? 400?).
