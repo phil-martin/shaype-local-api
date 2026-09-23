@@ -12,7 +12,7 @@
  * OpenAPI 3.0 -> JSON Schema (ajv/fast-json-stringify) conversions applied:
  *   - nullable: true            -> type: [T, "null"] / enum + null / anyOf [$ref, null]
  *   - exclusiveMinimum: true    -> numeric exclusiveMinimum (draft-06+)
- *   - single-element enums whose value is "A,B,C" (generator artefact, 45 in the spec) -> split
+ *   - single-element enums whose value is "A,B,C" (generator artefact, 45 in the spec) -> split; duplicate enum values removed
  *   - OpenAPI-only keywords dropped: example, examples, deprecated, xml, externalDocs, discriminator, x-*
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -41,8 +41,10 @@ function convert(node: Json, prefix: string, stripRequired: boolean): Json {
     if (DROP.has(k) || k.startsWith('x-')) continue
     if (k === 'required' && stripRequired && Array.isArray(v)) continue
     if (k === 'nullable') continue
-    if (k === 'enum' && Array.isArray(v) && v.length === 1 && typeof v[0] === 'string' && v[0].includes(',')) {
-      out.enum = v[0].split(',').map((s: string) => s.trim())
+    if (k === 'enum' && Array.isArray(v)) {
+      // 45 PayTo enums are a single comma-joined string (generator artefact); one currency enum has duplicates.
+      const values = v.length === 1 && typeof v[0] === 'string' && v[0].includes(',') ? v[0].split(',').map((s: string) => s.trim()) : v
+      out.enum = [...new Set(values)]
       continue
     }
     if (k === 'exclusiveMinimum' && v === true) { out.exclusiveMinimum = node.minimum; continue }
