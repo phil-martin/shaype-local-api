@@ -908,7 +908,7 @@ export class PayToService {
 
   /**
    * (Re)schedules the next payment of an ACTIVE non-ADHOC mandate the client initiates (local creditor): the
-   * first due date on or after today (from firstPayment.date or validityStartDate, stepped by frequency) and
+   * first due date on or after today (firstPayment.date or validityStartDate plus n periods, nthDueDate) and
    * after m.lastDueDate (a due date already initiated is never scheduled again, whoever re-schedules: MCRC,
    * MAMC, release, tick) that is within lastPayment.date / validityEndDate. Initiation happens at the due
    * date, at least DUE_PAYMENT_LEAD_MS ahead, so that the amount of a USAGE_BASED / VARIABLE mandate can be
@@ -920,8 +920,9 @@ export class PayToService {
     const now = this.ctx.clock.now()
     const today = isoDate(now)
     const after = this.repo.mandateById(m.id)?.lastDueDate
-    let due = m.paymentTerms.firstPayment?.date ?? m.validityStartDate
-    for (let guard = 0; (due < today || (after !== undefined && due <= after)) && guard < 100_000; guard++) due = stepDate(due, m.paymentTerms.frequency)
+    const anchor = m.paymentTerms.firstPayment?.date ?? m.validityStartDate
+    let due = anchor
+    for (let n = 1; (due < today || (after !== undefined && due <= after)) && n <= 100_000; n++) due = nthDueDate(anchor, m.paymentTerms.frequency, n)
     if (m.paymentTerms.lastPayment?.date && due > m.paymentTerms.lastPayment.date) return undefined
     if (m.validityEndDate && due > m.validityEndDate) return undefined
     const s: ScheduledPayment = {
@@ -1268,16 +1269,27 @@ function normaliseDateTime(s: string): string {
   return isoUtc(new Date(t))
 }
 
-/** Next due date by frequency (UTC calendar arithmetic; day clamped to the month's length). */
-export function stepDate(date: string, frequency: Frequency): string {
-  const [y, mo, d] = date.split('-').map(Number) as [number, number, number]
-  const months: Partial<Record<Frequency, number>> = { MONTHLY: 1, QUARTERLY: 3, SEMI_ANNUAL: 6, ANNUAL: 12 }
-  const days: Partial<Record<Frequency, number>> = { DAILY: 1, INTRA_DAY: 1, WEEKLY: 7, FORTNIGHTLY: 14, ADHOC: 1 }
-  if (months[frequency]) {
-    const target = new Date(Date.UTC(y, mo - 1 + months[frequency]!, 1))
+const PERIOD_MONTHS: Partial<Record<Frequency, number>> = { MONTHLY: 1, QUARTERLY: 3, SEMI_ANNUAL: 6, ANNUAL: 12 }
+const PERIOD_DAYS: Partial<Record<Frequency, number>> = { DAILY: 1, INTRA_DAY: 1, WEEKLY: 7, FORTNIGHTLY: 14, ADHOC: 1 }
+
+/**
+ * The n-th due date (n >= 0) counted from the anchor (UTC calendar arithmetic): anchor + n periods, the day
+ * clamped once to the target month's length, so a schedule anchored on the 31st keeps month ends
+ * (01-31, 02-28, 03-31) instead of drifting to the 28th.
+ */
+export function nthDueDate(anchor: string, frequency: Frequency, n: number): string {
+  const [y, mo, d] = anchor.split('-').map(Number) as [number, number, number]
+  const months = PERIOD_MONTHS[frequency]
+  if (months) {
+    const target = new Date(Date.UTC(y, mo - 1 + months * n, 1))
     const last = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate()
     target.setUTCDate(Math.min(d, last))
     return isoDate(target)
   }
-  return isoDate(new Date(Date.UTC(y, mo - 1, d + (days[frequency] ?? 1))))
+  return isoDate(new Date(Date.UTC(y, mo - 1, d + (PERIOD_DAYS[frequency] ?? 1) * n)))
+}
+
+/** The due date one period after `date` (nthDueDate(date, frequency, 1)). */
+export function stepDate(date: string, frequency: Frequency): string {
+  return nthDueDate(date, frequency, 1)
 }

@@ -65,8 +65,9 @@
  * - Inbound RAPAIN (receivePaymentInstruction): ACCP debits the local debtor only (the creditor leg is the
  *   RAP mock), RJCT rejects with the given reason (AB01 by default); MANDATE_PAYMENT either way.
  * - Scheduler (non-ADHOC mandates the client initiates): on activation the next due date (firstPayment.date
- *   or validityStartDate, stepped by frequency, bounded by lastPayment.date / validityEndDate; INTRA_DAY
- *   steps daily, pointInTime / countPerPeriod are recorded only) is initiated when the virtual clock
+ *   or validityStartDate plus n periods, the day clamped once per date so month ends do not drift, bounded
+ *   by lastPayment.date / validityEndDate; INTRA_DAY steps daily, pointInTime / countPerPeriod are
+ *   recorded only) is initiated when the virtual clock
  *   reaches it, at least one day after scheduling. A due date once initiated is never scheduled again
  *   (the mandate records it), whatever re-schedules the mandate (MAMC, release, mock MCRC). USAGE_BASED / VARIABLE mandates get MANDATE_DUE_PAYMENT
  *   one day before (webhook-matrix), so that setScheduledPaymentInitiationRequestAmount (USAGE_BASED /
@@ -95,7 +96,7 @@ import { PayToService } from './service.js'
 import { registerEvents } from './events.js'
 import { registerRoutes } from './routes.js'
 
-export { PayToService, ACCOUNT_DETAILS_INCORRECT, parseTrajectory, normaliseMandateId, mmsId, v1Uuid, stepDate, TRIGGER_DESCRIPTION, MANDATE_TRIGGERS, STATUS_DISPLAY, MMS_STATUS, PAYMENT_STATUS, SUCCESS_MESSAGE, UNSUPPORTED_BSBS, BIC, NOT_PROVIDED, ACTION_EXPIRY_MS, DUE_PAYMENT_LEAD_MS } from './service.js'
+export { PayToService, ACCOUNT_DETAILS_INCORRECT, parseTrajectory, normaliseMandateId, mmsId, v1Uuid, stepDate, nthDueDate, TRIGGER_DESCRIPTION, MANDATE_TRIGGERS, STATUS_DISPLAY, MMS_STATUS, PAYMENT_STATUS, SUCCESS_MESSAGE, UNSUPPORTED_BSBS, BIC, NOT_PROVIDED, ACTION_EXPIRY_MS, DUE_PAYMENT_LEAD_MS } from './service.js'
 export type { Trajectory, MandateTrigger, NotificationDetails, ReceivePaymentInput, PaymentOutcome, MandateDetailsDto, PaymentInstructionSummary, Resolution } from './service.js'
 export type { Mandate, MandateStatus, MandateSide, MandateAction, ActionType, ActionStatus, PaymentInstruction, InstructionStatus, ScheduledPayment, PaymentTerms, PartyDetails, Money, CxMandateStatus } from './repo.js'
 

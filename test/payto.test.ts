@@ -9,7 +9,7 @@ import { assertValidNotification } from './webhook-schema.js'
 import type { BuiltServer } from '../src/server.js'
 import { LOCAL_PRODUCT_ID } from '../src/domains/accounts/index.js'
 import { LOCAL_BSB } from '../src/lib/ids.js'
-import { ACCOUNT_DETAILS_INCORRECT, BIC, mmsId, normaliseMandateId, parseTrajectory, stepDate, v1Uuid, type PayToService } from '../src/domains/payto/index.js'
+import { ACCOUNT_DETAILS_INCORRECT, BIC, mmsId, normaliseMandateId, nthDueDate, parseTrajectory, stepDate, v1Uuid, type PayToService } from '../src/domains/payto/index.js'
 import type { PaymentInstructionSummary } from '../src/domains/payto/service.js'
 
 type S = components['schemas']
@@ -1289,6 +1289,21 @@ describe('scheduled payments and setScheduledPaymentInitiationRequestAmount', ()
     expect(stepDate('2026-12-31', 'INTRA_DAY')).toBe('2027-01-01')
     expect(stepDate('2026-02-25', 'WEEKLY')).toBe('2026-03-04')
     expect(stepDate('2026-02-25', 'FORTNIGHTLY')).toBe('2026-03-11')
+  })
+
+  it('due dates are counted from the anchor, so the day of the month survives a short month (no drift)', async () => {
+    expect([0, 1, 2, 3, 4].map((n) => nthDueDate('2026-01-31', 'MONTHLY', n))).toEqual(['2026-01-31', '2026-02-28', '2026-03-31', '2026-04-30', '2026-05-31'])
+    expect([1, 2, 3].map((n) => nthDueDate('2026-11-30', 'QUARTERLY', n))).toEqual(['2027-02-28', '2027-05-30', '2027-08-30'])
+    expect([1, 2].map((n) => nthDueDate('2026-08-31', 'SEMI_ANNUAL', n))).toEqual(['2027-02-28', '2027-08-31'])
+    expect([1, 4].map((n) => nthDueDate('2028-02-29', 'ANNUAL', n))).toEqual(['2029-02-28', '2032-02-29'])
+    expect([1, 2].map((n) => nthDueDate('2026-02-25', 'WEEKLY', n))).toEqual(['2026-03-04', '2026-03-11'])
+    // a mandate anchored on the 31st of a past month is next due on the last day of the current month, not on the 28th
+    const now = await today()
+    const [y, m] = now.split('-').map(Number) as [number, number]
+    const monthEnd = new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10)
+    const { id } = await activeMandate({ terms: { frequency: 'MONTHLY', type: 'FIXED', amount: AUD(1), firstPayment: { date: '2020-01-31' } } })
+    expect(svc.schedule(id)).toMatchObject({ dueDate: monthEnd })
+    expect((await patch(`/v1/payto/initiator/mandates/${id}/cancel`, {})).statusCode).toBe(200)
   })
 })
 
