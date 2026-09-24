@@ -268,6 +268,21 @@ describe('approve*Check on a REFERRED customer', () => {
     expect((await getCustomer(c.customerHayId!)).status).toBe('REFERRED')
   })
 
+  it('re-failing an approved stage reopens it in place: record order kept, approval comment and time cleared', async () => {
+    const c = await referred()
+    expect((await approve(c.customerHayId!, 'sanction', { comments: 'first look' })).statusCode).toBe(200)
+    built.ctx.services.kyc.recordFailure(c.customerHayId!, 'SANCTIONS_SCAN', true)
+    const stages = built.ctx.services.kyc.stages(c.customerHayId!)
+    expect(stages.map((s) => [s.stage, s.result])).toEqual([['KYC_AML_SCAN', 'FAILED'], ['SANCTIONS_SCAN', 'FAILED']])
+    expect(stages[1]).toEqual({ customerId: c.customerHayId, stage: 'SANCTIONS_SCAN', result: 'FAILED', submissionFailure: true, failedAt: expect.stringMatching(ISO_MICROS) })
+    expect(built.ctx.services.kyc.outstanding(c.customerHayId!)).toEqual(['KYC_AML_SCAN', 'SANCTIONS_SCAN'])
+    // approving again keeps the failure time and record position
+    expect((await approve(c.customerHayId!, 'sanction', { comments: 'second look' })).statusCode).toBe(200)
+    const reapproved = built.ctx.services.kyc.stages(c.customerHayId!)[1]!
+    expect(reapproved).toMatchObject({ stage: 'SANCTIONS_SCAN', result: 'APPROVED', submissionFailure: true, comments: 'second look', failedAt: stages[1]!.failedAt })
+    expect(reapproved.approvedAt).toMatch(ISO_MICROS)
+  })
+
   it('every failed check must be approved before activation (multiple failed stages)', async () => {
     const c = await referred()
     built.ctx.services.kyc.recordFailure(c.customerHayId!, 'SANCTIONS_SCAN', true)

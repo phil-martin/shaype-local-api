@@ -75,14 +75,16 @@ export class KycRepo {
     return r ? stageFromRow(r) : undefined
   }
 
-  /** Inserts or replaces the stage record (keeps the record order of the first insert). */
+  /** Upserts the stage record; an existing row keeps its seq (record order of the first insert). */
   saveStage(s: OnboardingStageRecord): void {
-    const existing = this.db.prepare('SELECT seq FROM kyc_onboarding_stages WHERE customer_id = ? AND stage = ?').get(s.customerId, s.stage) as { seq: number } | undefined
     this.db
       .prepare(
-        `INSERT OR REPLACE INTO kyc_onboarding_stages(customer_id, stage, seq, result, submission_failure, comments, failed_at, approved_at) VALUES (?,?,?,?,?,?,?,?)`,
+        `INSERT INTO kyc_onboarding_stages(customer_id, stage, seq, result, submission_failure, comments, failed_at, approved_at) VALUES (?,?,?,?,?,?,?,?)
+         ON CONFLICT(customer_id, stage) DO UPDATE SET
+           result = excluded.result, submission_failure = excluded.submission_failure, comments = excluded.comments,
+           failed_at = excluded.failed_at, approved_at = excluded.approved_at`,
       )
-      .run(s.customerId, s.stage, existing?.seq ?? nextSeq(this.db, 'kyc_stage'), s.result, s.submissionFailure ? 1 : 0, s.comments ?? null, s.failedAt ?? null, s.approvedAt ?? null)
+      .run(s.customerId, s.stage, nextSeq(this.db, 'kyc_stage'), s.result, s.submissionFailure ? 1 : 0, s.comments ?? null, s.failedAt ?? null, s.approvedAt ?? null)
   }
 }
 
