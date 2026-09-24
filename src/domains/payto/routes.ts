@@ -37,6 +37,11 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext, svc: PayTo
     if ((req.routeOptions.config as { tag?: string } | undefined)?.tag !== TAG) return
     const params = req.params as Record<string, unknown> | undefined
     if (typeof params?.mandateId === 'string') params.mandateId = normaliseMandateId(params.mandateId)
+    // getMandates: statuses comma-joined like accountIds (I11), split before the enum schema runs
+    const query = req.query as Record<string, unknown> | undefined
+    if (query && (typeof query.statuses === 'string' || Array.isArray(query.statuses))) {
+      query.statuses = ([] as unknown[]).concat(query.statuses).flatMap((v) => (typeof v === 'string' ? v.split(',').map((s) => s.trim()).filter(Boolean) : [v]))
+    }
     const body = req.body as Record<string, unknown> | null | undefined
     if (!body || typeof body !== 'object') return
     if (typeof body.mandateId === 'string') body.mandateId = normaliseMandateId(body.mandateId)

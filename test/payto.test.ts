@@ -480,6 +480,27 @@ describe('getMandates', () => {
   })
 })
 
+describe('getMandates statuses', () => {
+  it('accepts comma-joined statuses like accountIds (I11); every value must still be in the enum', async () => {
+    const creditor = await newAccount()
+    const debtor = await newAccount()
+    const created = await createMandate(creditor, { accountId: debtor.accountHayId! })
+    const { id: active } = await activeMandate({ creditor, debtor })
+    const cancelled = await createMandate(creditor, { accountId: debtor.accountHayId! })
+    expect((await patch(`/v1/payto/payer/mandates/${cancelled}/cancel`, {})).statusCode).toBe(200)
+    const ids = async (statuses: string) => {
+      const res = await app.inject({ method: 'GET', url: `/v1/payto/mandates?accountIds=${debtor.accountHayId}&${statuses}&pageNumber=1&pageSize=50` })
+      expect(res.statusCode, `${statuses} ${res.body}`).toBe(200)
+      return (res.json().result as { mandateId: string }[]).map((m) => m.mandateId)
+    }
+    expect(await ids('statuses=ACTIVE,CANCELLED')).toEqual([active, cancelled])
+    expect(await ids('statuses=CREATED&statuses=ACTIVE,CANCELLED')).toEqual([created, active, cancelled])
+    expect(await ids('statuses=CREATED,%20ACTIVE')).toEqual([created, active])
+    const bad = await app.inject({ method: 'GET', url: `/v1/payto/mandates?accountIds=${debtor.accountHayId}&statuses=ACTIVE,PAUSED&pageNumber=1&pageSize=50` })
+    expect(bad.statusCode).toBe(400)
+  })
+})
+
 // ---------------------------------------------------------------- bilateral resolution
 
 describe('resolveMandateByPayer / resolveMandateByInitiator', () => {

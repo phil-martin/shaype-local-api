@@ -11,6 +11,8 @@
  * - createMandate accepts a creditor identified by `accountAliasIdentification` + `accountAliasType`
  *   instead of the `required` accountId (docs: "an alias might be used instead"; F20): the alias must
  *   resolve to a local account (a registered PayID, or the staging form `<bsb><account>@<domain>`).
+ * - getMandates `statuses` may be comma-joined like accountIds (I11): the values are split before the enum
+ *   schema runs, so each must still be a mandate status (else 400).
  *
  * Decisions beyond the spec (all covered in test/payto.test.ts):
  * - Single tenant: the client is the Initiator of every mandate with a local creditor account and the Payer
@@ -101,8 +103,8 @@
  *   PLATFORM for mocks / scheduler / expiry / asynchronous hops. A mock call sends exactly one MANDATE, with
  *   the requested trigger to the requested side (webhook-matrix, C14), and silently applies the MMS state
  *   it implies (MCRC activates; MCRD, PCRD, MCRX, MCRR cancel a CREATED mandate; MAM* resolve a pending amend).
- * - getMandates: accountIds repeated or comma-separated (I11); besides BSB + account numbers, a platform
- *   account id matches the debtor account; only mandates with a local debtor are listed.
+ * - getMandates: accountIds and statuses repeated or comma-separated (I11); besides BSB + account numbers,
+ *   a platform account id matches the debtor account; only mandates with a local debtor are listed.
  * - checkBsbIsSupportedByPayTo: every 6-digit BSB except 000000 (staging fixture) and 999999 (spec §5.6).
  * - Unknown mandate / instruction / account ids are 404 (spec §4 convention) rather than the map's 422.
  */
