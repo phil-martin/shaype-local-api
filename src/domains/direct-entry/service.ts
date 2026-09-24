@@ -2,22 +2,23 @@
  * Outbound Direct Entry instructions (spec §5.8, docs/map/de-dd-scheduled.md §1, §3.2, §4.3):
  * createDirectDebitV1/V0 pulls funds from an external (recipient) account into a local (sender)
  * account. RECEIVED -> ACCEPTED happen synchronously with the request; ACCEPTED -> SUBMITTED ->
- * COMPLETE run through ctx.scheduler.later() (one hop each, config.asyncDelayMs apart); COMPLETE
+ * COMPLETE run through ctx.scheduler.later() (one hop each, config.asyncDelayMs apart, each due one
+ * hop after the previous one was due, so a clock jump past both runs both); COMPLETE
  * posts the DIRECT_DEBIT_TRANSFER credit through the ledger. One directEntry.statusChanged event per
  * transition (events.ts maps it to the DIRECT_ENTRY webhook). Publishes ctx.services.directEntry.
  */
 import type { components } from '../../contract/generated/b2b-types.js'
 import type { AppContext } from '../../context.js'
 import { compact, type ActionOwner } from '../../events/notify.js'
-import { isoDate, isoUtc } from '../../lib/clock.js'
+import { isoUtc } from '../../lib/clock.js'
 import { badRequest, notFound, unprocessable } from '../../lib/errors.js'
-import { LOCAL_BSB } from '../../lib/ids.js'
 import { fromCents, type Cents } from '../../lib/money.js'
 import type { Account } from '../accounts/repo.js'
 import type { ClosureCheckerError } from '../accounts/service.js'
 import type { LedgerOutcome, PostInput } from '../transactions/service.js'
 import { requestCents } from '../transactions/service.js'
-import { addDays, isIsoDate, nextBusinessDay } from './dates.js'
+import { isIsoDate, nextBusinessDay, sydneyDate } from './dates.js'
+import { ACCOUNT_NUMBER_RE, BSB_RE, resolveLocalAccount } from './local.js'
 import { DE_TERMINAL, type DeInstruction, type DeStatus, type DeStatusV0, type DirectEntryRepo } from './repo.js'
 import { ScheduledPaymentsService } from './schedules.js'
 
@@ -58,8 +59,6 @@ declare module '../../context.js' {
 
 /** A recipient BSB that always rejects (docs/superpowers spec §5.6 uses the same value for verifyBranchIdentifier). */
 export const REJECTING_BSB = '999999'
-const BSB_RE = /^\d{6}$/
-const ACCOUNT_NUMBER_RE = /^\d{5,9}$/
 
 /** v1 -> v0 status rendering (docs/map/00-open-questions.md S14). */
 export const V0_STATUS: Record<DeStatus, DeStatusV0> = {
@@ -130,7 +129,8 @@ export class DirectEntryService {
     if (!Number.isInteger(q.offset) || q.offset < 0) throw badRequest('BAD_REQUEST: offset must be 0 or greater')
     return this.repo.listInstructions(compact({
       from: `${q.fromUtc}T00:00:00.000000Z`,
-      to: `${addDays(q.toUtc, 1)}T00:00:00.000000Z`,
+      // inclusive end of the day: adding a day to 9999-12-31 would leave the 4-digit year range
+      to: `${q.toUtc}T23:59:59.999999Z`,
       statuses,
       senderAccountNumber: q.senderAccountNumber,
       limit: q.limit,
@@ -187,7 +187,8 @@ export class DirectEntryService {
   /**
    * createDirectDebitV1 / V0 (idempotency is the route's). Validation the schema cannot express is a 400
    * (amount > 0 with <= 2 dp; anchored BSB / account-number patterns); a transactionId already used with
-   * another idempotencyKey is 422 DUPLICATE_TRANSACTION_ID. The sender (credited) account must be a local
+   * another idempotencyKey, or already the id of a ledger transaction (the COMPLETE credit is posted under
+   * it), is 422 DUPLICATE_TRANSACTION_ID. The sender (credited) account must be a local
    * account (BSB 636220 + account number) that is open, and the recipient BSB must not be the rejecting
    * 999999, else the instruction is REJECTED (v1: 200 with the outcome; v0: 422 with the declared
    * DirectDebitResponse body). Otherwise RECEIVED and ACCEPTED are recorded and notified synchronously and
@@ -198,7 +199,7 @@ export class DirectEntryService {
     for (const [field, re] of [['senderBsb', BSB_RE], ['recipientBsb', BSB_RE], ['senderAccountNumber', ACCOUNT_NUMBER_RE], ['recipientAccountNumber', ACCOUNT_NUMBER_RE]] as const) {
       if (!re.test(body[field])) throw badRequest(`BAD_REQUEST: ${field} must match ${re.source}`)
     }
-    if (this.repo.instructionById(body.transactionId)) {
+    if (this.repo.instructionById(body.transactionId) || this.ledger.find(body.transactionId)) {
       throw unprocessable(`DUPLICATE_TRANSACTION_ID: Direct Entry transaction ${body.transactionId} already exists`)
     }
 
@@ -219,7 +220,7 @@ export class DirectEntryService {
       recipientAccountNumber: body.recipientAccountNumber,
       recipientName: body.recipientName,
       status: 'RECEIVED',
-      processingDate: nextBusinessDay(isoDate(now)),
+      processingDate: nextBusinessDay(sydneyDate(now)),
       createdAt: stamp,
       updatedAt: stamp,
     })
@@ -239,32 +240,38 @@ export class DirectEntryService {
       return this.transition(row, 'ACCEPTED', 'CLIENT')
     })()
 
-    if (stored.status === 'ACCEPTED') this.later(() => this.submit(stored.id))
+    if (stored.status === 'ACCEPTED') {
+      const delay = this.hopDelayMs()
+      // always deferred, even with no delay: the request answers ACCEPTED before the batch runs
+      this.ctx.scheduler.later(() => { this.submit(stored.id, now.getTime() + delay) }, delay)
+    }
     if (opts.version === 'v0') return { status: stored.status === 'REJECTED' ? 422 : 200, body: this.responseV0(stored) }
     return { status: 200, body: this.responseV1(stored) }
   }
 
   /** The local account a BSB + account number denote, if any. */
   resolveSender(bsb: string, accountNumber: string): Account | undefined {
-    if (bsb !== LOCAL_BSB) return undefined
-    const hit = this.accounts.search(accountNumber)[0]
-    return hit?.accountHayId ? this.accounts.find(hit.accountHayId) : undefined
+    return resolveLocalAccount(this.ctx, bsb, accountNumber)
   }
 
   // ---------------------------------------------------------------- platform progression
 
-  /** ACCEPTED -> SUBMITTED (the next Direct Entry batch); schedules the COMPLETE hop. No-op unless ACCEPTED. */
-  submit(transactionId: string): DeInstruction | undefined {
+  /**
+   * ACCEPTED -> SUBMITTED (the next Direct Entry batch); the COMPLETE hop is due one hop after `dueAt`
+   * (when SUBMITTED was due, default now), so a clock jump past both hops runs both at once. No-op
+   * unless ACCEPTED.
+   */
+  submit(transactionId: string, dueAt: number = this.ctx.clock.now().getTime()): DeInstruction | undefined {
     const r = this.repo.instructionById(transactionId)
     if (!r || r.status !== 'ACCEPTED') return r
     const updated = this.transition(r, 'SUBMITTED', 'PLATFORM')
-    this.later(() => this.complete(transactionId))
+    this.at(dueAt + this.hopDelayMs(), () => this.complete(transactionId))
     return updated
   }
 
   /**
    * SUBMITTED -> COMPLETE: the DIRECT_DEBIT_TRANSFER credit (positive, CUSCAL_DE_DEBIT_OUT, originType
-   * DIRECT_DEBIT, originId = transactionId) is posted to the sender account; a ledger refusal there
+   * DIRECT_DEBIT, id and originId = transactionId) is posted to the sender account; a ledger refusal there
    * (MAX_BALANCE, blocked / closed account) leaves the instruction INCOMPLETE with the outcome in
    * `details`. When the recipient is also a local account its debit leg (negative, CUSCAL_DE_DEBIT_IN,
    * DIRECT_DEBIT_PER_DAY + funds) is evaluated first; a refusal there is a return from the debtor
@@ -274,6 +281,7 @@ export class DirectEntryService {
     const r = this.repo.instructionById(transactionId)
     if (!r || r.status !== 'SUBMITTED' || !r.accountId) return r
     const credit: PostInput = {
+      id: r.id,
       accountId: r.accountId,
       amountCents: r.amount,
       type: 'DIRECT_DEBIT_TRANSFER',
@@ -308,7 +316,9 @@ export class DirectEntryService {
       if (outcome !== 'ACCEPTED') return this.transition(r, 'INCOMPLETE', 'PLATFORM', { details: outcome })
       if (debit) this.ledger.apply(debit)
       const posted = this.ledger.apply(credit)
-      return this.transition(r, 'COMPLETE', 'PLATFORM', { ledgerTransactionId: posted.id })
+      // the transfer took effect today: a processingDate still ahead is brought forward to it
+      const postedOn = sydneyDate(this.ctx.clock.now())
+      return this.transition(r, 'COMPLETE', 'PLATFORM', { ledgerTransactionId: posted.id, ...(postedOn < r.processingDate ? { processingDate: postedOn } : {}) })
     })()
   }
 
@@ -326,12 +336,22 @@ export class DirectEntryService {
 
   // ---------------------------------------------------------------- internals
 
-  private later(fn: () => void): void {
-    if (this.progressDelayMs === undefined) this.ctx.scheduler.later(fn)
-    else this.ctx.scheduler.later(fn, this.progressDelayMs)
+  private hopDelayMs(): number {
+    return this.progressDelayMs ?? this.ctx.config.asyncDelayMs
   }
 
-  private transition(r: DeInstruction, status: DeStatus, actionOwner: ActionOwner, patch: { details?: string; ledgerTransactionId?: string; returnReason?: string } = {}): DeInstruction {
+  /**
+   * Run `fn` when the virtual clock reaches `dueAt` (epoch ms). Already due -> run now, inline: a hop that
+   * falls due inside a clock jump must not wait for another tick (scheduler.tick only fires entries that
+   * existed when it started).
+   */
+  private at(dueAt: number, fn: () => void): void {
+    const delay = dueAt - this.ctx.clock.now().getTime()
+    if (delay <= 0) fn()
+    else this.ctx.scheduler.later(fn, delay)
+  }
+
+  private transition(r: DeInstruction, status: DeStatus, actionOwner: ActionOwner, patch: { details?: string; ledgerTransactionId?: string; returnReason?: string; processingDate?: string } = {}): DeInstruction {
     if (DE_TERMINAL.has(r.status)) throw new Error(`Direct Entry ${r.id} is ${r.status}; cannot move to ${status}`)
     const updatedAt = isoUtc(this.ctx.clock.now())
     this.repo.updateInstruction(r.id, { status, ...patch, updatedAt })

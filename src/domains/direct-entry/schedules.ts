@@ -11,10 +11,11 @@ import { badRequest, notFound, unprocessable } from '../../lib/errors.js'
 import { LOCAL_BSB, isUuid, uuid } from '../../lib/ids.js'
 import { fromCents } from '../../lib/money.js'
 import type { Account } from '../accounts/repo.js'
-import type { Customer } from '../customers/repo.js'
+import type { BpayOutcome } from '../bpay/index.js'
 import type { LedgerTransaction } from '../transactions/repo.js'
-import { requestCents, type LedgerOutcome, type PostInput } from '../transactions/service.js'
-import { isIsoDate, nextOccurrence } from './dates.js'
+import { customerName, requestCents, WEBHOOK_TYPE, type LedgerOutcome, type PostInput } from '../transactions/service.js'
+import { addDays, isIsoDate, nextOccurrence } from './dates.js'
+import { ACCOUNT_NUMBER_RE, BSB_RE, resolveLocalAccount } from './local.js'
 import { SCHEDULE_TERMINAL, type DirectEntryRepo, type HayArchivedScheduledPayment, type HayScheduledPayment, type ScheduledPayment, type ScheduledPaymentRecipient, type ScheduleFrequency, type ScheduleStatus, type ScheduleType } from './repo.js'
 
 /** Body of POST /_admin/scheduled-payments (the portal's createScheduledPayment / updateSchedulePayment stand-in). */
@@ -43,8 +44,6 @@ export interface CreateScheduleInput {
 export interface OccurrenceResult { schedule: ScheduledPayment; outcome: LedgerOutcome; transaction?: LedgerTransaction }
 
 const FREQUENCIES: readonly ScheduleFrequency[] = ['WEEKLY', 'FORTNIGHTLY', 'MONTHLY', 'QUARTERLY']
-const BSB_RE = /^\d{6}$/
-const ACCOUNT_NUMBER_RE = /^\d{5,9}$/
 const BILLER_CODE_RE = /^\d{3,10}$/
 const BILLER_REFERENCE_RE = /^\d{2,20}$/
 const MAX_CATCH_UP = 400
@@ -113,12 +112,18 @@ export class ScheduledPaymentsService {
   /**
    * Creates an ACTIVE schedule (SCHEDULED_PAYMENT webhook) or, with `replaces`, updates that ACTIVE
    * schedule in place, archiving its previous definition as REPLACED in previousVersions (no webhook:
-   * the event is a creation notification). Validation failures are 400; an unknown account 404; a
-   * customer that does not hold the account 422 PERMISSION_DENIED; replacing a non-ACTIVE schedule 422.
+   * the event is a creation notification). A replacement keeps the processed counters and resumes at its
+   * first occurrence on or after today and strictly after the day of the last payment (never replaying a
+   * paid occurrence). Validation failures are 400; an unknown account 404; a customer that does not hold
+   * the account 422 PERMISSION_DENIED; a CLOSED account 422 ACCOUNT_CLOSED; replacing a non-ACTIVE schedule
+   * 422 INVALID_STATUS_TRANSITION; a replacement with no occurrence left (count reached, past endDate,
+   * ONE_TIME already due) 422 INVALID_SCHEDULE.
    */
   create(input: CreateScheduleInput): ScheduledPayment {
     if (!isUuid(input.accountId)) throw badRequest('BAD_REQUEST: accountId must be a UUID')
     const account = this.accounts.get(input.accountId)
+    // Closure cancels schedules only when it happens, so a closed account must not take a new one (S7 resource gate).
+    if (account.status === 'CLOSED') throw unprocessable(`ACCOUNT_CLOSED: Account ${account.id} is closed`)
     const holders = this.accounts.holderCustomerIds(account)
     const customerId = input.customerHayId ?? holders[0] ?? account.holderId
     if (!holders.includes(customerId)) throw unprocessable(`PERMISSION_DENIED: Customer ${customerId} does not hold account ${account.id}`)
@@ -137,16 +142,27 @@ export class ScheduledPaymentsService {
     const recipient = validateRecipient(input.recipient)
     if (recipient.recipientType === 'ACCOUNT') {
       const target = recipient.recipientAccountNumber!
-      if (target.branchNumber === LOCAL_BSB && !this.accounts.search(target.accountNumber!).length) throw badRequest(`BAD_REQUEST: no local account with account number ${target.accountNumber}`)
+      if (target.branchNumber === LOCAL_BSB && !resolveLocalAccount(this.ctx, LOCAL_BSB, target.accountNumber!)) throw badRequest(`BAD_REQUEST: no local account with account number ${target.accountNumber}`)
       if (target.branchNumber === account.bsb && target.accountNumber === account.accountNumber) throw badRequest('BAD_REQUEST: the recipient is the paying account')
     }
 
-    const now = isoUtc(this.ctx.clock.now())
+    const clock = this.ctx.clock.now()
+    const now = isoUtc(clock)
     const previous = input.replaces !== undefined ? this.repo.scheduleById(input.replaces) : undefined
+    const numberOfPayments = type === 'ONE_TIME' ? 1 : input.numberOfPayments
+    let nextRunDate: string | undefined = input.startDate
     if (input.replaces !== undefined) {
       if (!previous) throw notFound(`NOT_FOUND: Scheduled payment ${input.replaces} not found`)
       if (previous.accountId !== account.id) throw unprocessable(`PERMISSION_DENIED: Scheduled payment ${previous.id} does not belong to account ${account.id}`)
       if (previous.status !== 'ACTIVE') throw unprocessable(`INVALID_STATUS_TRANSITION: Scheduled payment ${previous.id} is ${previous.status} and cannot be updated`)
+      // Resume, never replay: the first occurrence of the new definition on or after today and after the last payment.
+      const yesterday = addDays(isoDate(clock), -1)
+      const lastPaid = previous.lastProcessedAt?.slice(0, 10)
+      const after = lastPaid !== undefined && lastPaid > yesterday ? lastPaid : yesterday
+      nextRunDate = type === 'ONE_TIME' ? (input.startDate > after ? input.startDate : undefined) : nextOccurrence(input.startDate, input.frequency!, after)
+      if (nextRunDate === undefined || (numberOfPayments !== undefined && previous.numberOfProcessedPayments >= numberOfPayments) || (input.endDate !== undefined && nextRunDate > input.endDate)) {
+        throw unprocessable(`INVALID_SCHEDULE: Scheduled payment ${previous.id} has made ${previous.numberOfProcessedPayments} payment(s); the updated definition has no occurrence left to run`)
+      }
     }
     const s: ScheduledPayment = compact({
       id: previous?.id ?? uuid(),
@@ -161,9 +177,11 @@ export class ScheduledPaymentsService {
       frequency: type === 'RECURRING' ? input.frequency : undefined,
       startDate: input.startDate,
       endDate: input.endDate,
-      numberOfPayments: type === 'ONE_TIME' ? 1 : input.numberOfPayments,
-      numberOfProcessedPayments: 0,
-      nextRunDate: input.startDate,
+      numberOfPayments,
+      numberOfProcessedPayments: previous?.numberOfProcessedPayments ?? 0,
+      nextRunDate,
+      lastProcessedAt: previous?.lastProcessedAt,
+      lastOutcome: previous?.lastOutcome,
       shouldCancelOnFailure: input.shouldCancelOnFailure ?? false,
       recipient,
       status: 'ACTIVE',
@@ -215,7 +233,7 @@ export class ScheduledPaymentsService {
 
   /**
    * One occurrence: ACCOUNT recipients transfer like makeTransferV1 (internal legs for BSB 636220,
-   * INTERBANK_TRANSFER_OUT otherwise), BPAY recipients post BPAY_TRANSFER_OUT; every leg is stamped
+   * INTERBANK_TRANSFER_OUT otherwise), BPAY recipients pay through bpay.post; every leg is stamped
    * originType SCHEDULED_PAYMENT / originId hayId. A refusal emits the TRANSACTION webhook with the
    * refused outcome, and either ends the schedule (ONE_TIME, or shouldCancelOnFailure: recipient-side
    * refusals -> REJECTED, others -> FAILED) or skips to the next occurrence.
@@ -246,84 +264,117 @@ export class ScheduledPaymentsService {
     return compact({ schedule: next, outcome, transaction })
   }
 
+  /**
+   * An ACCOUNT occurrence, checked in makeTransferV1's order (TransactionsService.transfer, 00-balance
+   * §3.2): sender status -> an FX child may not pay an account (REFUSED_CAPABILITY_NOT_ENABLED) -> another
+   * BSB posts INTERBANK_TRANSFER_OUT through the ledger (limits, funds) -> a local recipient: currency
+   * (REFUSED_CAPABILITY_NOT_ENABLED), status (REFUSED_RECIPIENT_ACCOUNT_BLOCKED / _CLOSED; an account
+   * number that no longer resolves counts as closed), sender limits, recipient MAX_BALANCE, sender funds;
+   * then both intrabank legs atomically. Every refusal emits the refused TRANSACTION webhook.
+   */
   private pay(s: ScheduledPayment, account: Account): { outcome: LedgerOutcome; transaction?: LedgerTransaction } {
-    const common = {
-      description: s.description,
-      reference: s.reference,
-      originType: 'SCHEDULED_PAYMENT' as const,
-      originId: s.id,
-      actionOwner: 'PLATFORM' as const,
-      notifyRefusal: true,
-    }
     const recipient = s.recipient
-    if (recipient.recipientType === 'BPAY') {
-      const bpay = recipient.bpayDetails ?? {}
-      const r = this.ledger.post(compact({
-        ...common,
-        accountId: account.id,
-        amountCents: -s.amount,
-        type: 'BPAY_TRANSFER_OUT',
-        channel: 'CUSCAL_BPAY_TRANSFER_OUT',
-        counterpart: compact({ name: recipient.recipientName ?? bpay.billerName, bpayDetails: bpay }),
-      }))
-      return compact({ outcome: r.outcome, transaction: r.transaction })
-    }
+    if (recipient.recipientType === 'BPAY') return this.payBpay(s, account)
 
     const target = recipient.recipientAccountNumber!
-    const local = target.branchNumber === LOCAL_BSB ? this.accounts.search(target.accountNumber!)[0] : undefined
-    const recipientAccount = local?.accountHayId ? this.accounts.find(local.accountHayId) : undefined
-    if (target.branchNumber !== LOCAL_BSB) {
-      const r = this.ledger.post(compact({
+    const recipientAccount = resolveLocalAccount(this.ctx, target.branchNumber!, target.accountNumber!)
+    const common = { description: s.description, reference: s.reference, originType: 'SCHEDULED_PAYMENT' as const, originId: s.id, actionOwner: 'PLATFORM' as const }
+    const out: PostInput = target.branchNumber !== LOCAL_BSB
+      ? compact({
         ...common,
         accountId: account.id,
         amountCents: -s.amount,
         type: 'INTERBANK_TRANSFER_OUT',
         channel: 'CUSCAL_NPP_TRANSFER_OUT',
         counterpart: compact({ name: recipient.recipientName, basicAccountNumber: { accountNumber: target.accountNumber!, branchNumber: target.branchNumber! } }),
+      })
+      : compact({
+        ...common,
+        accountId: account.id,
+        amountCents: -s.amount,
+        type: 'INTRABANK_TRANSFER_OUT',
+        channel: 'HAAS_TRANSFER_INTERNAL_OUT',
+        counterpart: compact({ accountId: recipientAccount?.id, customerId: recipientAccount && this.ledger.primaryCustomer(recipientAccount), name: recipient.recipientName }),
+      })
+    const refuse = (outcome: LedgerOutcome): { outcome: LedgerOutcome } => {
+      this.ledger.notifyRefused(account, 'PLATFORM', outcome, compact({
+        amountCents: -s.amount, webhookType: WEBHOOK_TYPE[out.type], transactionTime: isoUtc(this.ctx.clock.now()), isPending: false,
+        counterpart: out.counterpart, description: s.description, reference: s.reference, originType: 'SCHEDULED_PAYMENT' as const, originId: s.id,
       }))
+      return { outcome }
+    }
+
+    const senderGate = this.accounts.requireOpenForMovement(account.id)
+    if (typeof senderGate === 'string') return refuse(senderGate)
+    if (account.parentAccountId) return refuse('REFUSED_CAPABILITY_NOT_ENABLED')
+    if (out.type === 'INTERBANK_TRANSFER_OUT') {
+      const r = this.ledger.post({ ...out, notifyRefusal: true })
       return compact({ outcome: r.outcome, transaction: r.transaction })
     }
 
-    const out: PostInput = compact({
-      ...common,
-      accountId: account.id,
-      amountCents: -s.amount,
-      type: 'INTRABANK_TRANSFER_OUT',
-      channel: 'HAAS_TRANSFER_INTERNAL_OUT',
-      counterpart: compact({ accountId: recipientAccount?.id, customerId: recipientAccount && this.ledger.primaryCustomer(recipientAccount), name: recipient.recipientName }),
-    })
-    const refuse = (outcome: LedgerOutcome): { outcome: LedgerOutcome } => {
-      this.ledger.notifyRefused(account, 'PLATFORM', outcome, {
-        amountCents: -s.amount, webhookType: 'INTRABANK_TRANSFER_OUT', transactionTime: isoUtc(this.ctx.clock.now()), isPending: false,
-        counterpart: out.counterpart, description: s.description, reference: s.reference, originType: 'SCHEDULED_PAYMENT', originId: s.id,
-      })
-      return { outcome }
-    }
-    const senderGate = this.ledger.evaluate(out)
-    if (senderGate !== 'ACCEPTED') return refuse(senderGate)
     if (!recipientAccount) return refuse('REFUSED_RECIPIENT_ACCOUNT_CLOSED')
+    if (recipientAccount.currency !== account.currency) return refuse('REFUSED_CAPABILITY_NOT_ENABLED')
     const recipientGate = this.accounts.requireOpenForMovement(recipientAccount.id)
     if (recipientGate === 'REFUSED_ACCOUNT_BLOCKED') return refuse('REFUSED_RECIPIENT_ACCOUNT_BLOCKED')
     if (recipientGate === 'REFUSED_ACCOUNT_CLOSED') return refuse('REFUSED_RECIPIENT_ACCOUNT_CLOSED')
-    if (recipientAccount.currency !== account.currency) return refuse('REFUSED_CAPABILITY_NOT_ENABLED')
+    const payer = this.ctx.services.customers.find(s.customerId)
     const into: PostInput = compact({
       ...common,
-      notifyRefusal: false,
       accountId: recipientAccount.id,
       amountCents: s.amount,
       type: 'INTRABANK_TRANSFER_IN',
       channel: 'HAAS_TRANSFER_INTERNAL_IN',
-      counterpart: { accountId: account.id, customerId: s.customerId, name: senderName(this.ctx.services.customers.find(s.customerId)) },
+      counterpart: compact({ accountId: account.id, customerId: s.customerId, name: (payer && customerName(payer)) || undefined }),
       limits: ['MAX_BALANCE'],
     })
-    const recipientOutcome = this.ledger.evaluate(into)
-    if (recipientOutcome !== 'ACCEPTED') return refuse(recipientOutcome)
+    const breached = this.ledger.checkLimits(out) ?? this.ledger.checkLimits(into) ?? this.ledger.checkFunds(out)
+    if (breached) return refuse(breached)
     const sent = this.ctx.db.transaction(() => {
       const t = this.ledger.apply(out)
       this.ledger.apply(into)
       return t
     })()
     return { outcome: 'ACCEPTED', transaction: sent }
+  }
+
+  /**
+   * A BPAY occurrence runs through bpay.post (account status, FX child, biller code / CRN / amount against
+   * the directory, then the ledger's BPAY limits and funds): the CRN is the transaction reference and the
+   * counterpart carries the directory's biller name. bpay.post notifies nothing on refusal, so the refused
+   * TRANSACTION webhook is emitted here with the outcome in the webhook vocabulary (spec §4 "Outcome enums").
+   */
+  private payBpay(s: ScheduledPayment, account: Account): { outcome: LedgerOutcome; transaction?: LedgerTransaction } {
+    const details = s.recipient.bpayDetails ?? {}
+    const billerCode = details.billerCode ?? ''
+    const crn = details.billerReference ?? ''
+    const bpay = this.ctx.services.bpay
+    const r = bpay.post(compact({
+      accountId: account.id,
+      amountCents: s.amount,
+      billerCode,
+      reference: crn,
+      name: s.recipient.recipientName,
+      description: s.description,
+      originType: 'SCHEDULED_PAYMENT' as const,
+      originId: s.id,
+      actionOwner: 'PLATFORM' as const,
+    }))
+    if (r.transaction) return { outcome: 'ACCEPTED', transaction: r.transaction }
+    const outcome = fromBpayOutcome(r.outcome)
+    const biller = r.biller ?? bpay.biller(billerCode)
+    const billerName = biller?.longName ?? details.billerName
+    this.ledger.notifyRefused(account, 'PLATFORM', outcome, compact({
+      amountCents: -s.amount,
+      webhookType: 'BPAY_TRANSFER_OUT' as const,
+      transactionTime: isoUtc(this.ctx.clock.now()),
+      isPending: false,
+      counterpart: compact({ name: s.recipient.recipientName?.trim() || billerName, bpayDetails: compact({ billerCode, billerReference: crn, billerName, billerImage: biller?.image }) }),
+      description: s.description,
+      reference: crn,
+      originType: 'SCHEDULED_PAYMENT' as const,
+      originId: s.id,
+    }))
+    return { outcome }
   }
 
   private setStatus(s: ScheduledPayment, status: ScheduleStatus, actionOwner: ActionOwner, lastOutcome?: string): ScheduledPayment {
@@ -336,11 +387,14 @@ export class ScheduledPaymentsService {
   }
 }
 
-function senderName(c: Customer | undefined): string | undefined {
-  if (!c) return undefined
-  const d = c.customerDetails as { firstName?: string; lastName?: string }
-  const name = [d.firstName, d.lastName].filter(Boolean).join(' ')
-  return name || undefined
+/** BpayPaymentResponseBody.outcome -> the ledger / webhook vocabulary (the inverse of bpay's toBpayOutcome). */
+function fromBpayOutcome(outcome: BpayOutcome): LedgerOutcome {
+  switch (outcome) {
+    case 'REFUSED_INSUFFICIENT_FUNDS': return 'REFUSED_NOT_ENOUGH_FUNDS'
+    case 'REFUSED_DAILY_BPAY_LIMIT_BREACHED': return 'REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED'
+    case 'INVALID_PAYMENT': return 'REFUSED_BPAY_INVALID_PAYMENT'
+    default: return outcome
+  }
 }
 
 /** ScheduledPaymentRecipient as the portal would validate it: ACCOUNT needs a BSB + account number, BPAY a biller code + CRN. @throws 400 */

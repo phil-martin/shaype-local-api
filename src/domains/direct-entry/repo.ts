@@ -71,7 +71,7 @@ export interface ScheduledPayment {
 export interface DeListFilter {
   /** inclusive isoUtc lower bound on created_at */
   from: string
-  /** exclusive isoUtc upper bound on created_at */
+  /** inclusive isoUtc upper bound on created_at */
   to: string
   statuses?: readonly DeStatus[]
   senderAccountNumber?: string
@@ -106,13 +106,14 @@ export class DirectEntryRepo {
     )
   }
 
-  updateInstruction(id: string, patch: Partial<Pick<DeInstruction, 'status' | 'details' | 'ledgerTransactionId' | 'returnReason'>> & { updatedAt: string }): void {
+  updateInstruction(id: string, patch: Partial<Pick<DeInstruction, 'status' | 'details' | 'ledgerTransactionId' | 'returnReason' | 'processingDate'>> & { updatedAt: string }): void {
     const sets: string[] = ['updated_at = ?']
     const args: unknown[] = [patch.updatedAt]
     if (patch.status !== undefined) { sets.push('status = ?'); args.push(patch.status) }
     if ('details' in patch) { sets.push('details = ?'); args.push(patch.details ?? null) }
     if (patch.ledgerTransactionId !== undefined) { sets.push('ledger_transaction_id = ?'); args.push(patch.ledgerTransactionId) }
     if (patch.returnReason !== undefined) { sets.push('return_reason = ?'); args.push(patch.returnReason) }
+    if (patch.processingDate !== undefined) { sets.push('processing_date = ?'); args.push(patch.processingDate) }
     args.push(id)
     this.db.prepare(`UPDATE de_instructions SET ${sets.join(', ')} WHERE id = ?`).run(...args)
   }
@@ -122,9 +123,9 @@ export class DirectEntryRepo {
     return r ? toInstruction(r) : undefined
   }
 
-  /** Creation-time ascending within [from, to) (docs/superpowers spec §4: lists ordered by creation time ascending). */
+  /** Creation-time ascending within [from, to] (docs/superpowers spec §4: lists ordered by creation time ascending). */
   listInstructions(f: DeListFilter): DeInstruction[] {
-    const where = ['created_at >= ?', 'created_at < ?']
+    const where = ['created_at >= ?', 'created_at <= ?']
     const args: unknown[] = [f.from, f.to]
     if (f.statuses?.length) { where.push(`status IN (${f.statuses.map(() => '?').join(',')})`); args.push(...f.statuses) }
     if (f.senderAccountNumber !== undefined) { where.push('sender_account_number = ?'); args.push(f.senderAccountNumber) }
@@ -141,11 +142,16 @@ export class DirectEntryRepo {
     return rows.map(toInstruction)
   }
 
-  /** Most recent instruction in one of `statuses` matching the sender BSB + account number + amount. */
+  /**
+   * The instruction matching the sender BSB + account number + amount whose status comes first in
+   * `statuses` (priority order), the most recent one within that status.
+   */
   findMatching(senderBsb: string, senderAccountNumber: string, amount: Cents, statuses: readonly DeStatus[]): DeInstruction | undefined {
+    const marks = statuses.map(() => '?').join(',')
+    const priority = `CASE status ${statuses.map((_, i) => `WHEN ? THEN ${i}`).join(' ')} END`
     const r = this.db
-      .prepare(`SELECT * FROM de_instructions WHERE sender_bsb = ? AND sender_account_number = ? AND amount = ? AND status IN (${statuses.map(() => '?').join(',')}) ORDER BY seq DESC LIMIT 1`)
-      .get(senderBsb, senderAccountNumber, amount, ...statuses) as Record<string, unknown> | undefined
+      .prepare(`SELECT * FROM de_instructions WHERE sender_bsb = ? AND sender_account_number = ? AND amount = ? AND status IN (${marks}) ORDER BY ${priority}, seq DESC LIMIT 1`)
+      .get(senderBsb, senderAccountNumber, amount, ...statuses, ...statuses) as Record<string, unknown> | undefined
     return r ? toInstruction(r) : undefined
   }
 

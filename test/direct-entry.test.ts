@@ -6,7 +6,7 @@ import { assertValidNotification } from './webhook-schema.js'
 import type { BuiltServer } from '../src/server.js'
 import { LOCAL_PRODUCT_ID } from '../src/domains/accounts/index.js'
 import { LOCAL_BSB } from '../src/lib/ids.js'
-import { addDays, nextBusinessDay, nextOccurrence, occurrence, type DirectEntryService, type CreateScheduleInput } from '../src/domains/direct-entry/index.js'
+import { addDays, nextBusinessDay, nextOccurrence, occurrence, sydneyDate, type DirectEntryService, type CreateScheduleInput } from '../src/domains/direct-entry/index.js'
 
 type S = components['schemas']
 type HayAccount = S['HayAccount']
@@ -205,7 +205,8 @@ describe('createDirectDebitV1: lifecycle', () => {
     const res = await createDd(body)
     expect(res.statusCode, res.body).toBe(200)
     const created = res.json() as DdResponseV1
-    const processingDate = nextBusinessDay(await today())
+    const clockNow = (await app.inject({ method: 'GET', url: '/_admin/clock' })).json().now as string
+    const processingDate = nextBusinessDay(sydneyDate(new Date(clockNow))) // T4: the Sydney creation date
     expect(created).toEqual({
       transactionId: body.transactionId,
       outcome: 'ACCEPTED',
@@ -255,6 +256,29 @@ describe('createDirectDebitV1: lifecycle', () => {
     const posted = await getTransaction(tx[0].transactionEvent.transactionHayId)
     expect(posted).toMatchObject({ type: 'DIRECT_DEBIT_TRANSFER', transactionChannel: 'CUSCAL_DE_DEBIT_OUT', originType: 'DIRECT_DEBIT', originId: body.transactionId, currencyAmount: { amount: 250.5 } })
     expect(posted.transactionTimeUtc).toMatch(ISO_MICROS)
+    // credited before the stated processingDate: the record says when it took effect
+    expect(final.transactionDetails?.processingDate).toBe(sydneyDate(new Date(posted.transactionTimeUtc!)))
+  })
+
+  it('one id across create, the DIRECT_ENTRY and TRANSACTION webhooks and every lookup (00-open-questions I3)', async () => {
+    const sender = await newAccount()
+    const debtor = await fundedAccount(100)
+    const body = await acceptedDd(sender, { amount: 40, recipientBsb: LOCAL_BSB, recipientAccountNumber: debtor.accountNumber!, recipientName: 'Local Debtor' })
+    await flush()
+    const credit = (await txEvents(sender.accountHayId!)).find((p) => p.transactionEvent.transactionType === 'DIRECT_DEBIT_TRANSFER')
+    const webhookId = credit.transactionEvent.transactionHayId as string
+    expect(webhookId).toBe(body.transactionId)
+    // "the transactionId present in our transactionEvent notification webhooks can be used when making requests against this endpoint"
+    expect(await deStatus(webhookId)).toBe('COMPLETE')
+    expect(await getDd(webhookId)).toMatchObject({ transactionId: body.transactionId, outcome: 'COMPLETE' })
+    expect(await getTransaction(body.transactionId)).toMatchObject({ transactionHayId: body.transactionId, type: 'DIRECT_DEBIT_TRANSFER', accountHayId: sender.accountHayId, currencyAmount: { amount: 40 } })
+    // the local debtor's debit leg is a transaction of its own
+    const debit = (await txEvents(debtor.accountHayId!)).find((p) => p.transactionEvent.transactionType === 'DIRECT_DEBIT_TRANSFER')
+    expect(debit.transactionEvent.transactionHayId).not.toBe(body.transactionId)
+    expect(debit.transactionEvent.originId).toBe(body.transactionId)
+
+    // a transactionId that is already a ledger transaction id cannot name a new instruction
+    expectError(await createDd(ddBody(sender, { transactionId: debit.transactionEvent.transactionHayId })), 422, /^DUPLICATE_TRANSACTION_ID: /)
   })
 
   it('exposes each status in turn when the hops are delayed; in-flight instructions block account closure', async () => {
@@ -287,6 +311,42 @@ describe('createDirectDebitV1: lifecycle', () => {
     }
     await flush()
     expect((await getAccount(sender.accountHayId!)).totalBalance).toBe(250.5)
+  })
+
+  it('anchors each hop to when the previous one was due: a clock jump past both runs SUBMITTED and COMPLETE together', async () => {
+    const sender = await newAccount()
+    svc.progressDelayMs = DAY_MS
+    try {
+      const { transactionId } = await acceptedDd(sender, { amount: 7 })
+      await advanceClock(DAY_MS / 2)
+      expect(await deStatus(transactionId)).toBe('ACCEPTED')
+      await advanceClock(2 * DAY_MS)
+      expect(await deStatus(transactionId)).toBe('COMPLETE')
+      expect((await deEvents(transactionId)).map((e) => e.directEntryEvent.status)).toEqual(['RECEIVED', 'ACCEPTED', 'SUBMITTED', 'COMPLETE'])
+    } finally {
+      svc.progressDelayMs = undefined
+      await resetClock()
+    }
+    expect((await getAccount(sender.accountHayId!)).totalBalance).toBe(7)
+  })
+
+  it('processingDate is the next business day of the Sydney creation date (T4), brought forward to the Sydney date of an earlier COMPLETE posting', async () => {
+    const sender = await newAccount()
+    svc.progressDelayMs = DAY_MS
+    try {
+      await setClock('2026-09-24T20:00:00Z') // Thursday 20:00 UTC = Friday 06:00 in Sydney
+      const { transactionId } = await acceptedDd(sender, { amount: 3 })
+      expect(((await getDd(transactionId)) as DdResponseV1).transactionDetails?.processingDate).toBe('2026-09-28') // Monday
+      await advanceClock(2 * DAY_MS) // COMPLETE on Sunday 27 September (Sydney)
+      expect(await deStatus(transactionId)).toBe('COMPLETE')
+      const final = (await getDd(transactionId)) as DdResponseV1
+      expect(final.transactionDetails?.processingDate).toBe('2026-09-27')
+      expect(((await getDd(transactionId, 'v0')) as DdResponse).transactionDetails?.processingDate).toBe('2026-09-27')
+      expect((await getTransaction(transactionId)).transactionTimeUtc).toMatch(/^2026-09-26T20:00/)
+    } finally {
+      svc.progressDelayMs = undefined
+      await resetClock()
+    }
   })
 
   it('replays the same idempotencyKey + body without new webhooks; a different body is 422; a reused transactionId is 422 DUPLICATE_TRANSACTION_ID', async () => {
@@ -412,6 +472,28 @@ describe('createDirectDebitV1: lifecycle', () => {
     }
   })
 
+  it('returnOutbound prefers the most recent SUBMITTED instruction over a newer ACCEPTED one of the same amount', async () => {
+    const sender = await newAccount()
+    svc.progressDelayMs = DAY_MS
+    try {
+      const older = await acceptedDd(sender, { amount: 33 })
+      await advanceClock(DAY_MS)
+      expect(await deStatus(older.transactionId)).toBe('SUBMITTED')
+      const newer = await acceptedDd(sender, { amount: 33 })
+      expect(await deStatus(newer.transactionId)).toBe('ACCEPTED')
+      const match = { senderBsb: LOCAL_BSB, senderAccountNumber: sender.accountNumber!, amountCents: 3300 }
+      expect(svc.returnOutbound(match)?.id).toBe(older.transactionId)
+      expect(await deStatus(newer.transactionId)).toBe('ACCEPTED')
+      expect(svc.returnOutbound(match)?.id).toBe(newer.transactionId) // no SUBMITTED left: the ACCEPTED one
+      expect(svc.returnOutbound(match)).toBeUndefined()
+      await advanceClock(2 * DAY_MS) // drain the pending hops (no-ops now)
+      expect(await deStatus(newer.transactionId)).toBe('RETURNED')
+    } finally {
+      svc.progressDelayMs = undefined
+      await resetClock()
+    }
+  })
+
   it('debits a local recipient in the same transaction; its DIRECT_DEBIT_PER_DAY limit or funds refusal returns the instruction', async () => {
     const sender = await newAccount()
     const debtor = await fundedAccount(1000)
@@ -492,6 +574,11 @@ describe('getDirectDebitsV1 / V0: listing', () => {
     expect((await listDd({ fromUtc: addDays(day, 1), toUtc: addDays(day, 1), offset: 0, limit: 10, senderAccountNumber: a.accountNumber! })).json()).toEqual([])
     const wide = (await listDd({ fromUtc: addDays(day, -1), toUtc: addDays(day, 1), offset: 0, limit: 1000, senderAccountNumber: b.accountNumber! })).json() as DeDetailsV1[]
     expect(wide.map((d) => d.transactionHayId)).toEqual([second.transactionId])
+    // an open-ended range: the last representable day is still an inclusive bound
+    for (const version of ['v1', 'v0'] as const) {
+      const open = (await listDd({ fromUtc: '1970-01-01', toUtc: '9999-12-31', offset: 0, limit: 1000, ...(version === 'v1' ? { senderAccountNumber: b.accountNumber! } : {}) }, version)).json() as DeDetailsV1[]
+      expect(open.map((d) => d.transactionHayId), version).toContain(second.transactionId)
+    }
   })
 
   it('rejects an inverted range, a limit outside 1..1000, a negative offset, a bad date and an out-of-enum status (400)', async () => {
@@ -615,14 +702,22 @@ describe('scheduled payments', () => {
     await setClock('2027-01-31T10:00:00Z')
     try {
       const account = await fundedAccount(1000)
-      expect(occurrence('2027-01-31', 'MONTHLY', 1)).toBe('2027-03-03')
+      // "next available date where invalid date is encountered in schedule i.e. 30th February": 1 March
+      expect(occurrence('2027-01-31', 'MONTHLY', 1)).toBe('2027-03-01')
+      expect(occurrence('2027-01-30', 'MONTHLY', 1)).toBe('2027-03-01')
+      expect(occurrence('2028-01-30', 'MONTHLY', 1)).toBe('2028-03-01') // leap year: 29 Feb exists, 30 Feb does not
+      expect(occurrence('2028-01-29', 'MONTHLY', 1)).toBe('2028-02-29')
       expect(occurrence('2027-01-31', 'MONTHLY', 2)).toBe('2027-03-31')
+      expect(occurrence('2027-01-31', 'MONTHLY', 3)).toBe('2027-05-01')
+      expect(occurrence('2026-11-30', 'QUARTERLY', 1)).toBe('2027-03-01')
+      expect(occurrence('2026-11-30', 'QUARTERLY', 2)).toBe('2027-05-30')
+      expect(occurrence('2027-12-31', 'MONTHLY', 2)).toBe('2028-03-01') // year rollover, then 31 Feb
       expect(nextOccurrence('2027-01-31', 'QUARTERLY', '2027-01-31')).toBe('2027-05-01')
       const s = await createSchedule(scheduleInput(account, { frequency: 'MONTHLY', startDate: '2027-01-31', endDate: '2027-03-15', amount: 10 }))
       expect(await getSchedule(account.accountHayId!, s.hayId!)).toMatchObject({ status: 'ACTIVE', numberOfProcessedPayments: 1 })
-      await setClock('2027-03-02T10:00:00Z')
+      await setClock('2027-02-28T10:00:00Z')
       expect((await getSchedule(account.accountHayId!, s.hayId!)).numberOfProcessedPayments).toBe(1)
-      await setClock('2027-04-10T10:00:00Z') // 3 March ran late; 31 March is after endDate
+      await setClock('2027-04-10T10:00:00Z') // 1 March ran late; 31 March is after endDate
       expect(await getSchedule(account.accountHayId!, s.hayId!)).toMatchObject({ status: 'COMPLETED', numberOfProcessedPayments: 2 })
 
       const weekly = await createSchedule(scheduleInput(account, { frequency: 'WEEKLY', startDate: '2027-04-01', numberOfPayments: 5, amount: 1 }))
@@ -657,8 +752,48 @@ describe('scheduled payments', () => {
     const paid = (await txEvents(payer.accountHayId!)).filter((p) => p.transactionEvent.originId === bpay.hayId)
     expect(paid).toHaveLength(1)
     assertValidNotification(paid[0])
-    expect(paid[0].transactionEvent).toMatchObject({ transactionType: 'BPAY_TRANSFER_OUT', currencyAmount: { amount: -80 }, counterpartName: 'Power co', counterpartDetails: { name: 'Power co', bpayDetails: { billerCode: '2005', billerReference: '12345678', billerName: 'Power Co' } } })
-    expect(await getTransaction(paid[0].transactionEvent.transactionHayId)).toMatchObject({ type: 'BPAY_TRANSFER_OUT', transactionChannel: 'CUSCAL_BPAY_TRANSFER_OUT', originType: 'SCHEDULED_PAYMENT' })
+    // posted through bpay.post: the directory's biller name, the CRN as the transaction reference
+    expect(paid[0].transactionEvent).toMatchObject({ transactionType: 'BPAY_TRANSFER_OUT', currencyAmount: { amount: -80 }, reference: '12345678', originType: 'SCHEDULED_PAYMENT', originId: bpay.hayId, counterpartName: 'Power co', counterpartDetails: { name: 'Power co', bpayDetails: { billerCode: '2005', billerReference: '12345678', billerName: 'BILLER LONG NAME 2005' } } })
+    expect(await getTransaction(paid[0].transactionEvent.transactionHayId)).toMatchObject({ type: 'BPAY_TRANSFER_OUT', transactionChannel: 'CUSCAL_BPAY_TRANSFER_OUT', originType: 'SCHEDULED_PAYMENT', reference: '12345678' })
+  })
+
+  it('BPAY occurrences go through bpay.post: directory refusals end a shouldCancelOnFailure schedule as REJECTED with the refused TRANSACTION webhook', async () => {
+    const payer = await fundedAccount(500)
+    const day = await today()
+    const bpayTo = (billerCode: string, billerReference: string, extra: Partial<CreateScheduleInput> = {}) =>
+      createSchedule(scheduleInput(payer, { startDate: day, frequency: 'WEEKLY', shouldCancelOnFailure: true, amount: 25, recipient: { recipientType: 'BPAY', bpayDetails: { billerCode, billerReference } }, ...extra }))
+    const cases: [string, string, string][] = [
+      ['000000', '12345678', 'REFUSED_BPAY_INVALID_BILLER_CODE'], // deactivated biller
+      ['1016', '1234567890', 'REFUSED_BPAY_INVALID_BILLER_CODE'], // inactive Staging fixture
+      ['123', '12345678', 'REFUSED_BPAY_INVALID_BILLER_CODE'], // not a 4-10 digit biller code
+      ['7773', '1234', 'REFUSED_BPAY_INVALID_REFERENCE'], // fixture 7773 takes 8-digit CRNs
+      ['7773', '12345678', 'REFUSED_BPAY_INVALID_PAYMENT'], // ... and at least $20 (amount 10 below)
+    ]
+    for (const [billerCode, crn, outcome] of cases) {
+      const s = await bpayTo(billerCode, crn, outcome === 'REFUSED_BPAY_INVALID_PAYMENT' ? { amount: 10 } : {})
+      await flush()
+      expect(await getSchedule(payer.accountHayId!, s.hayId!), billerCode).toMatchObject({ status: 'REJECTED', numberOfProcessedPayments: 0 })
+      const refused = (await txEvents(payer.accountHayId!)).filter((p) => p.transactionEvent.originId === s.hayId)
+      expect(refused, billerCode).toHaveLength(1)
+      assertValidNotification(refused[0])
+      expect(refused[0]).toMatchObject({ actionOwner: 'PLATFORM', transactionEvent: { outcome, transactionType: 'BPAY_TRANSFER_OUT', isPending: false, currencyAmount: { amount: outcome === 'REFUSED_BPAY_INVALID_PAYMENT' ? -10 : -25 }, reference: crn, originType: 'SCHEDULED_PAYMENT', originId: s.hayId, counterpartDetails: { bpayDetails: { billerCode, billerReference: crn } } } })
+    }
+    expect((await getAccount(payer.accountHayId!)).totalBalance).toBe(500)
+
+    // the ledger's refusals use the webhook vocabulary: not enough funds -> FAILED, the BPAY daily limit -> FAILED
+    const broke = await newAccount()
+    const poor = await createSchedule(scheduleInput(broke, { startDate: day, frequency: 'WEEKLY', shouldCancelOnFailure: true, recipient: { recipientType: 'BPAY', bpayDetails: { billerCode: '2005', billerReference: '12345678' } } }))
+    await flush()
+    expect((await getSchedule(broke.accountHayId!, poor.hayId!)).status).toBe('FAILED')
+    const noFunds = (await txEvents(broke.accountHayId!)).filter((p) => p.transactionEvent.originId === poor.hayId)
+    expect(noFunds.map((p) => p.transactionEvent.outcome)).toEqual(['REFUSED_NOT_ENOUGH_FUNDS'])
+    // no recipientName: the counterpart is the directory's biller name
+    expect(noFunds[0].transactionEvent).toMatchObject({ counterpartName: 'BILLER LONG NAME 2005', counterpartDetails: { name: 'BILLER LONG NAME 2005', bpayDetails: { billerName: 'BILLER LONG NAME 2005' } } })
+    await setLimit(payer.accountHayId!, 'BPAY_DAILY_LIMIT', 30)
+    const capped = await bpayTo('2005', '12345678', { amount: 40 })
+    await flush()
+    expect((await getSchedule(payer.accountHayId!, capped.hayId!)).status).toBe('FAILED')
+    expect((await txEvents(payer.accountHayId!)).filter((p) => p.transactionEvent.originId === capped.hayId).map((p) => p.transactionEvent.outcome)).toEqual(['REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED'])
   })
 
   it('a refused occurrence emits the refused TRANSACTION webhook and ends the schedule (FAILED / REJECTED) or is skipped', async () => {
@@ -694,6 +829,40 @@ describe('scheduled payments', () => {
     expect((await getSchedule(broke.accountHayId!, toClosed.hayId!)).status).toBe('REJECTED')
     const rejected = (await txEvents(broke.accountHayId!)).filter((p) => p.transactionEvent.originId === toClosed.hayId)
     expect(rejected[0]?.transactionEvent).toMatchObject({ outcome: 'REFUSED_RECIPIENT_ACCOUNT_CLOSED', transactionType: 'INTRABANK_TRANSFER_OUT' })
+  })
+
+  it('an ACCOUNT occurrence refuses in makeTransferV1 order (recipient status, recipient MAX_BALANCE before sender funds) and an FX child cannot pay an account', async () => {
+    const day = await today()
+    const broke = await newAccount()
+    const blockedPayee = await newAccount()
+    await blockAccount(blockedPayee.accountHayId!)
+    const cappedPayee = await newAccount({ risk: 'HIGH' }) // MAX_BALANCE 0
+    const parent = await newAccount()
+    const childRes = await app.inject({ method: 'POST', url: '/v1/accounts', payload: { idempotencyKey: randomUUID(), accountHolderId: parent.accountHolderId, accountHolderType: 'CUSTOMER', productId: LOCAL_PRODUCT_ID, currency: 'USD', parentAccountId: parent.accountHayId } })
+    expect(childRes.statusCode, childRes.body).toBe(200)
+    const child = childRes.json() as HayAccount
+    await flush()
+
+    const local = (payee: HayAccount): CreateScheduleInput['recipient'] => ({ recipientType: 'ACCOUNT', recipientName: 'Payee', recipientAccountNumber: { branchNumber: LOCAL_BSB, accountNumber: payee.accountNumber! } })
+    const cases: [HayAccount, CreateScheduleInput['recipient'], string, string][] = [
+      [broke, local(blockedPayee), 'REFUSED_RECIPIENT_ACCOUNT_BLOCKED', 'REFUSED_RECIPIENT_ACCOUNT_BLOCKED'],
+      [broke, local(cappedPayee), 'REFUSED_MAX_BALANCE_EXCEEDED', 'REFUSED_MAX_BALANCE_EXCEEDED'],
+      [child, externalRecipient(), 'REFUSED_CAPABILITY_NOT_ENABLED', 'REFUSED_CAPABILITY_NOT_ENABLED'],
+    ]
+    for (const [payer, recipient, expected, rest] of cases) {
+      const target = recipient!.recipientAccountNumber!
+      const transfer = await app.inject({
+        method: 'POST', url: `/v1/accounts/${payer.accountHayId}/transfer`,
+        payload: { idempotencyKey: randomUUID(), senderCustomerHayId: payer.accountHolderId, amount: 100, description: 'Rent', transferType: 'ACCOUNT', accountTransfer: { bsb: target.branchNumber, accountNumber: target.accountNumber, recipientName: 'Payee' } },
+      })
+      expect(transfer.json().outcome, expected).toBe(rest)
+
+      const s = await createSchedule(scheduleInput(payer, { startDate: day, recipient }))
+      await flush()
+      const refused = (await txEvents(payer.accountHayId!)).filter((p) => p.transactionEvent.originId === s.hayId)
+      expect(refused.map((p) => p.transactionEvent.outcome), expected).toEqual([expected])
+      assertValidNotification(refused[0])
+    }
   })
 
   it('cancelScheduledPayment: ACTIVE -> CANCELLED (no further occurrences, no webhook), idempotent on CANCELLED, 422 on other terminal statuses, 404 on unknown or foreign ids', async () => {
@@ -741,6 +910,53 @@ describe('scheduled payments', () => {
     expectError(await app.inject({ method: 'POST', url: '/_admin/scheduled-payments', payload: scheduleInput(account, { startDate: start, replaces: UNKNOWN_ID }) }), 404, /^NOT_FOUND: /)
   })
 
+  it('`replaces` keeps the processed counters and resumes after the last payment: paid occurrences are never replayed', async () => {
+    await setClock('2027-03-10T10:00:00Z')
+    try {
+      const account = await fundedAccount(1000)
+      const s = await createSchedule(scheduleInput(account, { frequency: 'MONTHLY', startDate: '2027-01-05', amount: 10 }))
+      const paid = await getSchedule(account.accountHayId!, s.hayId!)
+      expect(paid).toMatchObject({ status: 'ACTIVE', numberOfProcessedPayments: 3 }) // 5 Jan, 5 Feb, 5 Mar caught up
+      expect((await getAccount(account.accountHayId!)).totalBalance).toBe(970)
+
+      const updated = await createSchedule(scheduleInput(account, { frequency: 'MONTHLY', startDate: '2027-01-05', amount: 11, replaces: s.hayId! }), 200)
+      expect(updated).toMatchObject({ status: 'ACTIVE', numberOfProcessedPayments: 3, lastProcessedDateTimeUtc: paid.lastProcessedDateTimeUtc, amount: { amount: 11 } })
+      expect(updated.previousVersions).toEqual([expect.objectContaining({ status: 'REPLACED', numberOfProcessedPayments: 3, amount: { currency: 'AUD', amount: 10 } })])
+      expect(await getSchedule(account.accountHayId!, s.hayId!)).toMatchObject({ numberOfProcessedPayments: 3 })
+      expect((await getAccount(account.accountHayId!)).totalBalance).toBe(970)
+      await setClock('2027-04-04T10:00:00Z')
+      expect(await getSchedule(account.accountHayId!, s.hayId!)).toMatchObject({ numberOfProcessedPayments: 3 })
+      expect((await getAccount(account.accountHayId!)).totalBalance).toBe(970)
+      await setClock('2027-04-05T10:00:00Z')
+      expect(await getSchedule(account.accountHayId!, s.hayId!)).toMatchObject({ status: 'ACTIVE', numberOfProcessedPayments: 4 })
+      expect((await getAccount(account.accountHayId!)).totalBalance).toBe(959)
+
+      // switching to WEEKLY (4 Jan + 7k: ..., 5 Apr, 12 Apr) on the day of a payment: 12 Apr is next, not 5 Apr again
+      const weekly = await createSchedule(scheduleInput(account, { frequency: 'WEEKLY', startDate: '2027-01-04', amount: 1, replaces: s.hayId! }), 200)
+      expect(weekly).toMatchObject({ numberOfProcessedPayments: 4, frequency: 'WEEKLY' })
+      await setClock('2027-04-11T10:00:00Z')
+      expect((await getSchedule(account.accountHayId!, s.hayId!)).numberOfProcessedPayments).toBe(4)
+      await setClock('2027-04-12T10:00:00Z')
+      expect((await getSchedule(account.accountHayId!, s.hayId!)).numberOfProcessedPayments).toBe(5)
+      expect((await getAccount(account.accountHayId!)).totalBalance).toBe(958)
+
+      // nothing paid yet: resumes at the first occurrence on or after today, never replaying past dates
+      const later = await createSchedule(scheduleInput(account, { frequency: 'MONTHLY', startDate: '2027-06-01', amount: 5 }))
+      await createSchedule(scheduleInput(account, { frequency: 'MONTHLY', startDate: '2027-01-12', amount: 5, replaces: later.hayId! }), 200)
+      expect(await getSchedule(account.accountHayId!, later.hayId!)).toMatchObject({ numberOfProcessedPayments: 1 }) // 12 Apr (today) only
+      expect((await getAccount(account.accountHayId!)).totalBalance).toBe(953)
+
+      // a definition with nothing left to run is refused
+      const bad = async (input: CreateScheduleInput) => expectError(await app.inject({ method: 'POST', url: '/_admin/scheduled-payments', payload: input }), 422, /^INVALID_SCHEDULE: /)
+      await bad(scheduleInput(account, { frequency: 'WEEKLY', startDate: '2027-01-04', numberOfPayments: 5, replaces: s.hayId! }))
+      await bad(scheduleInput(account, { frequency: 'WEEKLY', startDate: '2027-01-04', endDate: '2027-04-18', replaces: s.hayId! })) // next would be 19 Apr
+      await bad(scheduleInput(account, { startDate: '2027-04-12', replaces: later.hayId! })) // ONE_TIME: already paid once
+      expect(await getSchedule(account.accountHayId!, s.hayId!)).toMatchObject({ status: 'ACTIVE', numberOfProcessedPayments: 5, frequency: 'WEEKLY' })
+    } finally {
+      await resetClock()
+    }
+  })
+
   it('validates the seeding body', async () => {
     const account = await newAccount()
     const stranger = await newCustomer()
@@ -771,5 +987,12 @@ describe('scheduled payments', () => {
     await flush()
     expect((await getAccount(account.accountHayId!)).status).toBe('CLOSED')
     expect((await getSchedule(account.accountHayId!, s.hayId!)).status).toBe('CANCELLED')
+
+    // a closed account takes no new schedule (closure would never cancel it: S7's resource gate)
+    const before = (await allPayloads()).length
+    expectError(await app.inject({ method: 'POST', url: '/_admin/scheduled-payments', payload: scheduleInput(account, { startDate: await today() }) }), 422, /^ACCOUNT_CLOSED: /)
+    await flush()
+    expect((await allPayloads()).length).toBe(before)
+    expect((await app.inject({ method: 'GET', url: `/v0/accounts/${account.accountHayId}/scheduledPayments` })).json()).toHaveLength(1)
   })
 })
