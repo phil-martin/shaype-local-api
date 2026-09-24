@@ -30,6 +30,7 @@ type ByMandate = { mandateId: string }
 type MandatesQuery = { accountIds: string[]; statuses?: MandateStatus[]; pageNumber: number; pageSize: number }
 
 const TAG = 'PayTo API'
+const ALIAS_TYPES: ReadonlySet<string> = new Set<AccountAliasType>(['AUSTRALIAN_BUSINESS_NUMBER', 'EMAIL_ADDRESS', 'ORGANISATION_ID', 'PHONE_NUMBER'])
 
 export function registerRoutes(app: FastifyInstance, ctx: AppContext, svc: PayToService): void {
   app.addHook('preValidation', async (req) => {
@@ -41,7 +42,8 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext, svc: PayTo
     if (typeof body.mandateId === 'string') body.mandateId = normaliseMandateId(body.mandateId)
     // createMandate: "instead of providing account_id to identify creditor or debtor, an alias might be used instead" (docs)
     const creditor = body.creditorDetails as Record<string, unknown> | undefined
-    if (creditor && typeof creditor === 'object' && creditor.accountId === undefined && typeof creditor.accountAliasIdentification === 'string' && typeof creditor.accountAliasType === 'string') {
+    // (a malformed alias is left to the schema, which then answers 400 for the missing accountId)
+    if (creditor && typeof creditor === 'object' && creditor.accountId === undefined && typeof creditor.accountAliasIdentification === 'string' && ALIAS_TYPES.has(creditor.accountAliasType as string)) {
       creditor.accountId = svc.resolveCreditorAlias(creditor.accountAliasIdentification, creditor.accountAliasType as AccountAliasType)
     }
   })

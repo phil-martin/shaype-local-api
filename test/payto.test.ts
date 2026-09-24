@@ -385,6 +385,8 @@ describe('createMandate', () => {
     }
     const lone = await app.inject({ method: 'POST', url: '/v1/payto/initiator/mandates', payload: { ...mandateBody(creditor, { accountId: debtor.accountHayId! }), creditorDetails: { accountAliasIdentification: payId } } })
     expect(lone.statusCode).toBe(400)
+    const badType = await app.inject({ method: 'POST', url: '/v1/payto/initiator/mandates', payload: { ...mandateBody(creditor, { accountId: debtor.accountHayId! }), creditorDetails: { accountAliasIdentification: payId, accountAliasType: 'PAYID' } } })
+    expect(badType.statusCode).toBe(400)
 
     // debtor aliases: the staging form resolves a local account, a foreign BSB stays an external debtor
     const local = await getMandate(await createMandate(creditor, { accountAliasIdentification: `${LOCAL_BSB}${debtor.accountNumber}@payto.example`, accountAliasType: 'EMAIL_ADDRESS' }))
