@@ -606,8 +606,17 @@ describe('holds (services.transactions.holds, GET /v1/holds/{holdId}, GET /v0/ac
     expect(svc.holds.authorise(holdInput(a.accountHayId!, 100, { refusal: { outcome: 'INTERNAL_ERROR', cardProcessorResponse: 'EXPIRED_CARD' } }))).toEqual({ outcome: 'INTERNAL_ERROR' })
     expect((await txEvents(a.accountHayId!)).at(-1).transactionEvent).toMatchObject({ outcome: 'INTERNAL_ERROR', cardProcessorResponse: 'EXPIRED_CARD' })
 
+    const open = svc.holds.authorise(holdInput(a.accountHayId!, 100, { card: card({ merchant: { name: 'Coles' } }) })).hold!
     await post(`/v0/accounts/${a.accountHayId}/block`, { note: 'x', accountBlockStyle: 'ACCOUNT_ONLY' })
     expect(svc.holds.authorise(holdInput(a.accountHayId!, 100, { card: card({ merchant: { name: 'Coles' } }) }))).toEqual({ outcome: 'REFUSED_ACCOUNT_BLOCKED' })
+    expect(svc.holds.increase(open.id, 100)).toMatchObject({ outcome: 'REFUSED_ACCOUNT_BLOCKED', hold: { amount: 100 } })
+    ev = (await txEvents(a.accountHayId!)).at(-1)
+    expect(ev.transactionEvent).toMatchObject({ transactionHayId: open.id, holdHayId: open.id, outcome: 'REFUSED_ACCOUNT_BLOCKED', currencyAmount: AUD(-1), isPending: false })
+    assertValidNotification(ev)
+    // a settlement of an already authorised hold still clears on a blocked account (funds were reserved)
+    const beforeSettle = await getAccount(a.accountHayId!)
+    expect(svc.holds.settle(open.id).transaction).toMatchObject({ amount: -100, relatedHoldId: open.id })
+    expect(await getAccount(a.accountHayId!)).toMatchObject({ status: 'LOCKED', heldBalance: Math.round((beforeSettle.heldBalance! - 1) * 100) / 100, totalBalance: Math.round((beforeSettle.totalBalance! - 1) * 100) / 100, availableBalance: beforeSettle.availableBalance })
     expect(() => svc.holds.authorise(holdInput(UNKNOWN_ID, 100))).toThrow(/NOT_FOUND: Account/)
     expect(() => svc.holds.authorise(holdInput(a.accountHayId!, 0))).toThrow(/BAD_REQUEST/)
   })
@@ -688,6 +697,11 @@ describe('searchTransactions (POST /v0/transactions/search)', () => {
     expect((await search({ originChannel: 'POS_DEBIT' })).json().map((t: FinancialTransaction) => t.transactionHayId)).toEqual([ids[0]])
     expect((await search({ originChannel: 'ATM_CASH' })).json()).toEqual([])
     expect((await search({ accountId: UNKNOWN_ID })).json()).toEqual([])
+    // no accountId: every account's postings in the window
+    const otherAccount = await newAccount()
+    const otherId = (await credit(otherAccount.accountHayId!, 1, { originId })).transactionId!
+    const all = await post('/v0/transactions/search?limit=1000&offset=0', { fromDateTimeUtc: from, toDateTimeUtc: (await getTransaction(otherId)).clearingTimeUtc, originId })
+    expect(all.json().map((t: FinancialTransaction) => t.transactionHayId)).toEqual([otherId, ids[1]])
     // bounds are inclusive on both ends
     expect((await search({ toDateTimeUtc: txs[1]!.clearingTimeUtc })).json().map((t: FinancialTransaction) => t.transactionHayId)).toEqual([ids[1], ids[0]])
     expect((await search({ fromDateTimeUtc: txs[1]!.clearingTimeUtc })).json().map((t: FinancialTransaction) => t.transactionHayId)).toEqual([ids[2], ids[1]])
