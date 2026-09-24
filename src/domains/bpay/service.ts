@@ -33,9 +33,10 @@ declare module '../../context.js' {
   }
 }
 
-/** A BPAY payment without a request body (scheduled payments, mocks): amounts are positive cents. */
+/** A BPAY payment without a request body (scheduled payments, mocks). */
 export interface BpayPostInput {
   accountId: string
+  /** a positive integer number of cents (400 otherwise) */
   amountCents: Cents
   billerCode: string
   /** customer reference number */
@@ -116,24 +117,26 @@ export class BpayService {
   // ---------------------------------------------------------------- saved billers
 
   /**
-   * createBPayBiller: the account must exist (404), the biller code / CRN must pass the directory rules
-   * (422), and no active biller of the account may already hold the same (billerCode, reference) pair
-   * or the same nickname (409 Conflict — the one declared 409 in the contract). Status ACTIVE; the image
-   * is the directory's logo URL.
+   * createBPayBiller: the account must exist (404), the nickname must not be blank (400 — the schema
+   * leaves it unconstrained), the biller code / CRN must pass the directory rules (422), and no active
+   * biller of the account may already hold the same (billerCode, reference) pair or the same trimmed
+   * nickname (409 Conflict — the one declared 409 in the contract). Status ACTIVE; the image is the
+   * directory's logo URL.
    */
   createBiller(accountId: string, body: BPayBillerAddRequestBody): SavedBiller {
     this.accounts.get(accountId)
+    const name = nickname(body.name)
     const biller = this.requireValid(body.billerCode, body.reference)
     if (this.repo.activeByCodeAndReference(accountId, body.billerCode, body.reference)) {
       throw conflict(`DUPLICATE_BILLER: Biller code ${body.billerCode} with reference ${body.reference} is already saved on account ${accountId}`)
     }
-    if (this.repo.activeByName(accountId, body.name)) throw conflict(`DUPLICATE_BILLER_NAME: A biller named ${body.name} is already saved on account ${accountId}`)
+    if (this.repo.activeByName(accountId, name)) throw conflict(`DUPLICATE_BILLER_NAME: A biller named ${name} is already saved on account ${accountId}`)
     const b: SavedBiller = {
       id: uuid(),
       accountId,
       billerCode: body.billerCode,
       reference: body.reference,
-      name: body.name,
+      name,
       image: biller.image,
       shortName: biller.shortName,
       longName: biller.longName,
@@ -165,7 +168,8 @@ export class BpayService {
 
   /**
    * updateBpayBiller: partial update of name / image / reference / status. A new reference must pass
-   * the biller's CRN rules and, like a new name, the uniqueness rules (422 here — 409 is not declared).
+   * the biller's CRN rules and, like a new name (trimmed, not blank — 400), the uniqueness rules (422
+   * here — 409 is not declared).
    * DISMISSED is terminal: a dismissed biller accepts no further change (422 INVALID_STATE), and it
    * frees its name and reference for the account. status outside ACTIVE / DISMISSED is a 400.
    * @throws 404; 400; 422
@@ -173,6 +177,7 @@ export class BpayService {
   updateBiller(id: string, body: BPayBillerUpdateRequestBody): SavedBiller {
     const b = this.getBiller(id)
     if (body.status !== undefined && body.status !== 'ACTIVE' && body.status !== 'DISMISSED') throw badRequest('BAD_REQUEST: status must be ACTIVE or DISMISSED')
+    const name = body.name === undefined ? undefined : nickname(body.name)
     if (b.status === 'DISMISSED') throw unprocessable(`INVALID_STATE: Biller ${id} is DISMISSED`)
     if (body.reference !== undefined && body.reference !== b.reference) {
       this.requireValid(b.billerCode, body.reference)
@@ -180,10 +185,10 @@ export class BpayService {
         throw unprocessable(`DUPLICATE_BILLER: Biller code ${b.billerCode} with reference ${body.reference} is already saved on account ${b.accountId}`)
       }
     }
-    if (body.name !== undefined && this.repo.activeByName(b.accountId, body.name, b.id)) {
-      throw unprocessable(`DUPLICATE_BILLER_NAME: A biller named ${body.name} is already saved on account ${b.accountId}`)
+    if (name !== undefined && this.repo.activeByName(b.accountId, name, b.id)) {
+      throw unprocessable(`DUPLICATE_BILLER_NAME: A biller named ${name} is already saved on account ${b.accountId}`)
     }
-    if (body.name !== undefined) b.name = body.name
+    if (name !== undefined) b.name = name
     if (body.image !== undefined) b.image = body.image
     if (body.reference !== undefined) b.reference = body.reference
     if (body.status !== undefined) b.status = body.status
@@ -241,10 +246,11 @@ export class BpayService {
    * TOTAL_SPEND_PER_YEAR checks and the funds check. Accepted: BPAY_TRANSFER_OUT on channel
    * CUSCAL_BPAY_TRANSFER_OUT is posted immediately (no hold), the CRN stored as the transaction reference,
    * the counterpart carrying the nickname and bpayDetails; the ledger emits the TRANSACTION webhook.
-   * Refusals post nothing and emit no webhook.
-   * @throws 404 unknown account
+   * Refusals post nothing and emit no webhook. A blank nickname counts as absent.
+   * @throws 400 amountCents not a positive integer; 404 unknown account
    */
   post(input: BpayPostInput): BpayPostResult {
+    if (!Number.isInteger(input.amountCents) || input.amountCents <= 0) throw badRequest('BAD_REQUEST: amountCents must be a positive integer')
     const account = this.accounts.get(input.accountId)
     const gate = this.accounts.requireOpenForMovement(account.id)
     if (typeof gate === 'string') return { outcome: gate }
@@ -258,7 +264,7 @@ export class BpayService {
       type: 'BPAY_TRANSFER_OUT',
       channel: 'CUSCAL_BPAY_TRANSFER_OUT',
       counterpart: {
-        name: input.name ?? biller.longName,
+        name: input.name?.trim() || biller.longName,
         bpayDetails: { billerCode: biller.billerCode, billerReference: input.reference, billerName: biller.longName, billerImage: biller.image },
       },
       description: input.description,
@@ -272,6 +278,13 @@ export class BpayService {
     this.ctx.events.emit('bpay.paymentAccepted', { transaction: r.transaction, biller, accountId: account.id })
     return { outcome: 'ACCEPTED', transaction: r.transaction, biller }
   }
+}
+
+/** A saved biller's nickname as stored: trimmed, and never blank. @throws 400 */
+function nickname(name: string): string {
+  const trimmed = name.trim()
+  if (trimmed === '') throw badRequest('BAD_REQUEST: name must not be blank')
+  return trimmed
 }
 
 function details(b: Pick<DirectoryBiller, 'billerCode' | 'shortName' | 'longName' | 'industryAnzsicCode'>, reference: string): BPayBillerDetails {

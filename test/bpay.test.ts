@@ -184,6 +184,15 @@ describe('validateBpay', () => {
     expectError(await validate({ billerCode: '1234', reference: '12AB' }), 422, /^INVALID_REFERENCE: Reference 12AB must be 2 to 20 digits/)
   })
 
+  it('applies the ICRNAMT fixture\'s 4-20 digit CRN lengths (600015), unlike the 2-20 of a synthesised biller', async () => {
+    expectError(await validate({ billerCode: '600015', reference: '12' }), 422, /^INVALID_REFERENCE: Reference 12 must be 4 to 20 digits for biller 600015/)
+    expectError(await validate({ billerCode: '600015', reference: '123' }), 422, /^INVALID_REFERENCE/)
+    expect((await validate({ billerCode: '600015', reference: '1234' })).statusCode).toBe(200)
+    expect((await validate({ billerCode: '600015', reference: '0808812345678260' })).statusCode).toBe(200)
+    expect((await validate({ billerCode: '600015', reference: '12345678901234567890' })).statusCode).toBe(200)
+    expect(STAGING_BILLERS.find((b) => b.billerCode === '600015')?.crnLengths).toEqual(Array.from({ length: 17 }, (_, i) => i + 4))
+  })
+
   it('validates the body against the schema (400)', async () => {
     expect((await validate({ billerCode: '1234' })).statusCode).toBe(400)
     expect((await validate({ billerCode: '12', reference: '1234' })).statusCode).toBe(400)
@@ -224,6 +233,18 @@ describe('createBPayBiller / retrieveBpayBiller', () => {
     const a = await newAccount()
     await createBiller(a.accountHayId!, { name: 'Power' })
     expectError(await app.inject({ method: 'POST', url: `/v1/accounts/${a.accountHayId}/bpay-billers`, payload: billerBody({ name: 'power', reference: '781133471230' }) }), 409, /^DUPLICATE_BILLER_NAME: A biller named power is already saved/)
+  })
+
+  it('refuses a blank nickname (400) and stores a padded one trimmed, so DUPLICATE_BILLER_NAME ignores surrounding whitespace', async () => {
+    const a = await newAccount()
+    const post = (payload: object) => app.inject({ method: 'POST', url: `/v1/accounts/${a.accountHayId}/bpay-billers`, payload })
+    expectError(await post(billerBody({ name: '' })), 400, /^BAD_REQUEST: name must not be blank/)
+    expectError(await post(billerBody({ name: '   ' })), 400, /^BAD_REQUEST: name must not be blank/)
+    const padded = await createBiller(a.accountHayId!, { name: '  Power  ' })
+    expect(padded.name).toBe('Power')
+    expect((await getBiller(padded.hayId!)).json().name).toBe('Power')
+    expectError(await post(billerBody({ name: ' power', reference: '781133471230' })), 409, /^DUPLICATE_BILLER_NAME: A biller named power is already saved/)
+    expect((await listBillers(a.accountHayId!)).json()).toEqual([padded])
   })
 
   it('validates the biller code and reference against the directory (422) and the body against the schema (400)', async () => {
@@ -294,6 +315,10 @@ describe('updateBpayBiller', () => {
     expect((await patchBiller(one.hayId!, { name: 'One', reference: IINET.reference })).statusCode).toBe(204) // its own values
     expect((await patchBiller(two.hayId!, { reference: '1' })).statusCode).toBe(400) // schema minLength 2
     expect((await patchBiller(two.hayId!, { name: '' })).statusCode).toBe(400)
+    expectError(await patchBiller(two.hayId!, { name: '   ' }), 400, /^BAD_REQUEST: name must not be blank/)
+    expect((await patchBiller(two.hayId!, { name: '  Renamed ' })).statusCode).toBe(204)
+    expect((await getBiller(two.hayId!)).json().name).toBe('Renamed')
+    expectError(await patchBiller(one.hayId!, { name: 'renamed ' }), 422, /^DUPLICATE_BILLER_NAME: /)
   })
 
   it('DISMISSED hides the biller from the list, is terminal, and frees its name and reference', async () => {
@@ -384,6 +409,22 @@ describe('makeBpayPayment: accepted', () => {
     expect(ev.transactionEvent).not.toHaveProperty('description')
     assertValidNotification(ev)
     expect((await listBillers(p.id)).json()).toEqual([]) // no auto-save
+  })
+
+  it('treats a blank nickname as absent (biller name) and trims a padded one, on the transaction and the webhook', async () => {
+    const p = await payer(100)
+    const blank = await pay(p.id, p.holder, 10, { name: '' })
+    expect(blank.outcome).toBe('ACCEPTED')
+    expect(await getTransaction(blank.transactionId!)).toMatchObject({ counterpartName: 'APIBCD SERVICES AV12', counterpartDetails: { name: 'APIBCD SERVICES AV12' } })
+    const spaces = await pay(p.id, p.holder, 10, { name: '   ' })
+    expect((await getTransaction(spaces.transactionId!)).counterpartName).toBe('APIBCD SERVICES AV12')
+    const padded = await pay(p.id, p.holder, 10, { name: '  Nick  ' })
+    expect((await getTransaction(padded.transactionId!)).counterpartName).toBe('Nick')
+    const events = (await txEvents(p.id)).filter((e) => e.transactionEvent.transactionType === 'BPAY_TRANSFER_OUT')
+    expect(events.map((e) => [e.transactionEvent.counterpartName, e.transactionEvent.counterpartDetails.name])).toEqual([
+      ['APIBCD SERVICES AV12', 'APIBCD SERVICES AV12'], ['APIBCD SERVICES AV12', 'APIBCD SERVICES AV12'], ['Nick', 'Nick'],
+    ])
+    for (const ev of events) assertValidNotification(ev)
   })
 
   it('accepts the ICRNAMT fixture (600015) at its exact amount', async () => {
@@ -478,6 +519,7 @@ describe('makeBpayPayment: refusals (HTTP 200, no transaction, no webhook)', () 
     await expectRefused(p, 9.99, 'REFUSED_BPAY_INVALID_PAYMENT') // 93880: $10 minimum
     await expectRefused(p, 4000.01, 'REFUSED_BPAY_INVALID_PAYMENT') // 93880: $4,000 maximum
     await expectRefused(p, 100, 'REFUSED_BPAY_INVALID_PAYMENT', { billerCode: '600015', reference: '0808812345678260' }) // exact $104.00 only
+    await expectRefused(p, 104, 'REFUSED_BPAY_INVALID_REFERENCE', { billerCode: '600015', reference: '123' }) // 600015: 4-20 digit CRNs
     expect((await pay(p.id, p.holder, 4000)).outcome).toBe('ACCEPTED')
   })
 
@@ -532,5 +574,15 @@ describe('ctx.services.bpay.post (scheduled payments / mocks)', () => {
     expect(svc.validate('7773', '74177361', 1000)).toMatchObject({ ok: false, failure: 'AMOUNT' })
     expect(svc.biller('000000')?.active).toBe(false)
     expect(svc.biller('12')).toBeUndefined()
+  })
+
+  it('rejects a negative, zero or fractional amountCents (400) before touching the ledger', async () => {
+    const p = await payer(100)
+    const events = (await txEvents(p.id)).length
+    for (const amountCents of [-1, -2500, 0, 25.5, Number.NaN]) {
+      expect(() => svc.post({ accountId: p.id, amountCents, billerCode: '55555', reference: '123456' }), String(amountCents)).toThrow(/^BAD_REQUEST: amountCents must be a positive integer/)
+    }
+    expect(await getAccount(p.id)).toMatchObject({ totalBalance: 100, availableBalance: 100 })
+    expect((await txEvents(p.id)).length).toBe(events)
   })
 })

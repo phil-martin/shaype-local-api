@@ -13,16 +13,18 @@
  *   `BILLER <code>`, longName `BILLER LONG NAME <code>`, ANZSIC 9999, image
  *   https://billers.local/<code>.png); `000000` is deactivated (spec §5.7). The five Staging fixtures
  *   (docs/map/bpay.md §2) are seeded verbatim: their names and ANZSIC codes, accepted CRN lengths
- *   (7773: 8; 93849: 7/9/10; 93880: 12), amount bounds (7773 $20–$50,000; 93849 $10–$20,000; 93880
+ *   (7773: 8; 93849: 7/9/10; 93880: 12; 600015: 4–20), amount bounds (7773 $20–$50,000; 93849 $10–$20,000; 93880
  *   $10–$4,000; 600015 exactly $104.00 — ICRNAMT) and 1016 as the deactivated biller. A CRN is valid
  *   when all digits, 2–20 long and of an accepted length; check digits are not modelled. A 3-digit code
  *   passes the schema (minLength 3) and fails the directory (4–10 digits).
  * - Failures map per surface: validateBpay / createBPayBiller -> 422 INVALID_BILLER_CODE /
  *   INVALID_REFERENCE; makeBpayPayment -> HTTP 200 REFUSED_BPAY_INVALID_BILLER_CODE / _REFERENCE /
  *   _PAYMENT (amount outside the biller's bounds).
- * - Saved billers: uniqueness per account among non-dismissed billers on the (billerCode, reference) pair
- *   (DUPLICATE_BILLER) and on the nickname, case-insensitive (DUPLICATE_BILLER_NAME): 409 on create (the
- *   contract's one Conflict), 422 on update. Status starts ACTIVE and is never exposed; retrieveBillers
+ * - Saved billers: the nickname is stored trimmed and must not be blank (400 on create and update — the
+ *   add schema leaves `name` unconstrained, the update schema says minLength 1). Uniqueness per account
+ *   among non-dismissed billers on the (billerCode, reference) pair (DUPLICATE_BILLER) and on the trimmed
+ *   nickname, case-insensitive (DUPLICATE_BILLER_NAME): 409 on create (the contract's one Conflict), 422
+ *   on update. Status starts ACTIVE and is never exposed; retrieveBillers
  *   lists ACTIVE billers only (creation order, limit 1..1000 / offset >= 0 else 400) while
  *   retrieveBpayBiller returns a dismissed biller too. DISMISSED is terminal: any further PATCH is 422
  *   INVALID_STATE; a dismissed biller frees its name and reference. status outside ACTIVE / DISMISSED is
@@ -37,10 +39,13 @@
  *   and carry no transactionId; a refused outcome replays under its idempotencyKey (scope
  *   makeBpayPayment, the accountId part of the hashed request). No saved biller is needed and none is
  *   auto-saved. REFUSED_RECIPIENT_ACCOUNT_*, REFUSED_BPAY_REJECTED, INVALID_PAYMENT, INTERNAL_ERROR are
- *   never produced (no local trigger; late Cuscal rejections are not modelled).
+ *   never produced (no local trigger; late Cuscal rejections are not modelled — docs/map/00-webhook-matrix.md
+ *   row BPAY_TRANSFER_OUT records the same, so there is no `webhooks.bpayLateRejectHook` flag).
+ * - ctx.services.bpay.post() takes a positive integer number of cents and throws 400 otherwise, so a
+ *   scheduled payment or mock can never post a zero, credit-signed or fractional BPAY_TRANSFER_OUT.
  * - Accepted: BPAY_TRANSFER_OUT on CUSCAL_BPAY_TRANSFER_OUT, originType CUSTOMER, posted immediately (no
  *   hold), transaction reference = the CRN (the only place it can surface on FinancialTransaction),
- *   counterpartName = the request nickname or the biller's long name, description / category echoed
+ *   counterpartName = the request nickname (trimmed; blank = absent) or the biller's long name, description / category echoed
  *   (no default description). The TRANSACTION webhook (ledger) carries counterpartDetails { name,
  *   bpayDetails { billerCode, billerReference, billerName = long name, billerImage } }, actionOwner CLIENT.
  */

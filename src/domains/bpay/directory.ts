@@ -36,13 +36,15 @@ export const DEACTIVATED_BILLER_CODE = '000000'
 export const billerImage = (billerCode: string): string => `https://billers.local/${billerCode}.png`
 
 const D = 100
+/** Every CRN length from `from` to `to` inclusive. */
+const lengths = (from: number, to: number): number[] => Array.from({ length: to - from + 1 }, (_, i) => from + i)
 
 /** Staging biller fixtures [docs:bpay], as documented (fixture 1016 is the "Inactive Biller"). */
 export const STAGING_BILLERS: readonly DirectoryBiller[] = [
   { billerCode: '7773', shortName: 'APIBCD SERVICES AV1', longName: 'APIBCD SERVICES AV1', industryAnzsicCode: '1113', image: billerImage('7773'), crnLengths: [8], minCents: 20 * D, maxCents: 50_000 * D, active: true },
   { billerCode: '93849', shortName: 'APIBCD SERVICES AV8', longName: 'APIBCD SERVICES AV8', industryAnzsicCode: '6931', image: billerImage('93849'), crnLengths: [7, 9, 10], minCents: 10 * D, maxCents: 20_000 * D, active: true },
   { billerCode: '93880', shortName: 'APIBCD SERVICES AV12', longName: 'APIBCD SERVICES AV12', industryAnzsicCode: '94540', image: billerImage('93880'), crnLengths: [12], minCents: 10 * D, maxCents: 4_000 * D, active: true },
-  { billerCode: '600015', shortName: 'API2 SERVICES ICRN', longName: 'API2 SERVICES ICRN AMT', industryAnzsicCode: '3501', image: billerImage('600015'), exactCents: 104 * D, active: true },
+  { billerCode: '600015', shortName: 'API2 SERVICES ICRN', longName: 'API2 SERVICES ICRN AMT', industryAnzsicCode: '3501', image: billerImage('600015'), crnLengths: lengths(4, 20), exactCents: 104 * D, active: true },
   { billerCode: '1016', shortName: 'BILLER 505529', longName: 'BILLER LONG NAME 505529', industryAnzsicCode: '3501', image: billerImage('1016'), crnLengths: [10], active: false },
 ]
 
@@ -69,7 +71,7 @@ export function validateDirectory(billerCode: string, reference: string, amountC
   if (!biller.active) return { ok: false, failure: 'BILLER_CODE', message: `Biller code ${billerCode} is not an active BPAY biller` }
   if (!CRN_RE.test(reference)) return { ok: false, failure: 'REFERENCE', message: `Reference ${reference} must be 2 to 20 digits` }
   if (biller.crnLengths && !biller.crnLengths.includes(reference.length)) {
-    return { ok: false, failure: 'REFERENCE', message: `Reference ${reference} must be ${biller.crnLengths.join(', ')} digits for biller ${billerCode}` }
+    return { ok: false, failure: 'REFERENCE', message: `Reference ${reference} must be ${describeLengths(biller.crnLengths)} digits for biller ${billerCode}` }
   }
   if (amountCents !== undefined) {
     if (biller.exactCents !== undefined && amountCents !== biller.exactCents) {
@@ -79,6 +81,12 @@ export function validateDirectory(billerCode: string, reference: string, amountC
     if (biller.maxCents !== undefined && amountCents > biller.maxCents) return { ok: false, failure: 'AMOUNT', message: `Biller ${billerCode} accepts a maximum of ${dollars(biller.maxCents)}` }
   }
   return { ok: true, biller }
+}
+
+/** "8", "7, 9, 10", or "4 to 20" for a contiguous run of three or more. */
+function describeLengths(ls: readonly number[]): string {
+  const contiguous = ls.length >= 3 && ls.every((l, i) => i === 0 || l === ls[i - 1]! + 1)
+  return contiguous ? `${ls[0]} to ${ls[ls.length - 1]}` : ls.join(', ')
 }
 
 function dollars(cents: Cents): string {
