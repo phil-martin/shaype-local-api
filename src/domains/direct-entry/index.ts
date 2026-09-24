@@ -51,7 +51,8 @@
  *   (30 Feb -> 1 Mar, the first day that exists after it). ONE_TIME carries numberOfPayments 1 and no frequency / endDate. Whichever of
  *   numberOfPayments / endDate is reached first ends the schedule (COMPLETED, set right after the last
  *   occurrence). Occurrences post through the ledger like makeTransferV1 (internal legs for BSB 636220,
- *   INTERBANK_TRANSFER_OUT via CUSCAL_NPP_TRANSFER_OUT otherwise) or BPAY_TRANSFER_OUT, stamped
+ *   INTERBANK_TRANSFER_OUT via CUSCAL_NPP_TRANSFER_OUT otherwise) or through bpay.post (directory
+ *   checks; the CRN is the transaction reference, the directory's biller name the counterpart's), stamped
  *   originType SCHEDULED_PAYMENT / originId hayId, actionOwner PLATFORM; a refused occurrence emits the
  *   TRANSACTION webhook with the refused outcome (the only failure signal the client can get) and
  *   ends a ONE_TIME schedule or a shouldCancelOnFailure one (recipient-side refusals -> REJECTED,

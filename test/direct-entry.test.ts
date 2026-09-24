@@ -665,8 +665,48 @@ describe('scheduled payments', () => {
     const paid = (await txEvents(payer.accountHayId!)).filter((p) => p.transactionEvent.originId === bpay.hayId)
     expect(paid).toHaveLength(1)
     assertValidNotification(paid[0])
-    expect(paid[0].transactionEvent).toMatchObject({ transactionType: 'BPAY_TRANSFER_OUT', currencyAmount: { amount: -80 }, counterpartName: 'Power co', counterpartDetails: { name: 'Power co', bpayDetails: { billerCode: '2005', billerReference: '12345678', billerName: 'Power Co' } } })
-    expect(await getTransaction(paid[0].transactionEvent.transactionHayId)).toMatchObject({ type: 'BPAY_TRANSFER_OUT', transactionChannel: 'CUSCAL_BPAY_TRANSFER_OUT', originType: 'SCHEDULED_PAYMENT' })
+    // posted through bpay.post: the directory's biller name, the CRN as the transaction reference
+    expect(paid[0].transactionEvent).toMatchObject({ transactionType: 'BPAY_TRANSFER_OUT', currencyAmount: { amount: -80 }, reference: '12345678', originType: 'SCHEDULED_PAYMENT', originId: bpay.hayId, counterpartName: 'Power co', counterpartDetails: { name: 'Power co', bpayDetails: { billerCode: '2005', billerReference: '12345678', billerName: 'BILLER LONG NAME 2005' } } })
+    expect(await getTransaction(paid[0].transactionEvent.transactionHayId)).toMatchObject({ type: 'BPAY_TRANSFER_OUT', transactionChannel: 'CUSCAL_BPAY_TRANSFER_OUT', originType: 'SCHEDULED_PAYMENT', reference: '12345678' })
+  })
+
+  it('BPAY occurrences go through bpay.post: directory refusals end a shouldCancelOnFailure schedule as REJECTED with the refused TRANSACTION webhook', async () => {
+    const payer = await fundedAccount(500)
+    const day = await today()
+    const bpayTo = (billerCode: string, billerReference: string, extra: Partial<CreateScheduleInput> = {}) =>
+      createSchedule(scheduleInput(payer, { startDate: day, frequency: 'WEEKLY', shouldCancelOnFailure: true, amount: 25, recipient: { recipientType: 'BPAY', bpayDetails: { billerCode, billerReference } }, ...extra }))
+    const cases: [string, string, string][] = [
+      ['000000', '12345678', 'REFUSED_BPAY_INVALID_BILLER_CODE'], // deactivated biller
+      ['1016', '1234567890', 'REFUSED_BPAY_INVALID_BILLER_CODE'], // inactive Staging fixture
+      ['123', '12345678', 'REFUSED_BPAY_INVALID_BILLER_CODE'], // not a 4-10 digit biller code
+      ['7773', '1234', 'REFUSED_BPAY_INVALID_REFERENCE'], // fixture 7773 takes 8-digit CRNs
+      ['7773', '12345678', 'REFUSED_BPAY_INVALID_PAYMENT'], // ... and at least $20 (amount 10 below)
+    ]
+    for (const [billerCode, crn, outcome] of cases) {
+      const s = await bpayTo(billerCode, crn, outcome === 'REFUSED_BPAY_INVALID_PAYMENT' ? { amount: 10 } : {})
+      await flush()
+      expect(await getSchedule(payer.accountHayId!, s.hayId!), billerCode).toMatchObject({ status: 'REJECTED', numberOfProcessedPayments: 0 })
+      const refused = (await txEvents(payer.accountHayId!)).filter((p) => p.transactionEvent.originId === s.hayId)
+      expect(refused, billerCode).toHaveLength(1)
+      assertValidNotification(refused[0])
+      expect(refused[0]).toMatchObject({ actionOwner: 'PLATFORM', transactionEvent: { outcome, transactionType: 'BPAY_TRANSFER_OUT', isPending: false, currencyAmount: { amount: outcome === 'REFUSED_BPAY_INVALID_PAYMENT' ? -10 : -25 }, reference: crn, originType: 'SCHEDULED_PAYMENT', originId: s.hayId, counterpartDetails: { bpayDetails: { billerCode, billerReference: crn } } } })
+    }
+    expect((await getAccount(payer.accountHayId!)).totalBalance).toBe(500)
+
+    // the ledger's refusals use the webhook vocabulary: not enough funds -> FAILED, the BPAY daily limit -> FAILED
+    const broke = await newAccount()
+    const poor = await createSchedule(scheduleInput(broke, { startDate: day, frequency: 'WEEKLY', shouldCancelOnFailure: true, recipient: { recipientType: 'BPAY', bpayDetails: { billerCode: '2005', billerReference: '12345678' } } }))
+    await flush()
+    expect((await getSchedule(broke.accountHayId!, poor.hayId!)).status).toBe('FAILED')
+    const noFunds = (await txEvents(broke.accountHayId!)).filter((p) => p.transactionEvent.originId === poor.hayId)
+    expect(noFunds.map((p) => p.transactionEvent.outcome)).toEqual(['REFUSED_NOT_ENOUGH_FUNDS'])
+    // no recipientName: the counterpart is the directory's biller name
+    expect(noFunds[0].transactionEvent).toMatchObject({ counterpartName: 'BILLER LONG NAME 2005', counterpartDetails: { name: 'BILLER LONG NAME 2005', bpayDetails: { billerName: 'BILLER LONG NAME 2005' } } })
+    await setLimit(payer.accountHayId!, 'BPAY_DAILY_LIMIT', 30)
+    const capped = await bpayTo('2005', '12345678', { amount: 40 })
+    await flush()
+    expect((await getSchedule(payer.accountHayId!, capped.hayId!)).status).toBe('FAILED')
+    expect((await txEvents(payer.accountHayId!)).filter((p) => p.transactionEvent.originId === capped.hayId).map((p) => p.transactionEvent.outcome)).toEqual(['REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED'])
   })
 
   it('a refused occurrence emits the refused TRANSACTION webhook and ends the schedule (FAILED / REJECTED) or is skipped', async () => {

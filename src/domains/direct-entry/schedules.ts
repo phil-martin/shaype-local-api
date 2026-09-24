@@ -11,6 +11,7 @@ import { badRequest, notFound, unprocessable } from '../../lib/errors.js'
 import { LOCAL_BSB, isUuid, uuid } from '../../lib/ids.js'
 import { fromCents } from '../../lib/money.js'
 import type { Account } from '../accounts/repo.js'
+import type { BpayOutcome } from '../bpay/index.js'
 import type { Customer } from '../customers/repo.js'
 import type { LedgerTransaction } from '../transactions/repo.js'
 import { requestCents, type LedgerOutcome, type PostInput } from '../transactions/service.js'
@@ -231,7 +232,7 @@ export class ScheduledPaymentsService {
 
   /**
    * One occurrence: ACCOUNT recipients transfer like makeTransferV1 (internal legs for BSB 636220,
-   * INTERBANK_TRANSFER_OUT otherwise), BPAY recipients post BPAY_TRANSFER_OUT; every leg is stamped
+   * INTERBANK_TRANSFER_OUT otherwise), BPAY recipients pay through bpay.post; every leg is stamped
    * originType SCHEDULED_PAYMENT / originId hayId. A refusal emits the TRANSACTION webhook with the
    * refused outcome, and either ends the schedule (ONE_TIME, or shouldCancelOnFailure: recipient-side
    * refusals -> REJECTED, others -> FAILED) or skips to the next occurrence.
@@ -272,18 +273,7 @@ export class ScheduledPaymentsService {
       notifyRefusal: true,
     }
     const recipient = s.recipient
-    if (recipient.recipientType === 'BPAY') {
-      const bpay = recipient.bpayDetails ?? {}
-      const r = this.ledger.post(compact({
-        ...common,
-        accountId: account.id,
-        amountCents: -s.amount,
-        type: 'BPAY_TRANSFER_OUT',
-        channel: 'CUSCAL_BPAY_TRANSFER_OUT',
-        counterpart: compact({ name: recipient.recipientName ?? bpay.billerName, bpayDetails: bpay }),
-      }))
-      return compact({ outcome: r.outcome, transaction: r.transaction })
-    }
+    if (recipient.recipientType === 'BPAY') return this.payBpay(s, account)
 
     const target = recipient.recipientAccountNumber!
     const local = target.branchNumber === LOCAL_BSB ? this.accounts.search(target.accountNumber!)[0] : undefined
@@ -342,6 +332,46 @@ export class ScheduledPaymentsService {
     return { outcome: 'ACCEPTED', transaction: sent }
   }
 
+  /**
+   * A BPAY occurrence runs through bpay.post (account status, FX child, biller code / CRN / amount against
+   * the directory, then the ledger's BPAY limits and funds): the CRN is the transaction reference and the
+   * counterpart carries the directory's biller name. bpay.post notifies nothing on refusal, so the refused
+   * TRANSACTION webhook is emitted here with the outcome in the webhook vocabulary (spec §4 "Outcome enums").
+   */
+  private payBpay(s: ScheduledPayment, account: Account): { outcome: LedgerOutcome; transaction?: LedgerTransaction } {
+    const details = s.recipient.bpayDetails ?? {}
+    const billerCode = details.billerCode ?? ''
+    const crn = details.billerReference ?? ''
+    const bpay = this.ctx.services.bpay
+    const r = bpay.post(compact({
+      accountId: account.id,
+      amountCents: s.amount,
+      billerCode,
+      reference: crn,
+      name: s.recipient.recipientName,
+      description: s.description,
+      originType: 'SCHEDULED_PAYMENT' as const,
+      originId: s.id,
+      actionOwner: 'PLATFORM' as const,
+    }))
+    if (r.transaction) return { outcome: 'ACCEPTED', transaction: r.transaction }
+    const outcome = fromBpayOutcome(r.outcome)
+    const biller = r.biller ?? bpay.biller(billerCode)
+    const billerName = biller?.longName ?? details.billerName
+    this.ledger.notifyRefused(account, 'PLATFORM', outcome, compact({
+      amountCents: -s.amount,
+      webhookType: 'BPAY_TRANSFER_OUT' as const,
+      transactionTime: isoUtc(this.ctx.clock.now()),
+      isPending: false,
+      counterpart: compact({ name: s.recipient.recipientName?.trim() || billerName, bpayDetails: compact({ billerCode, billerReference: crn, billerName, billerImage: biller?.image }) }),
+      description: s.description,
+      reference: crn,
+      originType: 'SCHEDULED_PAYMENT' as const,
+      originId: s.id,
+    }))
+    return { outcome }
+  }
+
   private setStatus(s: ScheduledPayment, status: ScheduleStatus, actionOwner: ActionOwner, lastOutcome?: string): ScheduledPayment {
     if (SCHEDULE_TERMINAL.has(s.status)) throw unprocessable(`INVALID_STATUS_TRANSITION: Scheduled payment ${s.id} is ${s.status}`)
     const next: ScheduledPayment = compact({ ...s, status, lastOutcome: lastOutcome ?? s.lastOutcome, updatedAt: isoUtc(this.ctx.clock.now()) })
@@ -349,6 +379,16 @@ export class ScheduledPaymentsService {
     this.repo.saveSchedule(next)
     this.ctx.events.emit('scheduledPayment.statusChanged', { schedule: next, previousStatus: s.status, actionOwner })
     return next
+  }
+}
+
+/** BpayPaymentResponseBody.outcome -> the ledger / webhook vocabulary (the inverse of bpay's toBpayOutcome). */
+function fromBpayOutcome(outcome: BpayOutcome): LedgerOutcome {
+  switch (outcome) {
+    case 'REFUSED_INSUFFICIENT_FUNDS': return 'REFUSED_NOT_ENOUGH_FUNDS'
+    case 'REFUSED_DAILY_BPAY_LIMIT_BREACHED': return 'REFUSED_TOTAL_OUTBOUND_BPAY_DAILY_LIMIT_BREACHED'
+    case 'INVALID_PAYMENT': return 'REFUSED_BPAY_INVALID_PAYMENT'
+    default: return outcome
   }
 }
 
