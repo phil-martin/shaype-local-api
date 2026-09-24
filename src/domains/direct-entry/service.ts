@@ -187,7 +187,8 @@ export class DirectEntryService {
   /**
    * createDirectDebitV1 / V0 (idempotency is the route's). Validation the schema cannot express is a 400
    * (amount > 0 with <= 2 dp; anchored BSB / account-number patterns); a transactionId already used with
-   * another idempotencyKey is 422 DUPLICATE_TRANSACTION_ID. The sender (credited) account must be a local
+   * another idempotencyKey, or already the id of a ledger transaction (the COMPLETE credit is posted under
+   * it), is 422 DUPLICATE_TRANSACTION_ID. The sender (credited) account must be a local
    * account (BSB 636220 + account number) that is open, and the recipient BSB must not be the rejecting
    * 999999, else the instruction is REJECTED (v1: 200 with the outcome; v0: 422 with the declared
    * DirectDebitResponse body). Otherwise RECEIVED and ACCEPTED are recorded and notified synchronously and
@@ -198,7 +199,7 @@ export class DirectEntryService {
     for (const [field, re] of [['senderBsb', BSB_RE], ['recipientBsb', BSB_RE], ['senderAccountNumber', ACCOUNT_NUMBER_RE], ['recipientAccountNumber', ACCOUNT_NUMBER_RE]] as const) {
       if (!re.test(body[field])) throw badRequest(`BAD_REQUEST: ${field} must match ${re.source}`)
     }
-    if (this.repo.instructionById(body.transactionId)) {
+    if (this.repo.instructionById(body.transactionId) || this.ledger.find(body.transactionId)) {
       throw unprocessable(`DUPLICATE_TRANSACTION_ID: Direct Entry transaction ${body.transactionId} already exists`)
     }
 
@@ -264,7 +265,7 @@ export class DirectEntryService {
 
   /**
    * SUBMITTED -> COMPLETE: the DIRECT_DEBIT_TRANSFER credit (positive, CUSCAL_DE_DEBIT_OUT, originType
-   * DIRECT_DEBIT, originId = transactionId) is posted to the sender account; a ledger refusal there
+   * DIRECT_DEBIT, id and originId = transactionId) is posted to the sender account; a ledger refusal there
    * (MAX_BALANCE, blocked / closed account) leaves the instruction INCOMPLETE with the outcome in
    * `details`. When the recipient is also a local account its debit leg (negative, CUSCAL_DE_DEBIT_IN,
    * DIRECT_DEBIT_PER_DAY + funds) is evaluated first; a refusal there is a return from the debtor
@@ -274,6 +275,7 @@ export class DirectEntryService {
     const r = this.repo.instructionById(transactionId)
     if (!r || r.status !== 'SUBMITTED' || !r.accountId) return r
     const credit: PostInput = {
+      id: r.id,
       accountId: r.accountId,
       amountCents: r.amount,
       type: 'DIRECT_DEBIT_TRANSFER',

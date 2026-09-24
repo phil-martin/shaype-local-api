@@ -12,8 +12,11 @@
  *
  * Decisions beyond the spec (all covered in test/direct-entry.test.ts):
  * - Ids: the client-supplied transactionId is the record id, the inner transactionHayId, the
- *   DIRECT_ENTRY transactionId and the originId of the ledger posting (00-open-questions I3). Reusing it
- *   with another idempotencyKey is 422 DUPLICATE_TRANSACTION_ID; the same key replays (rejections too).
+ *   DIRECT_ENTRY transactionId, and both the id and the originId of the COMPLETE credit posting — so the
+ *   TRANSACTION webhook's transactionHayId works on every DD read and on getTransactionById
+ *   (00-open-questions I3; a local debtor's debit leg has an id of its own, originId the same). Reusing it
+ *   with another idempotencyKey, or naming an existing ledger transaction with it, is 422
+ *   DUPLICATE_TRANSACTION_ID; the same key replays (rejections too).
  * - Lifecycle: RECEIVED and ACCEPTED are recorded and notified synchronously (create answers ACCEPTED);
  *   ACCEPTED -> SUBMITTED -> COMPLETE run through scheduler.later() one hop apart (actionOwner PLATFORM;
  *   CLIENT for the synchronous statuses). REJECTED (create) when the sender BSB + account number is not

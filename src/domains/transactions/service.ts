@@ -52,6 +52,8 @@ export function isWebhookOutcome(outcome: LedgerOutcome): outcome is WebhookOutc
 export interface Money { amountCents: Cents; currency: string }
 
 export interface PostInput {
+  /** The posting's id; default a fresh uuid. Direct entry posts an outbound DD's credit leg under the DD transactionId (00-open-questions I3). */
+  id?: string
   accountId: string
   /** signed cents: credit > 0, debit < 0 */
   amountCents: Cents
@@ -356,7 +358,7 @@ export class TransactionsService {
       const after = this.accounts.adjust(input.accountId, { ledgerDelta: input.amountCents, heldDelta: -(input.releaseHeldCents ?? 0) })
       const balances = computeBalances(after)
       const t: LedgerTransaction = compact({
-        id: uuid(),
+        id: input.id ?? uuid(),
         accountId: after.id,
         customerId: this.primaryCustomer(before),
         productId: after.productId,

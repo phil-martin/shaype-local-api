@@ -257,6 +257,27 @@ describe('createDirectDebitV1: lifecycle', () => {
     expect(posted.transactionTimeUtc).toMatch(ISO_MICROS)
   })
 
+  it('one id across create, the DIRECT_ENTRY and TRANSACTION webhooks and every lookup (00-open-questions I3)', async () => {
+    const sender = await newAccount()
+    const debtor = await fundedAccount(100)
+    const body = await acceptedDd(sender, { amount: 40, recipientBsb: LOCAL_BSB, recipientAccountNumber: debtor.accountNumber!, recipientName: 'Local Debtor' })
+    await flush()
+    const credit = (await txEvents(sender.accountHayId!)).find((p) => p.transactionEvent.transactionType === 'DIRECT_DEBIT_TRANSFER')
+    const webhookId = credit.transactionEvent.transactionHayId as string
+    expect(webhookId).toBe(body.transactionId)
+    // "the transactionId present in our transactionEvent notification webhooks can be used when making requests against this endpoint"
+    expect(await deStatus(webhookId)).toBe('COMPLETE')
+    expect(await getDd(webhookId)).toMatchObject({ transactionId: body.transactionId, outcome: 'COMPLETE' })
+    expect(await getTransaction(body.transactionId)).toMatchObject({ transactionHayId: body.transactionId, type: 'DIRECT_DEBIT_TRANSFER', accountHayId: sender.accountHayId, currencyAmount: { amount: 40 } })
+    // the local debtor's debit leg is a transaction of its own
+    const debit = (await txEvents(debtor.accountHayId!)).find((p) => p.transactionEvent.transactionType === 'DIRECT_DEBIT_TRANSFER')
+    expect(debit.transactionEvent.transactionHayId).not.toBe(body.transactionId)
+    expect(debit.transactionEvent.originId).toBe(body.transactionId)
+
+    // a transactionId that is already a ledger transaction id cannot name a new instruction
+    expectError(await createDd(ddBody(sender, { transactionId: debit.transactionEvent.transactionHayId })), 422, /^DUPLICATE_TRANSACTION_ID: /)
+  })
+
   it('exposes each status in turn when the hops are delayed; in-flight instructions block account closure', async () => {
     const sender = await newAccount()
     svc.progressDelayMs = DAY_MS
