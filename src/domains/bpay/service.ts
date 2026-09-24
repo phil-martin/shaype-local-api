@@ -117,14 +117,14 @@ export class BpayService {
   // ---------------------------------------------------------------- saved billers
 
   /**
-   * createBPayBiller: the account must exist (404), the nickname must not be blank (400 — the schema
+   * createBPayBiller: the account must exist (404) and not be CLOSED (422 ACCOUNT_CLOSED), the nickname must not be blank (400 — the schema
    * leaves it unconstrained), the biller code / CRN must pass the directory rules (422), and no active
    * biller of the account may already hold the same (billerCode, reference) pair or the same trimmed
    * nickname (409 Conflict — the one declared 409 in the contract). Status ACTIVE; the image is the
    * directory's logo URL.
    */
   createBiller(accountId: string, body: BPayBillerAddRequestBody): SavedBiller {
-    this.accounts.get(accountId)
+    this.requireNotClosed(accountId)
     const name = nickname(body.name)
     const biller = this.requireValid(body.billerCode, body.reference)
     if (this.repo.activeByCodeAndReference(accountId, body.billerCode, body.reference)) {
@@ -149,6 +149,11 @@ export class BpayService {
     return b
   }
 
+  /** The shared resource gate (00-open-questions S7): a CLOSED account takes no new or changed billers. @throws 404; 422 ACCOUNT_CLOSED */
+  private requireNotClosed(accountId: string): void {
+    if (this.accounts.get(accountId).status === 'CLOSED') throw unprocessable(`ACCOUNT_CLOSED: Account ${accountId} is CLOSED`)
+  }
+
   /** retrieveBillers: the account's ACTIVE billers, creation order, paged. @throws 404 unknown account */
   listBillers(accountId: string, page: Page): SavedBiller[] {
     this.accounts.get(accountId)
@@ -167,7 +172,8 @@ export class BpayService {
   }
 
   /**
-   * updateBpayBiller: partial update of name / image / reference / status. A new reference must pass
+   * updateBpayBiller: partial update of name / image / reference / status (422 ACCOUNT_CLOSED once the
+   * account is CLOSED). A new reference must pass
    * the biller's CRN rules and, like a new name (trimmed, not blank — 400), the uniqueness rules (422
    * here — 409 is not declared).
    * DISMISSED is terminal: a dismissed biller accepts no further change (422 INVALID_STATE), and it
@@ -176,6 +182,7 @@ export class BpayService {
    */
   updateBiller(id: string, body: BPayBillerUpdateRequestBody): SavedBiller {
     const b = this.getBiller(id)
+    this.requireNotClosed(b.accountId)
     if (body.status !== undefined && body.status !== 'ACTIVE' && body.status !== 'DISMISSED') throw badRequest('BAD_REQUEST: status must be ACTIVE or DISMISSED')
     const name = body.name === undefined ? undefined : nickname(body.name)
     if (b.status === 'DISMISSED') throw unprocessable(`INVALID_STATE: Biller ${id} is DISMISSED`)

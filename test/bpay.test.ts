@@ -204,6 +204,16 @@ describe('validateBpay', () => {
 })
 
 describe('createBPayBiller / retrieveBpayBiller', () => {
+  it('a CLOSED account takes no new or changed billers (422 ACCOUNT_CLOSED, the shared resource gate)', async () => {
+    const a = await newAccount()
+    const saved = await createBiller(a.accountHayId!, { name: 'Internet' })
+    expect((await app.inject({ method: 'POST', url: `/v0/accounts/${a.accountHayId}/close` })).statusCode).toBe(202)
+    await flush()
+    expectError(await app.inject({ method: 'POST', url: `/v1/accounts/${a.accountHayId}/bpay-billers`, payload: billerBody({ name: 'Other', reference: '271682361231' }) }), 422, /^ACCOUNT_CLOSED: /)
+    expectError(await patchBiller(saved.hayId!, { name: 'renamed' }), 422, /^ACCOUNT_CLOSED: /)
+    expect((await listBillers(a.accountHayId!)).json().map((b: BillerResponse) => b.name)).toEqual(['Internet'])
+  })
+
   it('saves a biller against the account with the directory details and a logo image', async () => {
     const a = await newAccount()
     const created = await createBiller(a.accountHayId!, { name: 'Internet' })
