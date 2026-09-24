@@ -757,6 +757,12 @@ describe('expiry: reminders and the EXPIRED flip', () => {
     await flush()
     expect(await status(blocked.card.cardHayId!)).toBe('BLOCKED')
     expect((await allPayloads()).filter((p) => p.type === 'REMINDER' && p.cardHayId === blocked.card.cardHayId)).toEqual([])
+
+    // unblocking it lands on EXPIRED, never on a reactivated card that the next tick expires
+    expect((await act(blocked.card.cardHayId!, 'unblock', { note: 'found it' })).statusCode).toBe(200)
+    await flush()
+    expect(await status(blocked.card.cardHayId!)).toBe('EXPIRED')
+    expect((await cardEvents(blocked.card.cardHayId!)).map((p) => [p.cardStatusChangeEvent.cardStatus, p.actionOwner])).toEqual([['ACTIVE', 'CLIENT'], ['BLOCKED', 'CLIENT'], ['EXPIRED', 'PLATFORM']])
   })
 })
 

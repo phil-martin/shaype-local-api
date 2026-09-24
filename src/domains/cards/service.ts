@@ -298,10 +298,16 @@ export class CardsService {
     return this.transition(c, 'BLOCKED', { actionOwner, blockedBy: opts.blockedBy ?? actionOwner, note: opts.note ?? undefined })
   }
 
-  /** unblockCard: BLOCKED -> the status held before the block (ACTIVE for a card blocked while ACTIVE). Not BLOCKED -> 422 INVALID_CARD_STATUS. */
+  /**
+   * unblockCard: BLOCKED -> the status held before the block (ACTIVE for a card blocked while ACTIVE). A card
+   * whose expiry date passed while BLOCKED (the expiry job skips BLOCKED cards) goes straight to EXPIRED
+   * (PLATFORM, as the expiry job would have) instead of a short-lived reactivation. Not BLOCKED -> 422
+   * INVALID_CARD_STATUS.
+   */
   unblock(id: string, opts: { note?: string; actionOwner?: ActionOwner } = {}): Card {
     const c = this.get(id)
     if (c.status !== 'BLOCKED') throw this.invalidStatus(c, 'unblocked')
+    if (isoDate(this.ctx.clock.now()) > c.expiryDate) return this.transition(c, 'EXPIRED', { actionOwner: 'PLATFORM', note: opts.note })
     return this.transition(c, c.statusBeforeBlock ?? 'ACTIVE', { actionOwner: opts.actionOwner ?? 'CLIENT', note: opts.note })
   }
 
