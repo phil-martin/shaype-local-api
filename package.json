@@ -4,9 +4,17 @@
   "description": "Cleanroom local re-implementation of the Shaype B2B Operations API for e2e testing on a dev machine",
   "license": "MIT",
   "type": "module",
-  "engines": { "node": ">=22" },
-  "bin": { "shaype-local": "./dist/cli.js" },
-  "files": ["dist", "spec", "README.md"],
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "shaype-local": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "spec",
+    "README.md"
+  ],
   "scripts": {
     "gen": "tsx scripts/gen-contract.ts",
     "predev": "npm run gen",
@@ -17,7 +25,9 @@
     "pretest": "npm run gen",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "npm run gen && tsc --noEmit -p tsconfig.json"
+    "typecheck": "npm run gen && tsc --noEmit -p tsconfig.json",
+    "progress": "tsx scripts/progress.ts",
+    "prepare": "git config core.hooksPath .githooks || true"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",

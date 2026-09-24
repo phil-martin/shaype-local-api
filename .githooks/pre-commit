@@ -1,0 +1,13 @@
+#!/bin/sh
+# Refresh the README implementation-progress block on every commit to main and stage it.
+# Enabled by: git config core.hooksPath .githooks   (npm's prepare script does this)
+top="$(git rev-parse --show-toplevel)" || exit 0
+branch="$(git symbolic-ref --short HEAD 2>/dev/null)"
+[ "$branch" = "main" ] || exit 0
+cd "$top" || exit 0
+if npx tsx scripts/progress.ts >/dev/null 2>&1; then
+  git add README.md
+else
+  echo "pre-commit: warning — could not regenerate README progress (build broken?)" >&2
+fi
+exit 0
