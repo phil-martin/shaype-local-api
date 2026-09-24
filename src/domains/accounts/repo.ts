@@ -25,7 +25,7 @@ export interface Account {
   status: AccountStatus
   blockedBy?: BlockedBy
   blockNote?: string
-  /** Customers that the current block moved to BLOCKED (unblockAccount reverses exactly these). */
+  /** Customers held BLOCKED by this account's block; released when the last LOCKED account holding them is unblocked. */
   blockedCustomerIds?: string[]
   parentAccountId?: string
   /** undefined = no custom data stored; null = explicitly cleared / null */
@@ -97,6 +97,13 @@ export class AccountRepo {
 
   children(parentId: string): Account[] {
     return (this.db.prepare('SELECT * FROM accounts WHERE parent_account_id = ? ORDER BY seq ASC').all(parentId) as Row[]).map(fromRow)
+  }
+
+  /** LOCKED accounts whose block transitioned the given customer (blocked_customer_ids contains it), creation order. */
+  lockedBlockersOf(customerId: string): Account[] {
+    return (this.db
+      .prepare(`SELECT a.* FROM accounts a WHERE a.status = 'LOCKED' AND a.blocked_customer_ids IS NOT NULL AND EXISTS (SELECT 1 FROM json_each(a.blocked_customer_ids) WHERE json_each.value = ?) ORDER BY a.seq ASC`)
+      .all(customerId) as Row[]).map(fromRow)
   }
 
   /** Non-CLOSED accounts held by any of the given holder ids (customer id and/or group ids). */

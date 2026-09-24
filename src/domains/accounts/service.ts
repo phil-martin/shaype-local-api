@@ -9,7 +9,7 @@ import { compact, type ActionOwner } from '../../events/notify.js'
 import { isoUtc } from '../../lib/clock.js'
 import { ApiError, badRequest, notFound, unprocessable } from '../../lib/errors.js'
 import { LOCAL_BSB, accountNumber as accountNumberFor, uuid } from '../../lib/ids.js'
-import { centsToString, fromCents, toCents, type Cents } from '../../lib/money.js'
+import { centsToString, fromCents, hasAtMostTwoDecimals, toCents, type Cents } from '../../lib/money.js'
 import { deps } from './deps.js'
 import {
   FX_CURRENCIES, HOME_CURRENCY, LIMIT_KIND, LIMIT_OUTCOME, LIMIT_TYPES, LOCAL_PRODUCT_ID, PRODUCTS, SETTABLE_LIMIT_TYPES, findProduct,
@@ -81,6 +81,8 @@ declare module '../../context.js' {
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const YEAR_MS = 365 * DAY_MS
+/** Largest instant a JS Date can hold (±8.64e15 ms); beyond it `new Date()` is Invalid. */
+const MAX_DATE_MS = 8.64e15
 
 export function computeBalances(a: Pick<Account, 'ledger' | 'held' | 'locked' | 'stacks' | 'overdraftLimit'>): Balances {
   const overdraftBalance = Math.max(0, Math.min(-a.ledger, a.overdraftLimit))
@@ -157,6 +159,8 @@ export class AccountsService {
     const a = this.get(id)
     if (a.status === 'LOCKED') return 'REFUSED_ACCOUNT_BLOCKED'
     if (a.status === 'CLOSED') return 'REFUSED_ACCOUNT_CLOSED'
+    // Only PENDING_APPROVAL remains, and setStatus() refuses it (accounts created through this API are
+    // always APPROVED), so this branch is unreachable; it keeps the status switch exhaustive.
     if (!OPEN.has(a.status)) return 'REFUSED_ACCOUNT_BLOCKED'
     return a
   }
@@ -191,9 +195,16 @@ export class AccountsService {
     return members.length ? members : [a.holderId]
   }
 
-  /** HayAccount body. customData is included only when `expandCustomData` (null when none is stored). */
+  /**
+   * HayAccount body. customData is included only when `expandCustomData` (null when none is stored).
+   * homeCurrencyBalanceEquivalent is the identity on home-currency accounts and omitted on FX children
+   * (no FX rates locally).
+   */
   toResponse(a: Account, opts: { expandCustomData?: boolean } = {}): HayAccount {
     const b = balancesToJson(computeBalances(a))
+    const homeCurrencyBalanceEquivalent = a.currency === HOME_CURRENCY
+      ? { currency: HOME_CURRENCY, totalBalance: b.totalBalance, availableBalance: b.availableBalance, heldBalance: b.heldBalance }
+      : undefined
     const body = compact({
       accountHayId: a.id,
       accountHolderId: a.holderId,
@@ -213,6 +224,7 @@ export class AccountsService {
       overdraftLimit: b.overdraftLimit,
       overdraftBalance: b.overdraftBalance,
       technicalOverdraftBalance: b.technicalOverdraftBalance,
+      homeCurrencyBalanceEquivalent,
       creationDateTimeUtc: a.createdAt,
       closedDateTimeUtc: a.closedAt,
     }) as Record<string, unknown>
@@ -232,12 +244,17 @@ export class AccountsService {
     return this.toResponse(this.createEntity(input))
   }
 
-  createEntity(input: CreateAccountInput): Account {
+  /**
+   * `provisioning` marks platform-driven child provisioning (fx.childAccounts): the parent was already
+   * authorised, so the holder-status check is skipped and a LOCKED parent is accepted (the caller then
+   * blocks the child to match).
+   */
+  createEntity(input: CreateAccountInput, opts: { provisioning?: boolean } = {}): Account {
     const product = this.product(input.productId ?? LOCAL_PRODUCT_ID)
     const currency = input.currency ?? HOME_CURRENCY
     this.validateFx(input.fx, currency, input.parentAccountId ?? undefined)
-    this.requireHolderActive(input.accountHolderType, input.accountHolderId)
-    const parent = this.resolveParent(input, currency)
+    if (!opts.provisioning) this.requireHolderActive(input.accountHolderType, input.accountHolderId)
+    const parent = this.resolveParent(input, currency, opts)
 
     if (input.accountNumber && this.repo.accountNumberExists(input.accountNumber)) {
       throw unprocessable(`DUPLICATE_ACCOUNT_NUMBER: Account number ${input.accountNumber} is already in use`)
@@ -298,7 +315,8 @@ export class AccountsService {
     if (has && child.currencies!.length === 0) throw unprocessable('INVALID_ARGUMENT: fx.childAccounts.currencies size must be between 1 and 2147483647')
   }
 
-  private resolveParent(input: CreateAccountInput, currency: string): Account | undefined {
+  /** A CLOSED parent is always refused; a LOCKED one is refused for client creates (a blocked wallet must not be partly reopened). */
+  private resolveParent(input: CreateAccountInput, currency: string, opts: { provisioning?: boolean }): Account | undefined {
     if (!input.parentAccountId) {
       if (currency !== HOME_CURRENCY) throw unprocessable(`INVALID_ARGUMENT: parentAccountId is mandatory for a non-${HOME_CURRENCY} account`)
       return undefined
@@ -310,13 +328,20 @@ export class AccountsService {
       throw unprocessable(`INVALID_ARGUMENT: parent account ${parent.id} belongs to a different account holder`)
     }
     if (parent.status === 'CLOSED') throw unprocessable(`ACCOUNT_CLOSED: parent account ${parent.id} is CLOSED`)
+    if (parent.status === 'LOCKED' && !opts.provisioning) throw unprocessable(`ACCOUNT_BLOCKED: parent account ${parent.id} is LOCKED`)
     if (this.repo.children(parent.id).some((c) => c.currency === currency)) {
       throw unprocessable(`DUPLICATE_CHILD_CURRENCY: parent account ${parent.id} already has a ${currency} child account`)
     }
     return parent
   }
 
-  /** fx.childAccounts: children are provisioned asynchronously, one per requested FX currency (home currency skipped, duplicates ignored). */
+  /**
+   * fx.childAccounts: children are provisioned asynchronously, one per requested FX currency (home
+   * currency skipped, duplicates ignored). The parent was authorised at request time, so the job does
+   * not re-check the holder; a parent blocked in the meantime yields a child that is LOCKED the same
+   * way (blockedBy / note inherited, ACCOUNT_STATUS_CHANGE BLOCKED as PLATFORM). Only a CLOSED parent
+   * abandons the child.
+   */
   private provisionChildren(parent: Account, fx: FxData | undefined): void {
     const child = fx?.childAccounts
     if (!child || child.initMode === 'NONE') return
@@ -326,7 +351,13 @@ export class AccountsService {
       this.ctx.scheduler.later(() => {
         const p = this.repo.byId(parent.id)
         if (!p || p.status === 'CLOSED' || this.repo.children(p.id).some((c) => c.currency === currency)) return
-        this.createEntity({ accountHolderType: p.holderType, accountHolderId: p.holderId, productId: p.productId, currency, parentAccountId: p.id })
+        this.ctx.db.transaction(() => {
+          const c = this.createEntity({ accountHolderType: p.holderType, accountHolderId: p.holderId, productId: p.productId, currency, parentAccountId: p.id }, { provisioning: true })
+          if (p.status === 'LOCKED') {
+            if (p.blockNote !== undefined) c.blockNote = p.blockNote
+            this.transition(c, 'LOCKED', { actionOwner: 'PLATFORM', blockedBy: p.blockedBy })
+          }
+        })()
       })
     }
   }
@@ -378,11 +409,14 @@ export class AccountsService {
     this.usageProvider = fn
   }
 
-  /** Effective limit in cents: 0 while risk level HIGH, else the account override capped by the product limit. */
-  effectiveLimit(a: Account, type: InternalLimitType): Cents {
+  /**
+   * Effective limit in cents: 0 while risk level HIGH, else the account override capped by the product
+   * limit. `overrides` lets a caller that already loaded the account's overrides pass them in.
+   */
+  effectiveLimit(a: Account, type: InternalLimitType, overrides?: Partial<Record<LimitType, Cents>>): Cents {
     if (a.riskLevel === 'HIGH') return 0
     const productLimit = this.product(a.productId).limits[type]
-    const override = type === 'TRANSFERS_OUT_PER_DAY' ? undefined : this.repo.limitOverrides(a.id)[type]
+    const override = type === 'TRANSFERS_OUT_PER_DAY' ? undefined : (overrides ?? this.repo.limitOverrides(a.id))[type]
     return override === undefined ? productLimit : Math.min(override, productLimit)
   }
 
@@ -413,18 +447,24 @@ export class AccountsService {
     const overrides = this.repo.limitOverrides(id)
     return LIMIT_TYPES.map((type) => {
       const override = overrides[type]
-      const row: ExternalLimitAmounts = { type, productLimit: fromCents(product.limits[type]), effectiveLimit: fromCents(this.effectiveLimit(a, type)) }
+      const row: ExternalLimitAmounts = { type, productLimit: fromCents(product.limits[type]), effectiveLimit: fromCents(this.effectiveLimit(a, type, overrides)) }
       if (override !== undefined) row.accountLimit = fromCents(override)
       return row
     })
   }
 
-  /** setAccountLimit / updateMaxBalanceLimit: override <= product limit (422), > 0, not on a CLOSED account. */
-  setLimit(id: string, type: LimitType, amount: number): { accountId: string; limitType: LimitType; limitAmount: number } {
+  /** Request amount -> cents; more than two decimal places is a 400 (spec: "value to 2 decimal places"), never silently rounded. */
+  private requestCents(amount: number, field: string): Cents {
+    if (!hasAtMostTwoDecimals(amount)) throw badRequest(`BAD_REQUEST: ${field} must have at most 2 decimal places`)
+    return toCents(amount)
+  }
+
+  /** setAccountLimit / updateMaxBalanceLimit: override <= product limit (422), > 0 with <= 2 dp (400), not on a CLOSED account. `field` names the request property in errors. */
+  setLimit(id: string, type: LimitType, amount: number, field = 'limitAmount'): { accountId: string; limitType: LimitType; limitAmount: number } {
     const a = this.requireNotClosed(id)
     if (!SETTABLE_LIMIT_TYPES.includes(type)) throw unprocessable(`LIMIT_NOT_SETTABLE: ${type} cannot be set at account level`)
-    const cents = toCents(amount)
-    if (cents <= 0) throw badRequest('BAD_REQUEST: limit amount must be greater than 0')
+    const cents = this.requestCents(amount, field)
+    if (cents <= 0) throw badRequest(`BAD_REQUEST: ${field} must be greater than 0`)
     const productLimit = this.product(a.productId).limits[type]
     if (cents > productLimit) {
       throw unprocessable(`LIMIT_EXCEEDS_PRODUCT_LIMIT: ${type} limit ${centsToString(cents)} cannot exceed the product limit ${centsToString(productLimit)}`)
@@ -464,10 +504,10 @@ export class AccountsService {
     return a
   }
 
-  /** updateOverdraftLimit: 0..OVERDRAFT_PRODUCT_LIMIT; lowering below the drawn amount flips ACTIVE -> ACTIVE_IN_ARREARS (and back). */
+  /** updateOverdraftLimit: 0..OVERDRAFT_PRODUCT_LIMIT with <= 2 dp; lowering below the drawn amount flips ACTIVE -> ACTIVE_IN_ARREARS (and back). */
   setOverdraftLimit(id: string, amount: number): Account {
     const a = this.requireNotClosed(id)
-    const cents = toCents(amount)
+    const cents = this.requestCents(amount, 'overdraftLimit')
     if (cents < 0) throw badRequest('BAD_REQUEST: overdraftLimit must be a positive value')
     const cap = this.product(a.productId).limits.OVERDRAFT_PRODUCT_LIMIT
     if (cents > cap) throw unprocessable(`LIMIT_EXCEEDS_PRODUCT_LIMIT: overdraft limit ${centsToString(cents)} cannot exceed the product overdraft limit ${centsToString(cap)}`)
@@ -514,7 +554,12 @@ export class AccountsService {
       disabled: false,
       createdAt: isoUtc(now),
     }
-    if (input.expiresIn !== undefined && input.expiresIn !== null) rule.expiresAt = isoUtc(new Date(now.getTime() + input.expiresIn * 1000))
+    if (input.expiresIn !== undefined && input.expiresIn !== null) {
+      // int64 with only `minimum: 1`: anything past the Date range would make isoUtc() throw (500)
+      const expiresMs = now.getTime() + input.expiresIn * 1000
+      if (!Number.isFinite(expiresMs) || expiresMs > MAX_DATE_MS) throw unprocessable('INVALID_RULE: expiresIn is too large')
+      rule.expiresAt = isoUtc(new Date(expiresMs))
+    }
     this.repo.insertRule(rule)
     return this.ruleToResponse(rule)
   }
@@ -568,11 +613,13 @@ export class AccountsService {
   // ---------------------------------------------------------------- status machine
 
   /**
-   * Generic status change (other domains / admin). Same status -> no-op. Leaving CLOSED -> 422
+   * Generic status change (other domains / admin). Same status -> no-op. Leaving CLOSED, or moving to
+   * PENDING_APPROVAL (never produced: accounts created through this API are always APPROVED) -> 422
    * INVALID_STATE. Sets blockedBy on LOCKED (cleared otherwise), closedDateTimeUtc on CLOSED. Emits
    * account.statusChanged.
    */
   setStatus(id: string, status: AccountStatus, opts: StatusOptions): Account {
+    if (status === 'PENDING_APPROVAL') throw unprocessable(`INVALID_STATE: Account ${id} cannot move to PENDING_APPROVAL`)
     return this.transition(this.get(id), status, opts)
   }
 
@@ -601,39 +648,46 @@ export class AccountsService {
   }
 
   /**
-   * blockAccount: the account and every child account -> LOCKED (blockedBy CLIENT); already LOCKED or
-   * CLOSED accounts count as success (idempotent, no event). Unless ACCOUNT_ONLY, every owning customer
-   * is blocked too; a customer that cannot be blocked (INACTIVE) is a partial success (still 200).
+   * blockAccount: the account and every child account -> LOCKED (blockedBy = `blockedBy` or the action
+   * owner); already LOCKED or CLOSED accounts count as success (idempotent, no event). Unless
+   * ACCOUNT_ONLY, every owning customer is blocked too — also when the account was already LOCKED, so a
+   * default-style call widens an earlier ACCOUNT_ONLY block (a CLOSED root never blocks its customer);
+   * a customer that cannot be blocked (INACTIVE) is a partial success (still 200). The root records the
+   * customers it holds BLOCKED (blockedCustomerIds, appended): the ones it transitioned plus those
+   * another LOCKED account is already holding, so unblock releases a customer only with its last such account.
    */
-  block(id: string, opts: { note: string; style?: 'ACCOUNT_ONLY' | 'ACCOUNT_AND_CUSTOMER' | null; actionOwner?: ActionOwner }): BlockAccountResponse {
+  block(id: string, opts: { note: string; style?: 'ACCOUNT_ONLY' | 'ACCOUNT_AND_CUSTOMER' | null; actionOwner?: ActionOwner; blockedBy?: BlockedBy }): BlockAccountResponse {
     const actionOwner = opts.actionOwner ?? 'CLIENT'
+    const blockedBy = opts.blockedBy ?? actionOwner
     const root = this.get(id)
     const failedCustomers: string[] = []
     this.ctx.db.transaction(() => {
-      const scope = [root, ...this.repo.children(root.id)]
-      const blockedNow: string[] = []
-      for (const a of scope) {
+      for (const a of [root, ...this.repo.children(root.id)]) {
         if (a.status === 'LOCKED' || a.status === 'CLOSED') continue
         a.blockNote = opts.note
-        this.transition(a, 'LOCKED', { actionOwner, blockedBy: 'CLIENT' })
-        blockedNow.push(a.id)
+        this.transition(a, 'LOCKED', { actionOwner, blockedBy })
       }
-      if (opts.style === 'ACCOUNT_ONLY' || !blockedNow.includes(root.id)) return
+      if (opts.style === 'ACCOUNT_ONLY' || root.status !== 'LOCKED') return
       const customers = this.ctx.services.customers
-      const transitioned: string[] = []
+      const held: string[] = []
       for (const cid of this.holderCustomerIds(root)) {
         const c = customers.find(cid)
-        if (!c || c.status === 'BLOCKED') continue
+        if (!c) continue
+        if (c.status === 'BLOCKED') {
+          // already BLOCKED: hold it here too when an account block put it there (a blockCustomer block is left alone)
+          if (this.repo.lockedBlockersOf(cid).length) held.push(cid)
+          continue
+        }
         try {
-          customers.block(cid, { note: opts.note, actionOwner, blockedBy: 'CLIENT' })
-          transitioned.push(cid)
+          customers.block(cid, { note: opts.note, actionOwner, blockedBy })
+          held.push(cid)
         } catch (err) {
           if (!(err instanceof ApiError)) throw err
           failedCustomers.push(cid)
         }
       }
-      if (transitioned.length) {
-        root.blockedCustomerIds = transitioned
+      if (held.length) {
+        root.blockedCustomerIds = [...new Set([...(root.blockedCustomerIds ?? []), ...held])]
         this.repo.save(root)
       }
     })()
@@ -644,24 +698,27 @@ export class AccountsService {
   }
 
   /**
-   * unblockAccount: LOCKED -> ACTIVE (ACTIVE_IN_ARREARS when technically overdrawn), child accounts and
-   * the customers this block transitioned follow. Not LOCKED -> 422 INVALID_STATE.
+   * unblockAccount: LOCKED -> ACTIVE (ACTIVE_IN_ARREARS when technically overdrawn), LOCKED child
+   * accounts follow. The customers held BLOCKED by these accounts are released unless another LOCKED
+   * account still holds them; customers blocked independently (blockCustomer) are never touched.
+   * Not LOCKED -> 422 INVALID_STATE.
    */
   unblock(id: string, opts: { note?: string; actionOwner?: ActionOwner } = {}): Account {
     const actionOwner = opts.actionOwner ?? 'CLIENT'
     const root = this.get(id)
     if (root.status !== 'LOCKED') throw unprocessable(`INVALID_STATE: Account ${id} is not LOCKED (status is ${root.status})`)
     return this.ctx.db.transaction(() => {
-      const blockedCustomers = root.blockedCustomerIds ?? []
-      for (const a of [root, ...this.repo.children(root.id)]) {
-        if (a.status !== 'LOCKED') continue
+      const scope = [root, ...this.repo.children(root.id)].filter((a) => a.status === 'LOCKED')
+      const heldCustomers = [...new Set(scope.flatMap((a) => a.blockedCustomerIds ?? []))]
+      for (const a of scope) {
         if (opts.note !== undefined) a.blockNote = opts.note
         this.transition(a, computeBalances(a).technicalOverdraftBalance > 0 ? 'ACTIVE_IN_ARREARS' : 'ACTIVE', { actionOwner })
       }
       const customers = this.ctx.services.customers
-      for (const cid of blockedCustomers) {
-        const c = customers.find(cid)
-        if (c?.status === 'BLOCKED' && c.blockedBy === 'CLIENT') customers.unblock(cid, { actionOwner })
+      for (const cid of heldCustomers) {
+        if (customers.find(cid)?.status !== 'BLOCKED') continue
+        if (this.repo.lockedBlockersOf(cid).length) continue // another LOCKED account still holds this customer
+        customers.unblock(cid, { actionOwner })
       }
       return root
     })()

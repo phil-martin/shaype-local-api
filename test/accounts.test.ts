@@ -5,6 +5,7 @@ import { startApp } from './helpers.js'
 import { assertValidNotification } from './webhook-schema.js'
 import type { BuiltServer } from '../src/server.js'
 import { LIMIT_TYPES, LOCAL_PRODUCT, LOCAL_PRODUCT_ID, type AccountsService } from '../src/domains/accounts/index.js'
+import { FX_CURRENCIES } from '../src/domains/accounts/products.js'
 
 type S = components['schemas']
 type HayAccount = S['HayAccount']
@@ -120,7 +121,9 @@ describe('createAccount (POST /v1/accounts)', () => {
     })
     expect(a.accountNumber).toMatch(/^[1-9][0-9]{7}$/)
     expect(a.creationDateTimeUtc).toMatch(ISO_MICROS)
-    for (const absent of ['customData', 'blockedBy', 'parentAccountId', 'closedDateTimeUtc', 'homeCurrencyBalanceEquivalent']) expect(a, absent).not.toHaveProperty(absent)
+    for (const absent of ['customData', 'blockedBy', 'parentAccountId', 'closedDateTimeUtc']) expect(a, absent).not.toHaveProperty(absent)
+    // home-currency equivalent is the identity on an AUD account (00-balance §1.3)
+    expect(a.homeCurrencyBalanceEquivalent).toEqual({ currency: 'AUD', totalBalance: 0, availableBalance: 0, heldBalance: 0 })
     expect((await app.inject({ method: 'GET', url: `/v0/accounts/${a.accountHayId}/riskLevel` })).json()).toEqual({ accountId: a.accountHayId, riskLevel: 'HIGH' })
 
     const events = await accountEvents(a.accountHayId!)
@@ -180,6 +183,7 @@ describe('createAccount (POST /v1/accounts)', () => {
     const parent = await newAccount(holder)
     const child = await newAccount(holder, { currency: 'USD', parentAccountId: parent.accountHayId })
     expect(child).toMatchObject({ currency: 'USD', parentAccountId: parent.accountHayId, accountHolderId: holder, status: 'APPROVED' })
+    expect(child).not.toHaveProperty('homeCurrencyBalanceEquivalent') // no FX rates locally
     expectError(await app.inject({ method: 'POST', url: '/v1/accounts', payload: createBody(holder, { currency: 'USD', parentAccountId: parent.accountHayId }) }), 422, /^DUPLICATE_CHILD_CURRENCY/)
     expectError(await app.inject({ method: 'POST', url: '/v1/accounts', payload: createBody(holder, { currency: 'AUD', parentAccountId: parent.accountHayId }) }), 422, /home currency/)
     expectError(await app.inject({ method: 'POST', url: '/v1/accounts', payload: createBody(holder, { currency: 'EUR', parentAccountId: child.accountHayId }) }), 422, /itself a child/)
@@ -207,6 +211,29 @@ describe('createAccount (POST /v1/accounts)', () => {
     const none = await newAccount(holder, { fx: { childAccounts: { initMode: 'NONE' } } })
     await flush()
     expect(svc.children(none.accountHayId!)).toHaveLength(0)
+  })
+
+  it('fx.childAccounts initMode ALL provisions one APPROVED child per FX currency (30 for an AUD wallet)', async () => {
+    const holder = await newCustomer()
+    const parent = await newAccount(holder, { fx: { childAccounts: { initMode: 'ALL' } } })
+    await flush()
+    const children = svc.children(parent.accountHayId!)
+    expect(children).toHaveLength(30)
+    expect(children.map((c) => c.currency).sort()).toEqual([...FX_CURRENCIES].sort())
+    expect(children.every((c) => c.status === 'APPROVED' && c.parentAccountId === parent.accountHayId && c.holderId === holder)).toBe(true)
+    expect(new Set(children.map((c) => c.accountNumber)).size).toBe(30)
+    expect((await app.inject({ method: 'GET', url: `/v0/customers/${holder}/accounts` })).json()).toHaveLength(31)
+  })
+
+  it('refuses a child account under a LOCKED parent (422 ACCOUNT_BLOCKED) so a blocked wallet cannot be partly reopened', async () => {
+    const holder = await newCustomer()
+    const parent = await newAccount(holder)
+    await app.inject({ method: 'POST', url: `/v0/accounts/${parent.accountHayId}/block`, payload: { note: 'x', accountBlockStyle: 'ACCOUNT_ONLY' } })
+    const body = createBody(holder, { currency: 'USD', parentAccountId: parent.accountHayId })
+    expectError(await app.inject({ method: 'POST', url: '/v1/accounts', payload: body }), 422, `ACCOUNT_BLOCKED: parent account ${parent.accountHayId} is LOCKED`)
+    expect(svc.children(parent.accountHayId!)).toHaveLength(0)
+    await app.inject({ method: 'POST', url: `/v0/accounts/${parent.accountHayId}/unblock`, payload: { note: 'x' } })
+    expect((await app.inject({ method: 'POST', url: '/v1/accounts', payload: { ...body, idempotencyKey: randomUUID() } })).statusCode).toBe(200)
   })
 
   it('GROUP holders: 404 while the groups domain is not loaded; otherwise requireAllMembersActive gates creation and every member is notified', async () => {
@@ -279,6 +306,15 @@ describe('getHayAccount / searchAccounts', () => {
     expect(hit.json()).toEqual([await getAccount(a.accountHayId!)])
     expect((await app.inject({ method: 'POST', url: '/v1/accounts/search', payload: { accountNumber: '55555' } })).json()).toEqual([])
     expect((await app.inject({ method: 'POST', url: '/v1/accounts/search', payload: { accountNumber: 'abc' } })).statusCode).toBe(400)
+  })
+
+  it('search still returns an account once it is CLOSED', async () => {
+    const a = await newAccount()
+    expect((await app.inject({ method: 'POST', url: `/v0/accounts/${a.accountHayId}/close` })).statusCode).toBe(202)
+    await flush()
+    const hit = await app.inject({ method: 'POST', url: '/v1/accounts/search', payload: { accountNumber: a.accountNumber } })
+    expect(hit.statusCode).toBe(200)
+    expect(hit.json()).toEqual([expect.objectContaining({ accountHayId: a.accountHayId, status: 'CLOSED', closedDateTimeUtc: expect.stringMatching(ISO_MICROS) })])
   })
 })
 
@@ -357,6 +393,8 @@ describe('limits', () => {
     expect(await row()).toEqual({ type: 'CARD_PAYMENTS_DAILY', productLimit: 50_000, accountLimit: 1234.56, effectiveLimit: 1234.56 })
     expectError(await app.inject({ method: 'PUT', url: `/v1/accounts/${id}/limits/CARD_PAYMENTS_DAILY`, payload: { limitAmount: 50_000.01 } }), 422, /^LIMIT_EXCEEDS_PRODUCT_LIMIT: /)
     expect((await app.inject({ method: 'PUT', url: `/v1/accounts/${id}/limits/CARD_PAYMENTS_DAILY`, payload: { limitAmount: 0 } })).statusCode).toBe(400)
+    expectError(await app.inject({ method: 'PUT', url: `/v1/accounts/${id}/limits/CARD_PAYMENTS_DAILY`, payload: { limitAmount: 12.345 } }), 400, 'BAD_REQUEST: limitAmount must have at most 2 decimal places')
+    expect(await row()).toMatchObject({ accountLimit: 1234.56 }) // not rounded and stored
     expect((await app.inject({ method: 'PUT', url: `/v1/accounts/${id}/limits/MIN_BALANCE`, payload: { limitAmount: 5 } })).statusCode).toBe(400) // not in the settable enum
     // the override survives a HIGH/LOW round trip (effective reads 0 while HIGH)
     await app.inject({ method: 'PATCH', url: `/v0/accounts/${id}/riskLevel`, payload: { level: 'HIGH', reason: 'x' } })
@@ -381,6 +419,7 @@ describe('limits', () => {
     expect(limits.find((l) => l.type === 'MAX_BALANCE')).toEqual({ type: 'MAX_BALANCE', productLimit: 1_000_000, accountLimit: 500, effectiveLimit: 500 })
     expectError(await app.inject({ method: 'PATCH', url: `/v0/accounts/${id}/max-balance`, payload: { maxBalanceLimit: 1_000_000.5 } }), 422, /^LIMIT_EXCEEDS_PRODUCT_LIMIT/)
     expect((await app.inject({ method: 'PATCH', url: `/v0/accounts/${id}/max-balance`, payload: { maxBalanceLimit: 0 } })).statusCode).toBe(400)
+    expectError(await app.inject({ method: 'PATCH', url: `/v0/accounts/${id}/max-balance`, payload: { maxBalanceLimit: 1.005 } }), 400, 'BAD_REQUEST: maxBalanceLimit must have at most 2 decimal places')
     expect(svc.checkLimit(id, 'MAX_BALANCE', 50_001)).toBe('REFUSED_MAX_BALANCE_EXCEEDED')
     expect(svc.checkLimit(id, 'MAX_BALANCE', 50_000)).toBeNull()
   })
@@ -420,6 +459,18 @@ describe('limits', () => {
     expect(svc.checkLimit(id, 'SINGLE_CARD_TRANSACTION', 1)).toBe('REFUSED_SINGLE_CARD_TRANSACTION_LIMIT_BREACHED')
     expect(svc.checkLimit(id, 'MAX_BALANCE', 0)).toBeNull()
   })
+
+  it('getAccountLimits loads the account overrides once, not once per limit type', async () => {
+    const a = await newLowRiskAccount()
+    const repo = (svc as unknown as { repo: { limitOverrides: (id: string) => unknown } }).repo
+    const spy = vi.spyOn(repo, 'limitOverrides')
+    try {
+      expect((await app.inject({ method: 'GET', url: `/v1/accounts/${a.accountHayId}/limits` })).statusCode).toBe(200)
+      expect(spy).toHaveBeenCalledTimes(1)
+    } finally {
+      spy.mockRestore()
+    }
+  })
 })
 
 describe('balances and ledger-driven status (ctx.services.accounts.adjust)', () => {
@@ -428,7 +479,7 @@ describe('balances and ledger-driven status (ctx.services.accounts.adjust)', () 
     const id = a.accountHayId!
     svc.adjust(id, { ledgerDelta: 1113 })
     expect(svc.balances(id).json).toEqual({ totalBalance: 11.13, availableBalance: 11.13, heldBalance: 0, lockedBalance: 0, stacksBalance: 0, overdraftBalance: 0, overdraftLimit: 0, technicalOverdraftBalance: 0 })
-    expect((await getAccount(id)).status).toBe('ACTIVE')
+    expect(await getAccount(id)).toMatchObject({ status: 'ACTIVE', homeCurrencyBalanceEquivalent: { currency: 'AUD', totalBalance: 11.13, availableBalance: 11.13, heldBalance: 0 } })
     const events = await accountEvents(id)
     expect(events.map((e) => [e.accountStatusChangeEvent.accountStatus, e.actionOwner])).toEqual([['APPROVED', 'PLATFORM'], ['ACTIVE', 'PLATFORM']])
     events.forEach((e) => assertValidNotification(e))
@@ -436,6 +487,7 @@ describe('balances and ledger-driven status (ctx.services.accounts.adjust)', () 
     svc.adjust(id, { heldDelta: 840 })
     expect(svc.balances(id).json).toMatchObject({ totalBalance: 11.13, heldBalance: 8.4, availableBalance: 2.73 })
     expect(svc.balances(id).cents).toMatchObject({ totalBalance: 1113, heldBalance: 840, availableBalance: 273 })
+    expect((await getAccount(id)).homeCurrencyBalanceEquivalent).toEqual({ currency: 'AUD', totalBalance: 11.13, availableBalance: 2.73, heldBalance: 8.4 })
     // settlement 8.40: releases the hold and posts the debit
     svc.adjust(id, { heldDelta: -840, ledgerDelta: -840 })
     expect(svc.balances(id).json).toMatchObject({ totalBalance: 2.73, heldBalance: 0, availableBalance: 2.73 })
@@ -487,6 +539,8 @@ describe('balances and ledger-driven status (ctx.services.accounts.adjust)', () 
     expect(statuses).toEqual([['APPROVED', 'PLATFORM'], ['ACTIVE', 'PLATFORM'], ['ACTIVE_IN_ARREARS', 'PLATFORM'], ['ACTIVE', 'PLATFORM'], ['ACTIVE_IN_ARREARS', 'CLIENT'], ['ACTIVE', 'CLIENT']])
     expectError(await app.inject({ method: 'PATCH', url: `/v0/accounts/${id}/overdraft`, payload: { overdraftLimit: 10_000.01 } }), 422, /^LIMIT_EXCEEDS_PRODUCT_LIMIT: overdraft/)
     expect((await app.inject({ method: 'PATCH', url: `/v0/accounts/${id}/overdraft`, payload: { overdraftLimit: -1 } })).statusCode).toBe(400)
+    expectError(await app.inject({ method: 'PATCH', url: `/v0/accounts/${id}/overdraft`, payload: { overdraftLimit: 0.005 } }), 400, 'BAD_REQUEST: overdraftLimit must have at most 2 decimal places')
+    expect((await getAccount(id)).overdraftLimit).toBe(60) // unchanged, not rounded to 0.01
     expect((await app.inject({ method: 'PATCH', url: `/v0/accounts/${id}/overdraft`, payload: { overdraftLimit: 0 } })).statusCode).toBe(200) // removes the overdraft
     expect(await getAccount(id)).toMatchObject({ overdraftLimit: 0, technicalOverdraftBalance: 50, status: 'ACTIVE_IN_ARREARS' })
   })
@@ -508,6 +562,13 @@ describe('balances and ledger-driven status (ctx.services.accounts.adjust)', () 
     await flush()
     expect(svc.requireOpenForMovement(id)).toBe('REFUSED_ACCOUNT_CLOSED')
     expect(() => svc.requireOpenForMovement(UNKNOWN_ID)).toThrow(expect.objectContaining({ status: 404 }))
+  })
+
+  it('setStatus refuses PENDING_APPROVAL (accounts created through this API are always APPROVED)', async () => {
+    const a = await newAccount()
+    expect(() => svc.setStatus(a.accountHayId!, 'PENDING_APPROVAL', { actionOwner: 'PLATFORM' })).toThrow(/^INVALID_STATE: .*PENDING_APPROVAL/)
+    expect(svc.get(a.accountHayId!).status).toBe('APPROVED')
+    expect(await accountEvents(a.accountHayId!)).toHaveLength(1)
   })
 })
 
@@ -538,6 +599,9 @@ describe('rules', () => {
       expect((await post({ name: 'x', ruleType: 'MERCHANT_NAME_BLOCK' })).statusCode).toBe(400)
       expect((await post({ name: '', ruleType: 'MERCHANT_NAME_BLOCK', ruleDetails: {} })).statusCode).toBe(400)
       expect((await post({ name: 'x', ruleType: 'MERCHANT_CODE_BLOCK', expiresIn: 0, ruleDetails: { blockedMerchantCategoryCodes: [1] } })).statusCode).toBe(400)
+      // schema-valid int64 that overflows the Date range must not surface as a 500
+      expectError(await post({ name: 'x', ruleType: 'MERCHANT_CODE_BLOCK', expiresIn: 9007199254740991, ruleDetails: { blockedMerchantCategoryCodes: [1] } }), 422, /^INVALID_RULE: expiresIn is too large/)
+      expect((await app.inject({ method: 'GET', url: `/v1/accounts/${id}/rules` })).json()).toHaveLength(2)
       expectError(await app.inject({ method: 'POST', url: `/v1/accounts/${UNKNOWN_ID}/rules`, payload: { name: 'x', ruleType: 'MERCHANT_CODE_BLOCK', ruleDetails: { blockedMerchantCategoryCodes: [1] } } }), 404, /^NOT_FOUND/)
     } finally {
       await app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
@@ -673,6 +737,87 @@ describe('blockAccount / unblockAccount', () => {
     expect((await accountEvents(id)).map((e) => e.accountStatusChangeEvent.accountStatus)).toEqual(['APPROVED', 'ACTIVE', 'ACTIVE_IN_ARREARS', 'BLOCKED', 'ACTIVE_IN_ARREARS', 'ACTIVE'])
   })
 
+  it('a default-style block on an already LOCKED (ACCOUNT_ONLY) account still blocks the customer, and unblock releases it', async () => {
+    const holder = await newCustomer()
+    const a = await newAccount(holder)
+    const id = a.accountHayId!
+    await app.inject({ method: 'POST', url: `/v0/accounts/${id}/block`, payload: { note: 'account only', accountBlockStyle: 'ACCOUNT_ONLY' } })
+    expect(await customerStatus(holder)).toBe('ACTIVE')
+    const widen = await app.inject({ method: 'POST', url: `/v0/accounts/${id}/block`, payload: { note: 'and the customer' } })
+    expect(widen.statusCode, widen.body).toBe(200)
+    expect(widen.json()).toEqual({ failedAccounts: [], message: 'Account blocked successfully.' })
+    expect(await customerStatus(holder)).toBe('BLOCKED')
+    expect(svc.get(id).blockedCustomerIds).toEqual([holder])
+    expect((await accountEvents(id)).map((e) => e.accountStatusChangeEvent.accountStatus)).toEqual(['APPROVED', 'BLOCKED']) // the account itself did not transition again
+    await app.inject({ method: 'POST', url: `/v0/accounts/${id}/unblock`, payload: { note: 'ok' } })
+    expect(await customerStatus(holder)).toBe('ACTIVE')
+    expect((await customerEvents(holder, 'CUSTOMER_STATUS_UPDATED')).map((e) => e.customerStatusUpdatedEvent.customerStatus)).toEqual(['ACTIVE', 'BLOCKED', 'ACTIVE'])
+  })
+
+  it('a customer blocked through two of its accounts is released only when the last of them is unblocked', async () => {
+    const holder = await newCustomer()
+    const a = (await newAccount(holder)).accountHayId!
+    const b = (await newAccount(holder)).accountHayId!
+    expect((await app.inject({ method: 'POST', url: `/v0/accounts/${a}/block`, payload: { note: 'a' } })).statusCode).toBe(200)
+    expect((await app.inject({ method: 'POST', url: `/v0/accounts/${b}/block`, payload: { note: 'b' } })).statusCode).toBe(200)
+    expect(svc.get(a).blockedCustomerIds).toEqual([holder])
+    expect(svc.get(b).blockedCustomerIds).toEqual([holder])
+    expect((await app.inject({ method: 'POST', url: `/v0/accounts/${a}/unblock`, payload: { note: 'a' } })).statusCode).toBe(200)
+    expect((await getAccount(a)).status).toBe('ACTIVE')
+    expect((await getAccount(b)).status).toBe('LOCKED')
+    expect(await customerStatus(holder)).toBe('BLOCKED') // b still holds the customer
+    expect((await app.inject({ method: 'POST', url: `/v0/accounts/${b}/unblock`, payload: { note: 'b' } })).statusCode).toBe(200)
+    expect(await customerStatus(holder)).toBe('ACTIVE')
+    expect((await customerEvents(holder, 'CUSTOMER_STATUS_UPDATED')).map((e) => e.customerStatusUpdatedEvent.customerStatus)).toEqual(['ACTIVE', 'BLOCKED', 'ACTIVE'])
+  })
+
+  it('a GROUP-held account blocks every member customer and unblock releases them all (CUSTOMER_STATUS_UPDATED per member)', async () => {
+    const groupId = randomUUID()
+    const m1 = await newCustomer()
+    const m2 = await newCustomer()
+    services().groups = { requireAllMembersActive: () => {}, memberIds: (id: string) => (id === groupId ? [m1, m2] : []), groupIdsForCustomer: () => [] }
+    try {
+      const a = await newAccount(groupId, { accountHolderType: 'GROUP' })
+      const id = a.accountHayId!
+      const res = await app.inject({ method: 'POST', url: `/v0/accounts/${id}/block`, payload: { note: 'group freeze' } })
+      expect(res.statusCode, res.body).toBe(200)
+      expect(res.json()).toEqual({ failedAccounts: [], message: 'Account blocked successfully.' })
+      expect(await getAccount(id)).toMatchObject({ status: 'LOCKED', blockedBy: 'CLIENT' })
+      expect(await customerStatus(m1)).toBe('BLOCKED')
+      expect(await customerStatus(m2)).toBe('BLOCKED')
+      expect(svc.get(id).blockedCustomerIds).toEqual([m1, m2])
+      const blocked = (await accountEvents(id)).filter((e) => e.accountStatusChangeEvent.accountStatus === 'BLOCKED')
+      expect(blocked.map((e) => e.customerHayId).sort()).toEqual([m1, m2].sort())
+      for (const m of [m1, m2]) {
+        const events = await customerEvents(m, 'CUSTOMER_STATUS_UPDATED')
+        expect(events.map((e) => [e.customerStatusUpdatedEvent.customerStatus, e.actionOwner])).toEqual([['ACTIVE', 'PLATFORM'], ['BLOCKED', 'CLIENT']])
+      }
+      expect((await app.inject({ method: 'POST', url: `/v0/accounts/${id}/unblock`, payload: { note: 'thawed' } })).statusCode).toBe(200)
+      expect((await getAccount(id)).status).toBe('ACTIVE')
+      expect(await customerStatus(m1)).toBe('ACTIVE')
+      expect(await customerStatus(m2)).toBe('ACTIVE')
+      for (const m of [m1, m2]) {
+        expect((await customerEvents(m, 'CUSTOMER_STATUS_UPDATED')).map((e) => e.customerStatusUpdatedEvent.customerStatus)).toEqual(['ACTIVE', 'BLOCKED', 'ACTIVE'])
+      }
+    } finally {
+      delete services().groups
+    }
+  })
+
+  it('a platform-driven block() records blockedBy PLATFORM on the account and the customer; a client unblock releases both', async () => {
+    const holder = await newCustomer()
+    const a = await newAccount(holder)
+    const id = a.accountHayId!
+    svc.block(id, { note: 'platform freeze', actionOwner: 'PLATFORM' })
+    expect(await getAccount(id)).toMatchObject({ status: 'LOCKED', blockedBy: 'PLATFORM' })
+    expect(built.ctx.services.customers.get(holder)).toMatchObject({ status: 'BLOCKED', blockedBy: 'PLATFORM' })
+    expect((await accountEvents(id)).at(-1)).toMatchObject({ accountStatusChangeEvent: { accountStatus: 'BLOCKED' }, actionOwner: 'PLATFORM' })
+    expect((await customerEvents(holder, 'CUSTOMER_STATUS_UPDATED')).at(-1)).toMatchObject({ customerStatusUpdatedEvent: { customerStatus: 'BLOCKED' }, actionOwner: 'PLATFORM' })
+    expect((await app.inject({ method: 'POST', url: `/v0/accounts/${id}/unblock`, payload: { note: 'cleared' } })).statusCode).toBe(200)
+    expect((await getAccount(id)).status).toBe('ACTIVE')
+    expect(await customerStatus(holder)).toBe('ACTIVE')
+  })
+
   it('blocking is a partial success when the customer cannot be blocked, a no-op success on a CLOSED account, and never touches cards', async () => {
     const holder = await newCustomer()
     const a = await newAccount(holder)
@@ -732,6 +877,23 @@ describe('closeAccount', () => {
     } finally {
       delete services().cards
     }
+  })
+
+  it('closes a LOCKED account (LOCKED -> CLOSED, CLIENT) and the customer that block put in BLOCKED ends INACTIVE with the reason', async () => {
+    const holder = await newCustomer()
+    const a = await newAccount(holder)
+    const id = a.accountHayId!
+    expect((await app.inject({ method: 'POST', url: `/v0/accounts/${id}/block`, payload: { note: 'fraud' } })).statusCode).toBe(200)
+    expect(await customerStatus(holder)).toBe('BLOCKED')
+    const res = await app.inject({ method: 'POST', url: `/v0/accounts/${id}/close`, payload: { reason: 'SUSPICIOUS' } })
+    expect(res.statusCode, res.body).toBe(202)
+    await flush()
+    const closed = await getAccount(id)
+    expect(closed).toMatchObject({ status: 'CLOSED', closedDateTimeUtc: expect.stringMatching(ISO_MICROS) })
+    expect(closed).not.toHaveProperty('blockedBy')
+    expect(built.ctx.services.customers.get(holder)).toMatchObject({ status: 'INACTIVE', statusReason: 'SUSPICIOUS' })
+    expect((await accountEvents(id)).map((e) => [e.accountStatusChangeEvent.accountStatus, e.actionOwner])).toEqual([['APPROVED', 'PLATFORM'], ['BLOCKED', 'CLIENT'], ['CLOSED', 'CLIENT']])
+    expectError(await app.inject({ method: 'POST', url: `/v0/accounts/${id}/unblock`, payload: { note: 'x' } }), 422, /^INVALID_STATE/)
   })
 
   it('keeps the customer ACTIVE while another account stays open; a GROUP account counts through groups.groupIdsForCustomer', async () => {
@@ -829,6 +991,88 @@ describe('closeAccount', () => {
     expect((await app.inject({ method: 'GET', url: `/v1/accounts/${id}/limits` })).statusCode).toBe(200)
     expect((await app.inject({ method: 'GET', url: `/v1/accounts/${id}/rules` })).statusCode).toBe(200)
     expect((await app.inject({ method: 'DELETE', url: `/v1/accounts/${id}/custom-data` })).statusCode).toBe(200)
+  })
+})
+
+describe('deferred work with asyncDelayMs > 0 (child provisioning and the closure cascade fire on the virtual clock)', () => {
+  let other: BuiltServer
+  let osvc: AccountsService
+  let m = 0
+  beforeAll(async () => { other = await startApp({ asyncDelayMs: 60_000 }); osvc = other.ctx.services.accounts })
+  afterAll(async () => { await other.app.close() })
+
+  /** Fires every deferred job scheduled so far (they are due 60 s ahead on the virtual clock). */
+  async function runDeferred(): Promise<void> {
+    const res = await other.app.inject({ method: 'POST', url: '/_admin/clock', payload: { advanceMs: 60_000 } })
+    expect(res.statusCode).toBe(200)
+  }
+  async function deferredCustomer(): Promise<string> {
+    m++
+    const res = await other.app.inject({
+      method: 'POST', url: '/v0/customers/create',
+      payload: {
+        idempotencyKey: randomUUID(), email: `deferred${m}@example.com`, customerTier: 'STANDARD',
+        phoneNumber: { countryCodePrefix: '61', numberAfterPrefix: `4${String(m).padStart(8, '0')}` },
+        address: { line1: '1 Test St', townOrCity: 'Sydney', administrativeRegion: 'NSW', postcode: '2000', countryCodeIso: 'AUS' },
+        customerDetails: { firstName: 'Def', lastName: `Erred${m}`, dateOfBirth: '1990-01-01' },
+      },
+    })
+    expect(res.statusCode, res.body).toBe(200)
+    await runDeferred()
+    return res.json().customerHayId as string
+  }
+  async function deferredAccount(holder: string, overrides: Partial<CreateBody> = {}): Promise<HayAccount> {
+    const res = await other.app.inject({ method: 'POST', url: '/v1/accounts', payload: createBody(holder, overrides) })
+    expect(res.statusCode, res.body).toBe(200)
+    return res.json() as HayAccount
+  }
+  async function deferredAccountEvents(accountId: string): Promise<any[]> {
+    await other.app.inject({ method: 'POST', url: '/_admin/notifications/flush' })
+    const res = await other.app.inject({ method: 'GET', url: '/_admin/notifications?limit=1000' })
+    return (res.json() as { payload: any }[]).map((r) => r.payload).filter((p) => p.type === 'ACCOUNT_STATUS_CHANGE' && p.accountStatusChangeEvent?.accountHayId === accountId)
+  }
+  const status = async (id: string) => (await other.app.inject({ method: 'GET', url: `/v0/accounts/${id}` })).json().status as string
+
+  it('provisions the requested children even when the holder is BLOCKED by the time the job fires (the parent was already authorised)', async () => {
+    const holder = await deferredCustomer()
+    const parent = await deferredAccount(holder, { fx: { childAccounts: { initMode: 'CUSTOM', currencies: ['USD'] } } })
+    expect((await other.app.inject({ method: 'POST', url: `/v0/customers/${holder}/block`, payload: { note: 'kyc' } })).statusCode).toBe(200)
+    expect(osvc.children(parent.accountHayId!)).toHaveLength(0)
+    await runDeferred()
+    expect(osvc.children(parent.accountHayId!).map((c) => [c.currency, c.status])).toEqual([['USD', 'APPROVED']])
+  })
+
+  it('a child provisioned after its parent was blocked is created LOCKED with the parent block (APPROVED then BLOCKED, PLATFORM) and follows the unblock', async () => {
+    const holder = await deferredCustomer()
+    const parent = await deferredAccount(holder, { fx: { childAccounts: { initMode: 'CUSTOM', currencies: ['USD', 'GBP'] } } })
+    expect((await other.app.inject({ method: 'POST', url: `/v0/accounts/${parent.accountHayId}/block`, payload: { note: 'freeze', accountBlockStyle: 'ACCOUNT_ONLY' } })).statusCode).toBe(200)
+    await runDeferred()
+    const children = osvc.children(parent.accountHayId!)
+    expect(children.map((c) => c.currency).sort()).toEqual(['GBP', 'USD'])
+    for (const c of children) {
+      expect(c).toMatchObject({ status: 'LOCKED', blockedBy: 'CLIENT', blockNote: 'freeze' })
+      expect((await deferredAccountEvents(c.id)).map((e) => [e.accountStatusChangeEvent.accountStatus, e.actionOwner])).toEqual([['APPROVED', 'PLATFORM'], ['BLOCKED', 'PLATFORM']])
+    }
+    expect(await status(parent.accountHayId!)).toBe('LOCKED')
+    expect((await other.app.inject({ method: 'POST', url: `/v0/accounts/${parent.accountHayId}/unblock`, payload: { note: 'thaw' } })).statusCode).toBe(200)
+    expect(osvc.children(parent.accountHayId!).map((c) => c.status)).toEqual(['ACTIVE', 'ACTIVE'])
+  })
+
+  it('the closure cascade leaves the account open when balances moved after the 202 (no CLOSED event, customer untouched); a later close succeeds', async () => {
+    const holder = await deferredCustomer()
+    const a = await deferredAccount(holder)
+    const id = a.accountHayId!
+    expect((await other.app.inject({ method: 'POST', url: `/v0/accounts/${id}/close`, payload: { reason: 'CUSTOMER' } })).statusCode).toBe(202)
+    osvc.adjust(id, { ledgerDelta: 100 }) // a credit lands before the cascade runs
+    await runDeferred()
+    expect(await status(id)).toBe('ACTIVE')
+    expect((await deferredAccountEvents(id)).map((e) => e.accountStatusChangeEvent.accountStatus)).toEqual(['APPROVED', 'ACTIVE'])
+    expect(other.ctx.services.customers.get(holder).status).toBe('ACTIVE')
+    osvc.adjust(id, { ledgerDelta: -100 })
+    expect((await other.app.inject({ method: 'POST', url: `/v0/accounts/${id}/close`, payload: { reason: 'CUSTOMER' } })).statusCode).toBe(202)
+    await runDeferred()
+    expect(await status(id)).toBe('CLOSED')
+    expect(other.ctx.services.customers.get(holder)).toMatchObject({ status: 'INACTIVE', statusReason: 'CUSTOMER' })
   })
 })
 

@@ -76,7 +76,7 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext, svc: Accou
   })
 
   defineRoute<ById, never, S['UpdateMaxBalanceLimitRequestBody']>(app, ctx, 'updateMaxBalanceLimit', (req) => {
-    svc.setLimit(req.params.accountId, 'MAX_BALANCE', req.body.maxBalanceLimit)
+    svc.setLimit(req.params.accountId, 'MAX_BALANCE', req.body.maxBalanceLimit, 'maxBalanceLimit')
     return { message: 'Max balance limit updated successfully.' }
   })
 

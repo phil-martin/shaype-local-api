@@ -1,11 +1,27 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { withIdempotency } from '../src/lib/idempotency.js'
+import { hasAtMostTwoDecimals, toCents, toCentsStrict } from '../src/lib/money.js'
 import { startApp } from './helpers.js'
 import type { BuiltServer } from '../src/server.js'
 
 let built: BuiltServer
 beforeAll(async () => { built = await startApp() })
 afterAll(async () => { await built.app.close() })
+
+describe('money', () => {
+  it('hasAtMostTwoDecimals accepts every 2-dp amount and refuses a third decimal or a non-finite value', () => {
+    for (const ok of [0, 1, 0.1, 0.01, 1234.56, 50_000.01, 1_000_000.5, 99_999_999.99, 10_000.01, 0.07, 19.99, 100]) expect(hasAtMostTwoDecimals(ok), String(ok)).toBe(true)
+    for (const bad of [0.005, 12.345, 1.005, 0.001, 99.999, Number.NaN, Number.POSITIVE_INFINITY]) expect(hasAtMostTwoDecimals(bad), String(bad)).toBe(false)
+  })
+
+  it('toCentsStrict matches toCents on 2-dp amounts and throws instead of rounding otherwise', () => {
+    expect(toCentsStrict(1234.56)).toBe(123456)
+    expect(toCentsStrict(0.07)).toBe(toCents(0.07))
+    expect(() => toCentsStrict(0.005)).toThrow(RangeError)
+    expect(() => toCentsStrict(12.345)).toThrow(/more than 2 decimal places/)
+    expect(toCents(12.345)).toBe(1235) // the lenient helper still rounds
+  })
+})
 
 describe('withIdempotency', () => {
   it('replays the stored response for the same key and body, and refuses a different body', async () => {

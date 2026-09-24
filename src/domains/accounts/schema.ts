@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   status               TEXT NOT NULL,             -- HayAccount.status (LOCKED stored; webhook renders BLOCKED)
   blocked_by           TEXT,                      -- CLIENT | PLATFORM while LOCKED
   block_note           TEXT,
-  blocked_customer_ids TEXT,                      -- JSON array: customers this block transitioned to BLOCKED (undone on unblock)
+  blocked_customer_ids TEXT,                      -- JSON array: customers held BLOCKED by this block (released when the last such LOCKED account is unblocked)
   parent_account_id    TEXT,                      -- FX child accounts only
   custom_data          TEXT,                      -- JSON object, or NULL when none
   ledger               INTEGER NOT NULL DEFAULT 0,
