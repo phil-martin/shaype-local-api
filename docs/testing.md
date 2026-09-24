@@ -204,7 +204,7 @@ Each row carries the delivery record next to the payload: `{ id, version, type, 
 
 Useful checks on the application side:
 
-- **Retries and idempotency.** Make the webhook endpoint answer `500` (or time out) and watch `attempts` and `status` on `/_admin/notifications/:id`: `401`, `403`, `429`, `5xx` and network errors are retried with doubling backoff (`--webhook-backoff-ms`, `--webhook-max-attempts`); any other non-2xx status is final. `POST /_admin/notifications/:id/redeliver` sends the same payload (same `idempotencyKey`) again, which is how to test duplicate handling.
+- **Retries and idempotency.** Make the webhook endpoint answer `500` (or not answer within `--webhook-timeout-ms`, default 10 s) and watch `attempts` and `status` on `/_admin/notifications/:id`: `401`, `403`, `429`, `5xx`, network errors and timeouts are retried with doubling backoff in real time (`--webhook-backoff-ms`, `--webhook-max-attempts`), also while the virtual clock is frozen; any other non-2xx status is final. `POST /_admin/notifications/:id/redeliver` sends the same payload (same `idempotencyKey`) again, which is how to test duplicate handling.
 - **Payload shape.** The package ships `spec/notification-webhooks.json`; validate received payloads against its `NotificationDto` schema if your application parses them strictly.
 
 Two things to know:

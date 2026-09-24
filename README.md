@@ -5,7 +5,7 @@
 
 **Full-fidelity operations: 143 / 143 (100%)**  `████████████████████`
 
-All 169 operations of the spec are routed and schema-validated; the 26 stub-only operations answer with deterministic spec-shaped data. Test files: 16. Updated 2026-09-24 at `0d0f96e`.
+All 169 operations of the spec are routed and schema-validated; the 26 stub-only operations answer with deterministic spec-shaped data. Test files: 16. Updated 2026-09-24 at `b8475e3`.
 
 | Section | Implemented | Progress | Status |
 |---|---|---|---|
@@ -72,6 +72,7 @@ Every flag has an environment variable; a flag wins over its variable.
 | `--log-level <level>` | `SHAYPE_LOCAL_LOG_LEVEL` | `info` | pino level (`silent`, `error`, `warn`, `info`, `debug`). |
 | `--webhook-max-attempts <n>` | `SHAYPE_LOCAL_WEBHOOK_MAX_ATTEMPTS` | `5` | Delivery attempts per notification before it is marked `failed`. |
 | `--webhook-backoff-ms <ms>` | `SHAYPE_LOCAL_WEBHOOK_BACKOFF_MS` | `200` | First retry delay; doubles on every further attempt. |
+| `--webhook-timeout-ms <ms>` | `SHAYPE_LOCAL_WEBHOOK_TIMEOUT_MS` | `10000` | Per-delivery request timeout; a timeout is retried like a network error. |
 | `--async-delay-ms <ms>` | `SHAYPE_LOCAL_ASYNC_DELAY_MS` | `0` | Delay of the platform's asynchronous effects; see [Asynchronous effects and the clock](#asynchronous-effects-and-the-virtual-clock). |
 | `--default-risk-level HIGH\|LOW` | `SHAYPE_LOCAL_DEFAULT_RISK_LEVEL` | `HIGH` | Risk level of new accounts. `HIGH` (Shaype's default) sets every limit to 0. |
 | `--emit-customer-inactive` | `SHAYPE_LOCAL_EMIT_CUSTOMER_INACTIVE=true` | off | Also send `CUSTOMER_STATUS_UPDATED {INACTIVE}` when closing the last account deactivates a customer. |
@@ -112,7 +113,9 @@ with a body shaped like `NotificationDto` in `spec/notification-webhooks.json`. 
 - `idempotencyKey` identifies the notification and stays the same across retries: deduplicate on it.
 - `actionOwner` is `CLIENT` when one of your API calls caused the change and `PLATFORM` for the platform's own behaviour (onboarding outcome, first posting activating an account, closure cascade, direct-entry progress, …).
 - Notifications are delivered asynchronously, one at a time, in creation order; a notification waiting for a retry does not hold back later ones.
-- A `401`, `403`, `429`, `5xx` answer or a network error is retried after `--webhook-backoff-ms`, then twice that, and so on, up to `--webhook-max-attempts` attempts in total. Any other non-2xx answer is final (`failed`).
+- A `401`, `403`, `429`, `5xx` answer, a network error or no answer within `--webhook-timeout-ms` is retried after `--webhook-backoff-ms`, then twice that, and so on, up to `--webhook-max-attempts` attempts in total. Any other non-2xx answer is final (`failed`).
+- Retry delays are real time, not virtual time: freezing or moving the clock does not hold a retry back (`nextAttemptAt` shows the virtual-clock equivalent).
+- With a file `--db`, notifications still queued when the server stopped are sent again when it restarts with `--webhook-url`; without it they are kept as `stored`.
 - Every notification is stored whether or not it was delivered; without `--webhook-url` they are only stored (`status: "stored"`). Inspect them with `GET /_admin/notifications`.
 
 A throw-away receiver that prints what it gets:

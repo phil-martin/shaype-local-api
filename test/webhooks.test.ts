@@ -1,8 +1,12 @@
+import { mkdtempSync, rmSync } from 'node:fs'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { startApp } from './helpers.js'
 import type { BuiltServer } from '../src/server.js'
+import { defaultConfig } from '../src/config.js'
 
 interface Call { url: string; body: any }
 
@@ -186,5 +190,126 @@ describe('webhook dispatcher shutdown and reset with a delivery in flight', () =
     expect(after.id).toBe(built.ctx.webhooks.list()[0]!.id)
     await built.app.close()
     expect(unhandled).toEqual([])
+  })
+})
+
+describe('webhook dispatcher timing: real-time retries, delivery timeout, restart, redeliver in flight', () => {
+  const opened: BuiltServer[] = []
+  afterEach(async () => { for (const b of opened.splice(0)) await b.app.close() })
+  const start = async (config: Parameters<typeof startApp>[0], f: typeof fetch) => {
+    const b = await startApp(config, { fetch: f })
+    opened.push(b)
+    return b
+  }
+  /** Polls `probe` every 5 ms until it holds (bounded). */
+  const until = async (probe: () => boolean, ms = 2000) => {
+    const end = Date.now() + ms
+    while (!probe()) {
+      if (Date.now() > end) throw new Error('condition not met in time')
+      await new Promise((r) => setTimeout(r, 5))
+    }
+  }
+
+  it('retries on the real clock while the virtual clock is frozen', async () => {
+    const calls: Call[] = []
+    const built = await start({ webhookUrl: 'http://sut.local', webhookBackoffMs: 20 }, fakeFetch([500], calls))
+    expect((await built.app.inject({ method: 'POST', url: '/_admin/clock', payload: { freeze: '2026-01-01T00:00:00Z' } })).statusCode).toBe(200)
+    const n = built.ctx.webhooks.enqueue('v0', { type: 'TRANSACTION' })
+    await built.ctx.webhooks.waitForIdle(2000)
+    expect(calls).toHaveLength(2)
+    expect(built.ctx.webhooks.get(n.id)).toMatchObject({ status: 'delivered', attempts: 2 })
+  })
+
+  it('delivers and retries after the virtual clock was moved back', async () => {
+    const calls: Call[] = []
+    const built = await start({ webhookUrl: 'http://sut.local', webhookBackoffMs: 50 }, fakeFetch([500], calls))
+    await built.app.inject({ method: 'POST', url: '/_admin/clock', payload: { set: '2031-01-31T00:00:00Z' } })
+    const n = built.ctx.webhooks.enqueue('v0', { type: 'TRANSACTION' })
+    await until(() => calls.length === 1)
+    await built.app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
+    await built.ctx.webhooks.waitForIdle(2000)
+    expect(built.ctx.webhooks.get(n.id)).toMatchObject({ status: 'delivered', attempts: 2 })
+    // queued at a future virtual time, delivered at once after the clock moved back
+    await built.app.inject({ method: 'POST', url: '/_admin/clock', payload: { set: '2031-01-31T00:00:00Z' } })
+    await built.app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
+    const m = built.ctx.webhooks.enqueue('v0', { type: 'TRANSACTION' })
+    await built.ctx.webhooks.waitForIdle(2000)
+    expect(built.ctx.webhooks.get(m.id)).toMatchObject({ status: 'delivered', attempts: 1 })
+  })
+
+  it('a receiver that never answers times out (webhookTimeoutMs) as a retryable network error and does not hold back later notifications', async () => {
+    const types: string[] = []
+    const hanging = ((_url: any, init: any) => {
+      const type = JSON.parse(init.body).type as string
+      types.push(type)
+      if (type !== 'HANG') return Promise.resolve(new Response(null, { status: 200 }))
+      return new Promise((_resolve, reject) => { (init.signal as AbortSignal).addEventListener('abort', () => reject((init.signal as AbortSignal).reason)) })
+    }) as typeof fetch
+    const built = await start({ webhookUrl: 'http://sut.local', webhookBackoffMs: 5, webhookMaxAttempts: 2, webhookTimeoutMs: 50 }, hanging)
+    const hang = built.ctx.webhooks.enqueue('v0', { type: 'HANG' })
+    const next = built.ctx.webhooks.enqueue('v0', { type: 'NEXT' })
+    await built.ctx.webhooks.waitForIdle(2000)
+    expect(built.ctx.webhooks.get(hang.id)).toMatchObject({ status: 'failed', attempts: 2, lastStatus: null, lastError: 'timeout after 50 ms' })
+    expect(built.ctx.webhooks.get(next.id)).toMatchObject({ status: 'delivered', attempts: 1 })
+    expect(types).toEqual(['HANG', 'NEXT', 'HANG'])
+    expect(defaultConfig.webhookTimeoutMs).toBe(10_000)
+  })
+
+  it('a file database restart resumes queued notifications; without a webhook url they are kept as stored', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'shaype-wh-'))
+    const db = join(dir, 'x.db')
+    try {
+      const first: Call[] = []
+      const run1 = await startApp({ db, webhookUrl: 'http://sut.local', webhookBackoffMs: 60_000 }, { fetch: fakeFetch([500], first) })
+      const n = run1.ctx.webhooks.enqueue('v0', { type: 'TRANSACTION' })
+      await until(() => run1.ctx.webhooks.get(n.id)!.attempts === 1)
+      const m = run1.ctx.webhooks.enqueue('v0', { type: 'LATER' })
+      await until(() => run1.ctx.webhooks.get(m.id)!.attempts === 1 || first.length === 2)
+      await run1.app.close()
+
+      const run2 = await startApp({ db }, { fetch: fakeFetch([], []) })
+      expect((await run2.app.inject({ method: 'POST', url: '/_admin/notifications/flush' })).statusCode).toBe(200)
+      expect(run2.ctx.webhooks.get(n.id)).toMatchObject({ status: 'stored', attempts: 1 })
+      await run2.app.close()
+
+      const run3Calls: Call[] = []
+      const run3 = await startApp({ db, webhookUrl: 'http://sut.local' }, { fetch: fakeFetch([], run3Calls) })
+      await run3.ctx.webhooks.redeliver(n.id)
+      await run3.ctx.webhooks.waitForIdle(2000)
+      expect(run3.ctx.webhooks.get(n.id)).toMatchObject({ status: 'delivered', attempts: 2 })
+      await run3.app.close()
+
+      // restarted with a url while rows are queued: delivery resumes without any new notification
+      const run4Calls: Call[] = []
+      const run4 = await startApp({ db, webhookUrl: 'http://sut.local', webhookBackoffMs: 60_000 }, { fetch: fakeFetch([500], run4Calls) })
+      const k = run4.ctx.webhooks.enqueue('v0', { type: 'AGAIN' })
+      await until(() => run4.ctx.webhooks.get(k.id)!.attempts === 1)
+      await run4.app.close()
+      const run5Calls: Call[] = []
+      const run5 = await startApp({ db, webhookUrl: 'http://sut.local' }, { fetch: fakeFetch([], run5Calls) })
+      await run5.ctx.webhooks.waitForIdle(2000)
+      expect(run5.ctx.webhooks.get(k.id)).toMatchObject({ status: 'delivered', attempts: 2 })
+      expect(run5Calls.map((c) => c.body.type)).toContain('AGAIN')
+      await run5.app.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('a redeliver requested while the first delivery is in flight is sent once that delivery completes', async () => {
+    const calls: Call[] = []
+    const slow = (async (url: any, init: any) => {
+      calls.push({ url: String(url), body: JSON.parse(init.body) })
+      await new Promise((r) => setTimeout(r, 100))
+      return new Response(null, { status: 200 })
+    }) as typeof fetch
+    const built = await start({ webhookUrl: 'http://sut.local' }, slow)
+    const n = built.ctx.webhooks.enqueue('v0', { type: 'TRANSACTION' })
+    await until(() => calls.length === 1)
+    const re = await built.app.inject({ method: 'POST', url: `/_admin/notifications/${n.id}/redeliver` })
+    expect(re.json()).toMatchObject({ status: 'queued' })
+    await built.ctx.webhooks.waitForIdle(2000)
+    expect(calls.map((c) => c.body.idempotencyKey)).toEqual([n.id, n.id])
+    expect(built.ctx.webhooks.get(n.id)).toMatchObject({ status: 'delivered', attempts: 2 })
   })
 })

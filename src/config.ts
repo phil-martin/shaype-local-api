@@ -16,6 +16,8 @@ export interface Config {
   webhookMaxAttempts: number
   /** First retry delay; doubles on each attempt. */
   webhookBackoffMs: number
+  /** Per-request timeout of a webhook delivery; a timeout is retried like a network error. */
+  webhookTimeoutMs: number
   /** Milliseconds of simulated processing before async events (card settlement etc.) fire. 0 = immediate. */
   asyncDelayMs: number
   /** Risk level given to new accounts. Shaype defaults to HIGH (all limits 0) until the client sets LOW. */
@@ -46,6 +48,7 @@ export const defaultConfig: Config = {
   tokenTtlSeconds: 3600,
   webhookMaxAttempts: 5,
   webhookBackoffMs: 200,
+  webhookTimeoutMs: 10_000,
   asyncDelayMs: 0,
   defaultRiskLevel: 'HIGH',
   emitCustomerInactive: false,
@@ -63,6 +66,7 @@ export const CLI_OPTIONS = {
   'log-level': { type: 'string' },
   'webhook-max-attempts': { type: 'string' },
   'webhook-backoff-ms': { type: 'string' },
+  'webhook-timeout-ms': { type: 'string' },
   'async-delay-ms': { type: 'string' },
   'default-risk-level': { type: 'string' },
   'emit-customer-inactive': { type: 'boolean' },
@@ -83,6 +87,7 @@ Usage: shaype-local [options]
       --log-level <level>      pino level                      (SHAYPE_LOCAL_LOG_LEVEL, default info)
       --webhook-max-attempts   delivery attempts before giving up (default 5)
       --webhook-backoff-ms     first retry delay, doubling      (default 200)
+      --webhook-timeout-ms <ms> per-delivery request timeout  (SHAYPE_LOCAL_WEBHOOK_TIMEOUT_MS, default 10000)
       --async-delay-ms         delay for simulated async events (default 0)
       --default-risk-level     HIGH|LOW for new accounts       (SHAYPE_LOCAL_DEFAULT_RISK_LEVEL, default HIGH — Shaype's default; HIGH refuses all money movement until set LOW)
       --emit-customer-inactive send CUSTOMER_STATUS_UPDATED {INACTIVE} for the platform closure cascade (SHAYPE_LOCAL_EMIT_CUSTOMER_INACTIVE, default off)
@@ -115,6 +120,7 @@ export function loadConfig(argv: string[] = [], env: NodeJS.ProcessEnv = {}): Co
     tokenTtlSeconds: defaultConfig.tokenTtlSeconds,
     webhookMaxAttempts: num('webhook-max-attempts', 'SHAYPE_LOCAL_WEBHOOK_MAX_ATTEMPTS', defaultConfig.webhookMaxAttempts),
     webhookBackoffMs: num('webhook-backoff-ms', 'SHAYPE_LOCAL_WEBHOOK_BACKOFF_MS', defaultConfig.webhookBackoffMs),
+    webhookTimeoutMs: num('webhook-timeout-ms', 'SHAYPE_LOCAL_WEBHOOK_TIMEOUT_MS', defaultConfig.webhookTimeoutMs),
     asyncDelayMs: num('async-delay-ms', 'SHAYPE_LOCAL_ASYNC_DELAY_MS', defaultConfig.asyncDelayMs),
     defaultRiskLevel: riskLevel(str('default-risk-level', 'SHAYPE_LOCAL_DEFAULT_RISK_LEVEL', defaultConfig.defaultRiskLevel)),
     emitCustomerInactive: values['emit-customer-inactive'] === true || envTrue(env.SHAYPE_LOCAL_EMIT_CUSTOMER_INACTIVE),
