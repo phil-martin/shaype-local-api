@@ -535,6 +535,11 @@ describe('getDirectDebitsV1 / V0: listing', () => {
     expect((await listDd({ fromUtc: addDays(day, 1), toUtc: addDays(day, 1), offset: 0, limit: 10, senderAccountNumber: a.accountNumber! })).json()).toEqual([])
     const wide = (await listDd({ fromUtc: addDays(day, -1), toUtc: addDays(day, 1), offset: 0, limit: 1000, senderAccountNumber: b.accountNumber! })).json() as DeDetailsV1[]
     expect(wide.map((d) => d.transactionHayId)).toEqual([second.transactionId])
+    // an open-ended range: the last representable day is still an inclusive bound
+    for (const version of ['v1', 'v0'] as const) {
+      const open = (await listDd({ fromUtc: '1970-01-01', toUtc: '9999-12-31', offset: 0, limit: 1000, ...(version === 'v1' ? { senderAccountNumber: b.accountNumber! } : {}) }, version)).json() as DeDetailsV1[]
+      expect(open.map((d) => d.transactionHayId), version).toContain(second.transactionId)
+    }
   })
 
   it('rejects an inverted range, a limit outside 1..1000, a negative offset, a bad date and an out-of-enum status (400)', async () => {

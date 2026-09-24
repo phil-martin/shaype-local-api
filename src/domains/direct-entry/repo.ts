@@ -71,7 +71,7 @@ export interface ScheduledPayment {
 export interface DeListFilter {
   /** inclusive isoUtc lower bound on created_at */
   from: string
-  /** exclusive isoUtc upper bound on created_at */
+  /** inclusive isoUtc upper bound on created_at */
   to: string
   statuses?: readonly DeStatus[]
   senderAccountNumber?: string
@@ -122,9 +122,9 @@ export class DirectEntryRepo {
     return r ? toInstruction(r) : undefined
   }
 
-  /** Creation-time ascending within [from, to) (docs/superpowers spec §4: lists ordered by creation time ascending). */
+  /** Creation-time ascending within [from, to] (docs/superpowers spec §4: lists ordered by creation time ascending). */
   listInstructions(f: DeListFilter): DeInstruction[] {
-    const where = ['created_at >= ?', 'created_at < ?']
+    const where = ['created_at >= ?', 'created_at <= ?']
     const args: unknown[] = [f.from, f.to]
     if (f.statuses?.length) { where.push(`status IN (${f.statuses.map(() => '?').join(',')})`); args.push(...f.statuses) }
     if (f.senderAccountNumber !== undefined) { where.push('sender_account_number = ?'); args.push(f.senderAccountNumber) }

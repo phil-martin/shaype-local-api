@@ -17,7 +17,7 @@ import type { Account } from '../accounts/repo.js'
 import type { ClosureCheckerError } from '../accounts/service.js'
 import type { LedgerOutcome, PostInput } from '../transactions/service.js'
 import { requestCents } from '../transactions/service.js'
-import { addDays, isIsoDate, nextBusinessDay } from './dates.js'
+import { isIsoDate, nextBusinessDay } from './dates.js'
 import { DE_TERMINAL, type DeInstruction, type DeStatus, type DeStatusV0, type DirectEntryRepo } from './repo.js'
 import { ScheduledPaymentsService } from './schedules.js'
 
@@ -130,7 +130,8 @@ export class DirectEntryService {
     if (!Number.isInteger(q.offset) || q.offset < 0) throw badRequest('BAD_REQUEST: offset must be 0 or greater')
     return this.repo.listInstructions(compact({
       from: `${q.fromUtc}T00:00:00.000000Z`,
-      to: `${addDays(q.toUtc, 1)}T00:00:00.000000Z`,
+      // inclusive end of the day: adding a day to 9999-12-31 would leave the 4-digit year range
+      to: `${q.toUtc}T23:59:59.999999Z`,
       statuses,
       senderAccountNumber: q.senderAccountNumber,
       limit: q.limit,
