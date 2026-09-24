@@ -6,6 +6,7 @@ import { assertValidNotification } from './webhook-schema.js'
 import type { BuiltServer } from '../src/server.js'
 import { LOCAL_PRODUCT_ID } from '../src/domains/accounts/index.js'
 import { BRANCH_IDENTIFIER_FORMAT_MESSAGE, LOCAL_SERVICER_BIC, type PayIdService } from '../src/domains/payid-npp/index.js'
+import { TIMER_SQL } from '../src/domains/payid-npp/repo.js'
 
 type S = components['schemas']
 type HayAccount = S['HayAccount']
@@ -623,6 +624,13 @@ describe('NPP timers on the virtual clock', () => {
     expect(await status(used)).toBe('ACTIVE')
     await mustSetStatus(idle, { payIdStatus: 'ACTIVE' })
     expect(await status(idle)).toBe('ACTIVE')
+  })
+
+  it('each timer query is served by an index on (status, cutoff expression), not a scan of every row of the status', () => {
+    for (const [timer, sql] of Object.entries(TIMER_SQL)) {
+      const plan = (built.ctx.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all('2026-01-01T00:00:00.000000Z') as { detail: string }[]).map((r) => r.detail).join('; ')
+      expect(plan, timer).toMatch(/USING INDEX \w+ \(status=\? AND <expr><\?\)/)
+    }
   })
 })
 
