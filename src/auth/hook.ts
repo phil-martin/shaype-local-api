@@ -18,17 +18,20 @@ export function isB2bRequest(req: FastifyRequest): boolean {
   return PROTECTED.test(req.url.split('?')[0] ?? '')
 }
 
+/** The 403 message for a request without a valid bearer token, or null when its token is valid. */
+export async function bearerFailure(req: FastifyRequest, tokens: TokenService): Promise<string | null> {
+  const header = req.headers.authorization
+  if (!header || !header.startsWith('Bearer ')) return 'FORBIDDEN: Missing bearer token'
+  const result = await tokens.verify(header.slice(7).trim())
+  if (result.ok) return null
+  return result.reason === 'expired' ? 'FORBIDDEN: Token expired' : 'FORBIDDEN: Invalid token'
+}
+
 export function registerAuthHook(app: FastifyInstance, ctx: AppContext, tokens: TokenService): void {
   app.addHook('onRequest', async (req, reply) => {
     if (!ctx.config.auth) return
     if (!isB2bRequest(req)) return
-    const header = req.headers.authorization
-    if (!header || !header.startsWith('Bearer ')) {
-      return reply.code(403).send(errorBody(403, 'FORBIDDEN: Missing bearer token'))
-    }
-    const result = await tokens.verify(header.slice(7).trim())
-    if (!result.ok) {
-      return reply.code(403).send(errorBody(403, result.reason === 'expired' ? 'FORBIDDEN: Token expired' : 'FORBIDDEN: Invalid token'))
-    }
+    const failure = await bearerFailure(req, tokens)
+    if (failure) return reply.code(403).send(errorBody(403, failure))
   })
 }

@@ -69,6 +69,18 @@ describe('client-credentials auth', () => {
     }
   })
 
+  it('a router-level URL error on a B2B path without a token is a 403, with a token a 400 ErrorResponse', async () => {
+    const token = await getToken(built.app)
+    for (const url of ['/v0/accounts/%ZZ', `/v0/accounts/${'a'.repeat(600)}`]) {
+      const anon = await built.app.inject({ method: 'GET', url })
+      expect(anon.statusCode, anon.body).toBe(403)
+      expect(anon.json()).toMatchObject({ status: '403', message: 'FORBIDDEN: Missing bearer token' })
+      const authed = await built.app.inject({ method: 'GET', url, headers: { authorization: `Bearer ${token}` } })
+      expect(authed.statusCode, authed.body).toBe(400)
+      expect(authed.json()).toMatchObject({ status: '400', message: expect.stringMatching(/^BAD_REQUEST: /) })
+    }
+  })
+
   it('leaves /_admin and /oauth2 unprotected', async () => {
     const res = await built.app.inject({ method: 'GET', url: '/_admin/health' })
     expect(res.statusCode).toBe(200)

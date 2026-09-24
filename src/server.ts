@@ -1,7 +1,7 @@
-import Fastify, { type FastifyInstance } from 'fastify'
+import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify'
 import { createRequire } from 'node:module'
 import { registerAdminRoutes } from './admin/routes.js'
-import { registerAuthHook } from './auth/hook.js'
+import { bearerFailure, registerAuthHook } from './auth/hook.js'
 import { registerAuthRoutes } from './auth/routes.js'
 import { TokenService } from './auth/token.js'
 import { defaultConfig, type Config } from './config.js'
@@ -26,12 +26,26 @@ export interface BuiltServer {
 
 export async function buildServer(overrides: Partial<Config> = {}, deps: { fetch?: typeof fetch } = {}): Promise<BuiltServer> {
   const config: Config = { ...defaultConfig, ...overrides }
+  const clock = new Clock()
+  const tokens = new TokenService(clock, config.tokenTtlSeconds)
   const app = Fastify({
     logger: { level: config.logLevel },
     // PayID path values are free text (EMAIL up to 256 chars, ORGANISATION names); Fastify's 100-char
     // default would refuse them in the router, so the domain can 422 instead. (routerOptions: the top-level
     // option is deprecated, FSTDEP022.)
     routerOptions: { maxParamLength: 512 },
+    // A malformed percent-escape or an over-long path parameter is refused by the router before any hook or
+    // handler runs; answer it like any other input fault (400 ErrorResponse, spec §4), after the same bearer
+    // check the auth hook applies (403) to everything outside /_admin and /oauth2.
+    frameworkErrors: (err, req, res) => {
+      const reply = res as unknown as FastifyReply
+      void (async () => {
+        const path = req.raw.url ?? ''
+        const failure = config.auth && !/^\/(_admin|oauth2)(\/|$)/.test(path) ? await bearerFailure(req, tokens) : null
+        if (failure) return reply.code(403).send(errorBody(403, failure))
+        return reply.code(400).send(errorBody(400, `BAD_REQUEST: ${err.message}`))
+      })()
+    },
     ajv: {
       customOptions: {
         coerceTypes: 'array',
@@ -45,13 +59,11 @@ export async function buildServer(overrides: Partial<Config> = {}, deps: { fetch
     },
   })
 
-  const clock = new Clock()
   const db = openDatabase(config.db)
   const events = new DomainEvents()
   const webhooks = new WebhookDispatcher(db, config, clock, app.log, deps.fetch)
   const scheduler = new Scheduler(clock, config.asyncDelayMs, app.log, db)
   const ctx: AppContext = { config, db, clock, log: app.log, events, webhooks, scheduler, services: {} as AppContext['services'], handled: new Set() }
-  const tokens = new TokenService(clock, config.tokenTtlSeconds)
 
   for (const s of requestComponents) app.addSchema(s)
   for (const s of responseComponents) app.addSchema(s)

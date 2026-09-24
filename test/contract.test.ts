@@ -34,6 +34,16 @@ describe('contract coverage', () => {
     expect(out.stderr).not.toMatch(/FSTDEP|DeprecationWarning|FastifyWarning/)
   })
 
+  it('router-level URL errors (malformed percent-escape, over-long path parameter) answer a 400 ErrorResponse', async () => {
+    for (const url of ['/v0/accounts/%ZZ', `/v0/accounts/${'a'.repeat(600)}`, '/v0/payids/%E0%A4%A/resolve?payIdType=EMAIL', `/v1/payto/mandates/${'b'.repeat(700)}`]) {
+      const res = await built.app.inject({ method: 'GET', url })
+      expect(res.statusCode, `${url.slice(0, 40)} ${res.body}`).toBe(400)
+      const body = res.json()
+      expect(Object.keys(body).sort()).toEqual(['details', 'message', 'status', 'traceId'])
+      expect(body).toMatchObject({ status: '400', message: expect.stringMatching(/^BAD_REQUEST: /) })
+    }
+  })
+
   it('returns the ErrorResponse envelope for unknown routes', async () => {
     const res = await built.app.inject({ method: 'GET', url: '/v9/nothing' })
     expect(res.statusCode).toBe(404)
