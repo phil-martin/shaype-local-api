@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { operations } from '../src/contract/index.js'
@@ -70,6 +71,39 @@ function sampleParam(op: { params?: unknown }, name: string): string {
   if (schema?.pattern?.includes('d{6}')) return '636220'
   return 'sample'
 }
+
+describe('stubs', () => {
+  it('stub ops whose body carries idempotencyKey replay the stored response and refuse the key with another body (422 IDEMPOTENCY_KEY_REUSED)', async () => {
+    const key = randomUUID()
+    const quote = (amount: number) => built.app.inject({ method: 'POST', url: '/v1/fx/quotes', payload: { idempotencyKey: key, amount, buyCurrency: 'USD', sellCurrency: 'AUD', fixedSide: 'SELL', sellAccountId: randomUUID() } })
+    const body = { idempotencyKey: key, amount: 10, buyCurrency: 'USD', fixedSide: 'SELL', sellAccountId: randomUUID() }
+    const first = await built.app.inject({ method: 'POST', url: '/v1/fx/quotes', payload: body })
+    expect(first.statusCode, first.body).toBe(200)
+    await new Promise((r) => setTimeout(r, 5))
+    const again = await built.app.inject({ method: 'POST', url: '/v1/fx/quotes', payload: body })
+    expect(again.statusCode).toBe(200)
+    expect(again.json()).toEqual(first.json())
+    const reused = await quote(99)
+    expect(reused.statusCode, reused.body).toBe(422)
+    expect(reused.json().message).toMatch(/^IDEMPOTENCY_KEY_REUSED/)
+    const convKey = randomUUID()
+    expect((await built.app.inject({ method: 'POST', url: '/v1/fx/conversions', payload: { idempotencyKey: convKey, quoteId: randomUUID() } })).statusCode).toBe(200)
+    expect((await built.app.inject({ method: 'POST', url: '/v1/fx/conversions', payload: { idempotencyKey: convKey, quoteId: randomUUID() } })).statusCode).toBe(422)
+  })
+
+  it('an optional body sent to a stub (enrolCard) is validated like a domain-owned one (400)', async () => {
+    const url = `/v0/cards/${randomUUID()}/ctp`
+    for (const payload of ['[]', '"s"', '42', JSON.stringify({ email: 'not-an-email' })]) {
+      const res = await built.app.inject({ method: 'POST', url, headers: { 'content-type': 'application/json' }, payload })
+      expect(res.statusCode, `${payload} -> ${res.body}`).toBe(400)
+      expect(res.json().message).toMatch(/^BAD_REQUEST: body/)
+    }
+    for (const payload of [undefined, '{}', JSON.stringify({ email: 'mary@example.com' })]) {
+      const res = await built.app.inject({ method: 'POST', url, ...(payload === undefined ? {} : { headers: { 'content-type': 'application/json' }, payload }) })
+      expect(res.statusCode, `${payload} -> ${res.body}`).toBe(200)
+    }
+  })
+})
 
 describe('response contract validation (validateResponses)', () => {
   const probe = async (validateResponses?: boolean) => {
