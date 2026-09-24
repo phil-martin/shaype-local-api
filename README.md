@@ -5,7 +5,7 @@
 
 **Full-fidelity operations: 144 / 144 (100%)**  `████████████████████`
 
-All 169 operations of the spec are routed and schema-validated; the 25 stub-only operations answer with deterministic spec-shaped data. Test files: 16. Updated 2026-09-24 at `9190838`.
+All 169 operations of the spec are routed and schema-validated; the 25 stub-only operations answer with deterministic spec-shaped data. Test files: 16. Updated 2026-09-24 at `0656d4d`.
 
 | Section | Implemented | Progress | Status |
 |---|---|---|---|
@@ -217,18 +217,18 @@ curl -s -X POST $BASE/v1/transactions/credit -H 'content-type: application/json'
   "counterpartName": "Payroll", "description": "Top-up", "transactionChannel": "MANUAL_ADJUSTMENT"
 }'                                                   # {"outcome":"ACCEPTED","transactionId":"…"}
 
-# 4. virtual card (ACTIVE at once); online (card-not-present) payments are off by default
+# 4. virtual card (ACTIVE at once)
 CARD=$(curl -s -X POST $BASE/v0/cards/create -H 'content-type: application/json' -d '{
   "idempotencyKey": "'$(uuid)'", "accountId": "'$ACCOUNT'", "customerHayId": "'$CUSTOMER'", "cardType": "VIRTUAL",
   "firstName": "Jane", "lastName": "Citizen", "email": "jane@example.com", "pin": "1234",
   "phoneNumber": { "countryCodePrefix": "61", "numberAfterPrefix": "412345678" },
   "deliveryAddress": { "line1": "395 Bourke St", "townOrCity": "Melbourne", "administrativeRegion": "VIC", "postcode": "3000", "countryCodeIso": "AUS" }
 }')
-CARD_ID=$(echo "$CARD" | jq -r .cardHayId); CARD_TOKEN=$(echo "$CARD" | jq -r .cardToken)
-curl -s -X PATCH $BASE/v0/cards/$CARD_ID/payment-preferences -H 'content-type: application/json' \
-  -d '{ "cardNotPresentEnabled": true }'
+CARD_TOKEN=$(echo "$CARD" | jq -r .cardToken)
 
-# 5. mock purchase (Utilities API): a hold of 25.50, then its settlement
+# 5. mock purchase (Utilities API): a hold of 25.50, then its settlement. Without cardUsage it is a chip,
+#    card-present payment; online (card-not-present) payments are off by default and need
+#    PATCH /v0/cards/{id}/payment-preferences { "cardNotPresentEnabled": true } first
 curl -s -X POST $BASE/v0/utils/generate-card-transaction -H 'content-type: application/json' -d '{
   "amount": -25.50, "cardToken": "'$CARD_TOKEN'",
   "merchantDetails": { "merchantName": "IGA (Mt Cotton)", "merchantId": "000009493578577", "merchantCategoryCode": "5411" }
