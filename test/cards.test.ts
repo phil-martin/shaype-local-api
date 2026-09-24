@@ -747,6 +747,45 @@ describe('expiry: reminders and the EXPIRED flip', () => {
   })
 })
 
+describe('transition table: every card operation from every status', () => {
+  type From = 'ACTIVE' | 'AWAITING_ACTIVATION' | 'BLOCKED' | 'INACTIVE' | 'EXPIRED'
+  const FROM: From[] = ['ACTIVE', 'AWAITING_ACTIVATION', 'BLOCKED', 'INACTIVE', 'EXPIRED']
+  /** HTTP status per starting status (same order as FROM); `after` = the card's status after a success. */
+  const TABLE: { op: string; call: (id: string) => Promise<{ statusCode: number; body: string }>; codes: number[]; after?: (From | 'SAME')[] }[] = [
+    { op: 'activate', call: (id) => act(id, 'activate'), codes: [422, 200, 422, 422, 422], after: ['SAME', 'ACTIVE', 'SAME', 'SAME', 'SAME'] },
+    { op: 'block', call: (id) => act(id, 'block'), codes: [200, 200, 200, 422, 422], after: ['BLOCKED', 'BLOCKED', 'BLOCKED', 'SAME', 'SAME'] },
+    { op: 'unblock', call: (id) => act(id, 'unblock', { note: 'x' }), codes: [422, 422, 200, 422, 422], after: ['SAME', 'SAME', 'ACTIVE', 'SAME', 'SAME'] },
+    { op: 'cancel', call: (id) => act(id, 'cancel'), codes: [200, 200, 200, 200, 200], after: ['INACTIVE', 'INACTIVE', 'INACTIVE', 'INACTIVE', 'INACTIVE'] },
+    { op: 'convert', call: (id) => act(id, 'convert'), codes: [200, 422, 422, 422, 422], after: ['AWAITING_ACTIVATION', 'SAME', 'SAME', 'SAME', 'SAME'] },
+    { op: 're-issue', call: (id) => act(id, 're-issue', { idempotencyKey: randomUUID() }), codes: [200, 422, 200, 422, 200], after: ['INACTIVE', 'SAME', 'INACTIVE', 'SAME', 'INACTIVE'] },
+    { op: 'renew', call: (id) => act(id, 'renew', {}), codes: [200, 422, 422, 422, 422], after: ['SAME', 'SAME', 'SAME', 'SAME', 'SAME'] },
+    { op: 'preferences', call: (id) => app.inject({ method: 'PATCH', url: `/v0/cards/${id}/payment-preferences`, payload: { cardNotPresentEnabled: true } }), codes: [200, 422, 422, 422, 422] },
+    { op: 'change PIN', call: (id) => app.inject({ method: 'PUT', url: `/v0/cards/${id}/pin`, payload: { newPin: '4321' } }), codes: [200, 200, 422, 422, 422] },
+    { op: 'PIN unblock', call: (id) => act(id, 'pin/unblock'), codes: [200, 200, 200, 422, 422] },
+    { op: 'CVV unblock', call: (id) => act(id, 'cvv/unblock'), codes: [200, 200, 200, 422, 422] },
+    { op: 'rewards', call: (id) => act(id, 'rewards', { status: 'ACTIVE' }), codes: [201, 201, 201, 422, 422] },
+  ]
+
+  it.each(TABLE.map((row) => [row.op, row] as const))('%s', async (_op, row) => {
+    const customer = await newCustomer()
+    const account = await newAccount(customer)
+    for (const [i, from] of FROM.entries()) {
+      const c = await newCard(account, customer, { cardType: from === 'AWAITING_ACTIVATION' ? 'PHYSICAL' : 'VIRTUAL' })
+      const id = c.cardHayId!
+      // inside the renewal window for the live statuses; long past for EXPIRED
+      svc.setExpiryDate(id, from === 'EXPIRED' ? '2020-01-31' : endOfNextMonth())
+      if (from === 'BLOCKED') expect((await act(id, 'block')).statusCode).toBe(200)
+      if (from === 'INACTIVE') expect((await act(id, 'cancel')).statusCode).toBe(200)
+      expect(await status(id), `${row.op} setup`).toBe(from)
+      const res = await row.call(id)
+      expect(res.statusCode, `${row.op} from ${from}: ${res.body}`).toBe(row.codes[i])
+      if (res.statusCode === 422) expect(res.body).toMatch(/INVALID_CARD_(STATUS|TYPE)|RENEWAL_WINDOW/)
+      const after = row.after?.[i]
+      if (after) expect(await status(id), `${row.op} from ${from}: status after`).toBe(after === 'SAME' ? from : after)
+    }
+  })
+})
+
 describe('account closure cascade (ctx.services.cards.cancelAllForAccount)', () => {
   it('closeAccount voids every card that is not INACTIVE with CARD_STATUS_CHANGE {INACTIVE} (PLATFORM) and restricts to one cardholder when asked', async () => {
     const customer = await newCustomer()
