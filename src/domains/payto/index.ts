@@ -57,7 +57,7 @@
  *   REJECTED and a PaymentReasonCode (mandate not ACTIVE AG01, non-ADHOC mandate AG03, before validity DT04,
  *   zero AM01, non-AUD AM03, above maximumAmount AM21, missing amount with no paymentTerms.amount AM12,
  *   external debtor AB01 — the staging "RJCT PSR" —, debtor funds AM04 / blocked AC06 / closed AC05 / other
- *   limit AG07, creditor MAX_BALANCE AC14). A local debtor with funds settles synchronously:
+ *   limit AG07, creditor MAX_BALANCE / daily top-up caps AC14). A local debtor with funds settles synchronously:
  *   INTERBANK_TRANSFER_OUT on the debtor and INTERBANK_TRANSFER_IN on a local creditor through
  *   ctx.services.transactions, both with mandatePaymentDetails, originType MANDATE_PAYMENT and originId =
  *   mandateId, then ACCEPTED_AND_SETTLED. MANDATE_PAYMENT goes to the Initiator side once, when the status

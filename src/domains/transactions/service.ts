@@ -211,8 +211,15 @@ const DEBIT_LIMITS: Partial<Record<LedgerType, InternalLimitType[]>> = {
   CARD_PRESENT_PAYMENT: CARD_LIMITS,
   CARD_NOT_PRESENT_PAYMENT: CARD_LIMITS,
 }
+/**
+ * Inbound cash-transfer caps (00-balance L7: inbound DE / NPP, INTERNAL transfer-in, general credit):
+ * TOP_UP_PER_DAY covers every one of them, BANK_TRANSFER_TOP_UP_PER_DAY the bank-rail credits
+ * (INTERBANK_TRANSFER_IN, PayTo creditor legs included) [decision; which type governs which rail is open].
+ */
 const CREDIT_EXTRA_LIMITS: Partial<Record<LedgerType, InternalLimitType[]>> = {
-  INTERBANK_TRANSFER_IN: ['BANK_TRANSFER_TOP_UP_PER_DAY'],
+  INTERBANK_TRANSFER_IN: ['TOP_UP_PER_DAY', 'BANK_TRANSFER_TOP_UP_PER_DAY'],
+  INTRABANK_TRANSFER_IN: ['TOP_UP_PER_DAY'],
+  GENERAL_CREDIT: ['TOP_UP_PER_DAY'],
 }
 
 /** Channels of the Australian domestic rails (NPP, Direct Entry, RTGS, BPAY and their returns), which FX child accounts are not on. */
@@ -523,7 +530,6 @@ export class TransactionsService {
       type: 'INTRABANK_TRANSFER_IN',
       channel: 'HAAS_TRANSFER_INTERNAL_IN',
       counterpart: { accountId: sender.id, customerId: senderCustomer.id, name: spec.senderName ?? customerName(senderCustomer) },
-      limits: ['MAX_BALANCE'],
     })
     const breached = this.checkLimits(out) ?? this.checkLimits(into) ?? this.checkFunds(out)
     if (breached) return refused(breached)

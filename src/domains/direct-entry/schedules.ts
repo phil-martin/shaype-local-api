@@ -325,7 +325,6 @@ export class ScheduledPaymentsService {
       type: 'INTRABANK_TRANSFER_IN',
       channel: 'HAAS_TRANSFER_INTERNAL_IN',
       counterpart: compact({ accountId: account.id, customerId: s.customerId, name: (payer && customerName(payer)) || undefined }),
-      limits: ['MAX_BALANCE'],
     })
     const breached = this.ledger.checkLimits(out) ?? this.ledger.checkLimits(into) ?? this.ledger.checkFunds(out)
     if (breached) return refuse(breached)

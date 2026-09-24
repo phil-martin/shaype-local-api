@@ -898,7 +898,6 @@ export class PayToService {
         type: 'INTERBANK_TRANSFER_IN' as const,
         channel: 'CUSCAL_NPP_TRANSFER_IN' as const,
         counterpart: compact({ accountId: debtor.id, customerId: this.primaryCustomer(debtor), name: debtorName, basicAccountNumber: basicAccountNumber(m.debtor.accountNumber) }),
-        limits: ['MAX_BALANCE' as const],
       })
       : undefined
     const refusedOut = this.transactions.evaluate(out)

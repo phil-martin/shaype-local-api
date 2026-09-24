@@ -76,7 +76,9 @@ async function credit(accountHayId: string, amount: number): Promise<void> {
 /** A funded LOW-risk account (credit posted, so ACTIVE). */
 async function fundedAccount(amount: number, opts: { holder?: string } = {}): Promise<HayAccount> {
   const a = await newAccount(opts)
-  await credit(a.accountHayId!, amount)
+  // above the 100,000 daily top-up cap the fixture credits through the engine with MAX_BALANCE only
+  if (amount > 100_000) built.ctx.services.transactions.post({ accountId: a.accountHayId!, amountCents: Math.round(amount * 100), type: 'GENERAL_CREDIT', channel: 'MANUAL_ADJUSTMENT', counterpart: { name: 'Payroll' }, limits: ['MAX_BALANCE'] })
+  else await credit(a.accountHayId!, amount)
   await flush()
   return getAccount(a.accountHayId!)
 }

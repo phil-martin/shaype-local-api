@@ -996,6 +996,26 @@ describe('makeAdhocPayment', () => {
     expect(svc.instructions(id)).toHaveLength(1)
   })
 
+  it('the local creditor leg is an inbound bank transfer: checked against and counted toward BANK_TRANSFER_TOP_UP_PER_DAY (AC14 when breached)', async () => {
+    const creditor = await newAccount()
+    const debtor = await newAccount({ fund: 1000 })
+    expect((await app.inject({ method: 'PUT', url: `/v1/accounts/${creditor.accountHayId}/limits/BANK_TRANSFER_TOP_UP_PER_DAY`, payload: { limitAmount: 50 } })).statusCode).toBe(200)
+    const { id } = await activeMandate({ creditor, debtor })
+    expect((await adhoc(id, { amount: AUD(45) })).transactionStatus).toBe('ACCEPTED_AND_SETTLED')
+    const second = await adhoc(id, { amount: AUD(45) })
+    expect(second.transactionStatus).toBe('REJECTED')
+    expect(svc.instruction(id, second.instructionId).reasonCode).toBe('AC14')
+    expect((await getAccount(creditor.accountHayId!)).totalBalance).toBe(45)
+    expect((await getAccount(debtor.accountHayId!)).totalBalance).toBe(955)
+    // counted: an inbound NPP credit of 10 on top of the PayTo 45 breaches the cap of 50
+    const npp = await app.inject({ method: 'POST', url: '/v0/utils/generate-npp-inbound', payload: {
+      idempotencyKey: randomUUID(), amount: 10, description: 'npp', receiverBsb: creditor.bsb, receiverAccountNumber: creditor.accountNumber, receiverName: 'Me',
+      senderBsb: '302227', senderAccountNumber: '112836327', senderName: 'Andy',
+    } })
+    expect(npp.statusCode, npp.body).toBe(200)
+    expect((await getAccount(creditor.accountHayId!)).totalBalance).toBe(45)
+  })
+
   it('rejects (200, REJECTED, reason code) instead of erroring: funds, external debtor, inactive mandate, non-ADHOC, above maximum, missing amount', async () => {
     const creditor = await newAccount()
     const poor = await newAccount({ fund: 5 })

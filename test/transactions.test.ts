@@ -87,10 +87,11 @@ async function debit(accountHayId: string, amount: number, overrides: Partial<Cr
   expect(res.statusCode, res.body).toBe(200)
   return res.json()
 }
-/** A funded LOW-risk account (credit posted, so ACTIVE). */
+/** A funded LOW-risk account (credit posted, so ACTIVE); above the 100,000 daily top-up cap the fixture credits through the engine with MAX_BALANCE only. */
 async function fundedAccount(amount: number, holder?: string): Promise<HayAccount> {
   const a = await newAccount({ holder })
-  expect((await credit(a.accountHayId!, amount)).outcome).toBe('ACCEPTED')
+  if (amount > 100_000) expect(svc.post({ accountId: a.accountHayId!, amountCents: Math.round(amount * 100), type: 'GENERAL_CREDIT', channel: 'MANUAL_ADJUSTMENT', counterpart: { name: 'Payroll Pty Ltd' }, limits: ['MAX_BALANCE'] }).outcome).toBe('ACCEPTED')
+  else expect((await credit(a.accountHayId!, amount)).outcome).toBe('ACCEPTED')
   return getAccount(a.accountHayId!)
 }
 async function getTransaction(id: string): Promise<FinancialTransaction> {
@@ -879,7 +880,7 @@ describe('services.transactions.post (the engine other domains call)', () => {
     const a = await newAccount({ holder })
     const r = svc.post({ accountId: a.accountHayId!, amountCents: 20_000, type: 'INTERBANK_TRANSFER_IN', channel: 'CUSCAL_NPP_TRANSFER_IN', counterpart: { name: 'Andy', basicAccountNumber: { accountNumber: '12345678', branchNumber: '062000' } }, description: 'withdrawal', category: 'BANK_TRANSFER', reference: 'NPP-1', externalIdentifiers: [{ source: 'npp', type: 'trace-lifecycle', value: '123456789012' }] })
     expect(r.outcome).toBe('ACCEPTED')
-    expect(r.transaction).toMatchObject({ limitKinds: ['MAX_BALANCE', 'BANK_TRANSFER_TOP_UP_PER_DAY'], webhookType: 'INTERBANK_TRANSFER_IN', customerId: holder })
+    expect(r.transaction).toMatchObject({ limitKinds: ['MAX_BALANCE', 'TOP_UP_PER_DAY', 'BANK_TRANSFER_TOP_UP_PER_DAY'], webhookType: 'INTERBANK_TRANSFER_IN', customerId: holder })
     expect(await getTransaction(r.transaction!.id)).toMatchObject({ type: 'INTERBANK_TRANSFER_IN', externalIdentifiers: [{ source: 'npp', type: 'trace-lifecycle', value: '123456789012' }], counterpartDetails: { name: 'Andy', basicAccountNumber: { accountNumber: '12345678', branchNumber: '062000' } } })
     const ev = (await txEvents(a.accountHayId!)).at(-1)
     expect(ev).toMatchObject({ actionOwner: 'PLATFORM', transactionEvent: { transactionType: 'INTERBANK_TRANSFER_IN', currencyAmount: AUD(200), counterpartName: 'Andy', category: 'BANK_TRANSFER', description: 'withdrawal', reference: 'NPP-1', externalIdentifiers: [{ source: 'npp', identifierType: 'trace-lifecycle', value: '123456789012' }] } })
@@ -973,6 +974,29 @@ describe('services.transactions.post (the engine other domains call)', () => {
     await advanceClock(DAY_MS + 1000)
     expect(topUp(1).outcome).toBe('ACCEPTED')
     expect((await getAccount(a.accountHayId!)).totalBalance).toBe(100.01)
+  })
+})
+
+describe('TOP_UP_PER_DAY', () => {
+  it('caps and counts every inbound credit of a rolling day: general credit, NPP / DE credit, internal transfer-in (REFUSED_LIMIT_BREACH on REST)', async () => {
+    const holder = await newCustomer()
+    const a = await newAccount({ holder })
+    expect((await app.inject({ method: 'PUT', url: `/v1/accounts/${a.accountHayId}/limits/TOP_UP_PER_DAY`, payload: { limitAmount: 100 } })).statusCode).toBe(200)
+    expect((await credit(a.accountHayId!, 50)).outcome).toBe('ACCEPTED')
+    const npp = (cents: number) => svc.post({ accountId: a.accountHayId!, amountCents: cents, type: 'INTERBANK_TRANSFER_IN', channel: 'CUSCAL_NPP_TRANSFER_IN', counterpart: { name: 'Andy' } })
+    expect(npp(3_000).outcome).toBe('ACCEPTED')
+    const sender = await fundedAccount(100, holder)
+    const transfer = (amount: number) => post(`/v1/accounts/${sender.accountHayId}/transfer`, {
+      idempotencyKey: randomUUID(), senderCustomerHayId: holder, amount, description: 'move', transferType: 'INTERNAL',
+      internalTransfer: { recipientAccountHayId: a.accountHayId!, recipientName: 'Me', senderName: 'Me' },
+    })
+    expect((await transfer(30)).json()).toEqual({ outcome: 'REFUSED_LIMIT_BREACH' })
+    expect((await transfer(20)).json().outcome).toBe('ACCEPTED')
+    expect(await credit(a.accountHayId!, 0.01)).toEqual({ outcome: 'REFUSED_LIMIT_BREACH' })
+    expect(npp(1)).toEqual({ outcome: 'REFUSED_DAILY_TOP_UP_LIMIT_BREACHED' })
+    expect((await getAccount(a.accountHayId!)).totalBalance).toBe(100)
+    await advanceClock(DAY_MS + 1000)
+    expect((await credit(a.accountHayId!, 0.01)).outcome).toBe('ACCEPTED')
   })
 })
 

@@ -5,7 +5,7 @@
 
 **Full-fidelity operations: 143 / 143 (100%)**  `████████████████████`
 
-All 169 operations of the spec are routed and schema-validated; the 26 stub-only operations answer with deterministic spec-shaped data. Test files: 16. Updated 2026-09-24 at `ba76981`.
+All 169 operations of the spec are routed and schema-validated; the 26 stub-only operations answer with deterministic spec-shaped data. Test files: 16. Updated 2026-09-24 at `5d4954a`.
 
 | Section | Implemented | Progress | Status |
 |---|---|---|---|
@@ -156,7 +156,7 @@ node -e "require('node:http').createServer((req, res) => { let b = ''; req.on('d
 | A BSB that fails | `999999`: `verifyBranchIdentifier` answers `{ "enabled": false }`, `checkBsbIsSupportedByPayTo` `{ "supported": false }`, and a direct debit whose recipient BSB is `999999` is `REJECTED` at once. |
 | A biller that fails | Biller code `000000` is deactivated: `validateBpay` answers 422, `makeBpayPayment` `REFUSED_BPAY_INVALID_BILLER_CODE`. Any other 4–10 digit code is a valid biller; the five Shaype staging billers (`7773`, `93849`, `93880`, `600015`, and the deactivated `1016`) keep their documented rules. |
 | A declined card transaction | The card mock endpoints (`/v0/utils/generate-auth-hold`, `generate-card-transaction`, `generate-update-auth-hold`) take `declineReason`: `CARD_EXPIRED`, `WRONG_CVV`, `CVV_BLOCKED`, `INCORRECT_PIN`, `ALLOWED_PIN_RETRIES_EXCEEDED`, `INVALID_MERCHANT`, `CARD_IS_NOT_ACTIVE` or `RESTRICTED_CARD` force a processor decline: nothing is held and the `TRANSACTION` webhook carries the refused outcome. The card's own state declines too: a `BLOCKED` card, an expired one, a card awaiting activation, or a channel switched off in its payment preferences (card-not-present, contactless, magnetic stripe and ATM are off by default). |
-| A daily-limit refusal | Limits are rolling 24 h windows on the virtual clock. Transfers out are capped at 100,000 a day (not listed by `getAccountLimits`); account-level limits can be lowered with `PUT /v1/accounts/{id}/limits/{limitType}` and `PATCH /v0/accounts/{id}/max-balance`. |
+| A daily-limit refusal | Limits are rolling 24 h windows on the virtual clock. Transfers out are capped at 100,000 a day (not listed by `getAccountLimits`), and so are inbound credits (`TOP_UP_PER_DAY`: general credits, NPP / DE credits, PayTo and internal transfers in; `BANK_TRANSFER_TOP_UP_PER_DAY`: NPP / DE / PayTo credits), so fund a large fixture over more than one day; account-level limits can be lowered with `PUT /v1/accounts/{id}/limits/{limitType}` and `PATCH /v0/accounts/{id}/max-balance`. |
 | A PayTo payment outcome | Put `paymentstatus:<status>[&<status>]` or `paymentstatus:timeout_rjct` in the payment's (or the mandate's) description, as on Shaype staging. |
 
 ## Asynchronous effects and the virtual clock

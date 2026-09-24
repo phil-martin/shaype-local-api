@@ -18,8 +18,10 @@
  *   description); makeTransferV0 is served exactly like V1. transactionId is omitted (not null) on a
  *   refused TransactionOutcome; a refused outcome replays under its idempotencyKey like an accepted one.
  * - Check order (00-balance §3.2): account status -> rails -> caller / rule refusals -> limits (credits:
- *   MAX_BALANCE; general debits: daily transfers-out then TOTAL_SPEND_PER_YEAR; transfers:
- *   PAYMENT_TO_ACCOUNT_NUMBER, daily transfers-out, TOTAL_SPEND_PER_YEAR, then the recipient's MAX_BALANCE;
+ *   MAX_BALANCE, then for inbound cash transfers TOP_UP_PER_DAY (general credit, INTRABANK / INTERBANK
+ *   transfer-in) and BANK_TRANSFER_TOP_UP_PER_DAY (INTERBANK transfer-in); general debits: daily
+ *   transfers-out then TOTAL_SPEND_PER_YEAR; transfers: PAYMENT_TO_ACCOUNT_NUMBER, daily transfers-out,
+ *   TOTAL_SPEND_PER_YEAR, then the recipient's credit limits;
  *   holds: SINGLE_CARD_TRANSACTION, CARD_PAYMENTS_DAILY, + ATM_WITHDRAWAL_PER_DAY for ATM) -> funds. Risk
  *   level HIGH therefore refuses credits with REFUSED_MAX_BALANCE_EXCEEDED, general debits with the daily
  *   transfers-out outcome and transfers with REFUSED_LIMIT_BREACH. Daily / yearly usage sums posted

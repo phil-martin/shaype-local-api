@@ -376,7 +376,11 @@ describe('journey (b): internal and external transfers, daily transfers-out limi
     const bob = await onboard(api)
     const a = await openAccount(api, alice)
     const b = await openAccount(api, bob)
-    await credit(api, a.accountHayId, 120_000)
+    // TOP_UP_PER_DAY (100,000 per rolling day) caps the funding credits: the rest arrives the next day
+    await credit(api, a.accountHayId, 100_000)
+    await api.advanceClock(DAY_MS + 1000)
+    await api.login()
+    await credit(api, a.accountHayId, 20_000)
     await api.flush()
     const before = { alice: receiver.for(alice).length, bob: receiver.for(bob).length }
 
