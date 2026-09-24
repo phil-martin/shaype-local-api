@@ -3,20 +3,20 @@
 <!-- progress:start -->
 ## Implementation progress
 
-**Full-fidelity operations: 33 / 143 (23%)**  `█████░░░░░░░░░░░░░░░`
+**Full-fidelity operations: 45 / 143 (31%)**  `██████░░░░░░░░░░░░░░`
 
-All 169 operations of the spec are routed and schema-validated; the 26 stub-only operations answer with deterministic spec-shaped data. Test files: 6. Updated 2026-09-24 at `71291c3`.
+All 169 operations of the spec are routed and schema-validated; the 26 stub-only operations answer with deterministic spec-shaped data. Test files: 7. Updated 2026-09-24 at `3e01157`.
 
 | Section | Implemented | Progress | Status |
 |---|---|---|---|
-| Accounts API | 21 / 24 | `██████████████████░░` 88% | 🟡 in progress |
+| Accounts API | 24 / 24 | `████████████████████` 100% | ✅ complete |
 | BPAY API | 0 / 6 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
 | Cards API | 0 / 19 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
 | Customers API | 11 / 11 | `████████████████████` 100% | ✅ complete |
 | Direct Debits API | 0 / 6 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
 | Direct Entry API | 0 / 1 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
 | Groups API | 0 / 6 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
-| Holds API | 0 / 1 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
+| Holds API | 1 / 1 | `████████████████████` 100% | ✅ complete |
 | KYC API | 0 / 4 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
 | NPP API | 0 / 1 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
 | PayID API | 0 / 8 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
@@ -24,7 +24,7 @@ All 169 operations of the spec are routed and schema-validated; the 26 stub-only
 | Products API | 1 / 1 | `████████████████████` 100% | ✅ complete |
 | Scheduled Payments API | 0 / 3 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
 | Stacks API | 0 / 9 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
-| Transactions API | 0 / 8 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
+| Transactions API | 8 / 8 | `████████████████████` 100% | ✅ complete |
 | Utilities API | 0 / 13 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
 | Click to Pay API | stub-only | `████████████████████` 100% | ✅ stub (by design) |
 | FX API | stub-only | `████████████████████` 100% | ✅ stub (by design) |
