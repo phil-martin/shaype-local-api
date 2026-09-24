@@ -68,12 +68,8 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext, svc: Cards
   defineRoute<ById, never, S['ConvertCardRequestBody'] | undefined>(app, ctx, 'convertCard', (req) => {
     const b = optionalBody(req.body)
     const address = b.deliveryAddress
-    if (address !== undefined && address !== null) {
-      if (typeof address !== 'object' || typeof address.line1 !== 'string' || typeof address.countryCodeIso !== 'string' || address.countryCodeIso.length !== 3) {
-        throw badRequest('BAD_REQUEST: body/deliveryAddress must have line1 and a three-letter countryCodeIso')
-      }
-    }
-    return svc.toResponse(svc.convert(req.params.cardId, { deliveryAddress: address }))
+    const deliveryAddress = address === undefined || address === null ? undefined : checkAddress(address, 'body/deliveryAddress')
+    return svc.toResponse(svc.convert(req.params.cardId, { deliveryAddress }))
   })
 
   defineRoute<ById>(app, ctx, 'getCardCvvStatus', (req) => svc.cvvStatus(req.params.cardId))
@@ -124,6 +120,35 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext, svc: Cards
     reply.code(created ? 201 : 200)
     return { status: 'ACTIVE' }
   })
+}
+
+/** The spec's Address constraints (required line1 / countryCodeIso; string lengths), as the route schema would check them on a required body. */
+const ADDRESS_FIELDS: Record<keyof S['Address'], { required?: true; min: number; max: number }> = {
+  line1: { required: true, min: 0, max: 120 },
+  countryCodeIso: { required: true, min: 3, max: 3 },
+  line2: { min: 0, max: 120 },
+  townOrCity: { min: 0, max: 120 },
+  postcode: { min: 0, max: 10 },
+  administrativeRegion: { min: 1, max: 3 },
+}
+
+/** @returns the address with only its declared properties (a route schema would strip the rest) */
+function checkAddress(address: unknown, path: string): S['Address'] {
+  if (typeof address !== 'object' || address === null || Array.isArray(address)) throw badRequest(`BAD_REQUEST: ${path} must be object`)
+  const a = address as Record<string, unknown>
+  const out: Record<string, string> = {}
+  for (const [field, rule] of Object.entries(ADDRESS_FIELDS)) {
+    const v = a[field]
+    if (v === undefined || v === null) {
+      if (rule.required) throw badRequest(`BAD_REQUEST: ${path} must have required property '${field}'`)
+      continue
+    }
+    if (typeof v !== 'string') throw badRequest(`BAD_REQUEST: ${path}/${field} must be string`)
+    if (v.length < rule.min) throw badRequest(`BAD_REQUEST: ${path}/${field} must NOT have fewer than ${rule.min} characters`)
+    if (v.length > rule.max) throw badRequest(`BAD_REQUEST: ${path}/${field} must NOT have more than ${rule.max} characters`)
+    out[field] = v
+  }
+  return out as S['Address']
 }
 
 /** Optional request bodies are not validated at the route level: an absent body is {}; anything but an object is 400. */

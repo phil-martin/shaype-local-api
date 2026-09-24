@@ -179,6 +179,10 @@ describe('createHayCard (POST /v0/cards/create)', () => {
     expect(defaultNameOnCard('Alexandria', 'Hamilton-Bro')).toBe('A Hamilton-Bro') // 23 characters combined is not "smaller than 23"
     const { card } = await setup({ firstName: 'Bartholomew', lastName: 'Featherstonehaugh' })
     expect(card.nameOnCard).toBe('B Featherstonehaugh')
+    // a last name too long even for "F last" is cut at 23 characters instead of failing a request that sent no nameOnCard
+    expect(defaultNameOnCard('Hubert', 'Wolfeschlegelsteinhausenberger')).toBe('H Wolfeschlegelsteinhau')
+    const long = await setup({ firstName: 'Hubert', lastName: 'Wolfeschlegelsteinhausenberger' })
+    expect(long.card.nameOnCard).toBe('H Wolfeschlegelsteinhau')
   })
 
   it('cardToken and PAN are unique per card; the PIN is stored hashed and verifiable', async () => {
@@ -369,6 +373,17 @@ describe('convertCard', () => {
     expectError(await act(physical.card.cardHayId!, 'convert'), 422, /^INVALID_CARD_TYPE/)
     const virtual = await setup({ cardType: 'VIRTUAL' })
     expectError(await act(virtual.card.cardHayId!, 'convert', { deliveryAddress: { line1: 'x' } }), 400, /^BAD_REQUEST/)
+    // the optional body gets the same Address checks a required body gets from the route schema
+    for (const bad of [
+      { line1: 'x'.repeat(121), countryCodeIso: 'AUS' },
+      { line1: 'x', countryCodeIso: 'AU' },
+      { line1: 'x', countryCodeIso: 'AUS', postcode: 5012 },
+      { line1: 'x', countryCodeIso: 'AUS', postcode: '12345678901' },
+      { line1: 'x', countryCodeIso: 'AUS', administrativeRegion: 'NSWX' },
+      { line1: 'x', countryCodeIso: 'AUS', townOrCity: 'y'.repeat(121) },
+      'nowhere',
+    ]) expectError(await act(virtual.card.cardHayId!, 'convert', { deliveryAddress: bad }), 400, /^BAD_REQUEST: body\/deliveryAddress/)
+    expect(await status(virtual.card.cardHayId!)).toBe('ACTIVE')
     expect((await act(virtual.card.cardHayId!, 'block')).statusCode).toBe(200)
     expectError(await act(virtual.card.cardHayId!, 'convert'), 422, /^INVALID_CARD_STATUS/)
     expect((await act(virtual.card.cardHayId!, 'unblock', { note: 'ok' })).statusCode).toBe(200)
@@ -567,6 +582,31 @@ describe('renewCard', () => {
     expect(await statuses(fresh.cardHayId!)).toEqual(['AWAITING_ACTIVATION', 'ACTIVE'])
   })
 
+  it('re-issuing the old card (lost / stolen) while a renewal is in transit voids the renewal too: it shares the compromised PAN and token', async () => {
+    const { card } = await nearExpiry()
+    const renewal = (await act(card.cardHayId!, 'renew', {})).json() as HayCard
+    const res = await act(card.cardHayId!, 're-issue', { idempotencyKey: randomUUID() })
+    expect(res.statusCode, res.body).toBe(200)
+    const replacement = res.json() as HayCard
+    expect(await status(card.cardHayId!)).toBe('INACTIVE')
+    expect(await getCard(renewal.cardHayId!)).toMatchObject({ cardStatus: 'INACTIVE', voidDateTimeUtc: expect.stringMatching(ISO_MICROS) })
+    expect(await statuses(renewal.cardHayId!)).toEqual(['AWAITING_ACTIVATION', 'INACTIVE'])
+    expectError(await act(renewal.cardHayId!, 'activate'), 422, /^INVALID_CARD_STATUS/)
+    expect(svc.byToken(card.cardToken!)?.status).toBe('INACTIVE')
+    expect(replacement.cardToken).not.toBe(card.cardToken)
+  })
+
+  it('wallet tokens added to the old card while the renewal is in transit follow the renewal on activation', async () => {
+    const { card } = await nearExpiry()
+    const renewal = (await act(card.cardHayId!, 'renew', {})).json() as HayCard
+    const late = svc.provisionWallet(card.cardHayId!, 'APPLE_WALLET')
+    expect((await act(renewal.cardHayId!, 'activate')).statusCode).toBe(200)
+    expect((await app.inject({ method: 'GET', url: `/v0/cards/${card.cardHayId}/digital-wallets` })).json()).toEqual({ wallets: [] })
+    expect((await app.inject({ method: 'GET', url: `/v0/cards/${renewal.cardHayId}/digital-wallets` })).json().wallets).toEqual([
+      expect.objectContaining({ reference: late.reference, digitalWalletStatus: 'ACTIVE_TOKEN', expiresAt: renewal.expiryDate }),
+    ])
+  })
+
   it('a VIRTUAL renewal is ACTIVE at once and retires the old card immediately', async () => {
     const { card } = await nearExpiry()
     const res = await act(card.cardHayId!, 'renew', { cardType: 'VIRTUAL' })
@@ -688,10 +728,22 @@ describe('expiry: reminders and the EXPIRED flip', () => {
     expect(() => svc.setExpiryDate(id, '2029-13-01')).toThrow(/BAD_REQUEST/)
     expect(() => svc.setExpiryDate(id, '2029-02-30')).toThrow(/BAD_REQUEST/)
     expect(() => svc.setExpiryDate(id, 'tomorrow')).toThrow(/BAD_REQUEST/)
+    // wallet tokens report the card's expiry date
+    svc.provisionWallet(id, 'APPLE_WALLET')
+    svc.setExpiryDate(id, '2033-07-04')
+    expect((await app.inject({ method: 'GET', url: `/v0/cards/${id}/digital-wallets` })).json().wallets).toEqual([expect.objectContaining({ expiresAt: '2033-07-31' })])
     const past = svc.setExpiryDate(id, '2020-06-01')
     expect(past).toMatchObject({ status: 'EXPIRED', expiryDate: '2020-06-30' })
     expect((await cardEvents(id)).map((p) => [p.cardStatusChangeEvent.cardStatus, p.actionOwner])).toEqual([['ACTIVE', 'CLIENT'], ['EXPIRED', 'PLATFORM']])
     expect(() => svc.setExpiryDate(UNKNOWN_ID, '2030-01-01')).toThrow(/NOT_FOUND/)
+
+    // a BLOCKED card moved past its expiry date keeps its status and gets no "about to expire" reminders
+    const blocked = await setup({ cardType: 'VIRTUAL' })
+    expect((await act(blocked.card.cardHayId!, 'block')).statusCode).toBe(200)
+    svc.setExpiryDate(blocked.card.cardHayId!, '2021-01-01')
+    await flush()
+    expect(await status(blocked.card.cardHayId!)).toBe('BLOCKED')
+    expect((await allPayloads()).filter((p) => p.type === 'REMINDER' && p.cardHayId === blocked.card.cardHayId)).toEqual([])
   })
 })
 
@@ -721,6 +773,29 @@ describe('account closure cascade (ctx.services.cards.cancelAllForAccount)', () 
     expect(await status(keep.cardHayId!)).toBe('ACTIVE')
     svc.cancelAllForAccount(account2, 'CUSTOMER', { customerId: other })
     expect(await status(keep.cardHayId!)).toBe('INACTIVE')
+  })
+
+  it('removeCustomerFromGroup voids the removed member\'s cards on the group account (PLATFORM) and leaves the other members\' cards alone', async () => {
+    const [m1, m2] = [await newCustomer(), await newCustomer()]
+    const group = await app.inject({ method: 'POST', url: '/v0/groups/create', payload: { idempotencyKey: randomUUID(), customerHayIds: [m1, m2] } })
+    expect(group.statusCode, group.body).toBe(200)
+    const groupId = group.json().groupHayId as string
+    const acct = await app.inject({ method: 'POST', url: `/v0/groups/${groupId}/account`, payload: { idempotencyKey: randomUUID() } })
+    expect(acct.statusCode, acct.body).toBe(200)
+    const account = acct.json().hayAccount.accountHayId as string
+    const own = await newAccount(m2)
+    const removed = await newCard(account, m2, { cardType: 'VIRTUAL' })
+    const awaiting = await newCard(account, m2)
+    const personal = await newCard(own, m2, { cardType: 'VIRTUAL' })
+    const stays = await newCard(account, m1, { cardType: 'VIRTUAL' })
+    const res = await app.inject({ method: 'POST', url: `/v0/groups/${groupId}/removeCustomer`, payload: { customerId: m2 } })
+    expect(res.statusCode, res.body).toBe(200)
+    for (const c of [removed, awaiting]) {
+      expect(await status(c.cardHayId!)).toBe('INACTIVE')
+      expect((await cardEvents(c.cardHayId!)).at(-1)).toMatchObject({ actionOwner: 'PLATFORM', customerHayId: m2, cardStatusChangeEvent: { cardStatus: 'INACTIVE', accountHayId: account } })
+    }
+    expect(await status(personal.cardHayId!)).toBe('ACTIVE')
+    expect(await status(stays.cardHayId!)).toBe('ACTIVE')
   })
 })
 
