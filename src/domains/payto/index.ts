@@ -25,8 +25,14 @@
  *   staging form resolving to a local account, else external), at least one being required (400); it must
  *   differ from the creditor account (422). Amounts must be AUD (422 INVALID_CURRENCY), positive with at
  *   most 2 dp (400) and not above maximumAmount (422). validityEndDate before validityStartDate is 422.
+ *   resolutionRequestedBy (here and on amendMandatePaymentTerms) must match the spec pattern of the action
+ *   DTO that serves it back (calendar date, at most 3 fractional digits, Z), else 400.
  *   The mandate starts CREATED with a pending bilateral CREATE action expiring after 6 days (MMS window);
  *   a local Payer receives MCRT. No rate limiting: 429 is never returned.
+ * - Free text in the action DTOs: the mandate keeps what the client sent, but the MMS action details fit it
+ *   to their constraints (the request DTOs have none): names to `^[ -~]{1,140}$` (accents stripped, other
+ *   non-ASCII -> `?`, cut to 140), transferArrangement / description to 140, statusChange.reasonDescription
+ *   to 256, an empty value omitted.
  * - Status machine: suspend needs ACTIVE and release needs SUSPENDED (documented texts, no reason prefix);
  *   a suspension can only be released by the side that suspended it (422 otherwise, S12). The Initiator
  *   cancels from ACTIVE / SUSPENDED (CREATED -> 422, recall instead: 00-status D-7); the Payer also from
@@ -40,7 +46,8 @@
  *   MANDATE_ACTION_EXPIRATION is emitted (webhook-matrix C12).
  * - amendMandatePaymentTerms needs ACTIVE / SUSPENDED, a body with paymentTerms or validityEndDate (400),
  *   immutable frequency / type (422) and no other pending action (422); the proposal is visible only in the
- *   action's details until the Payer accepts (MAMC applies it — the proposed paymentTerms replace the old ones as a whole, fields left out are dropped — and re-schedules the next payment).
+ *   action's details until the Payer accepts (MAMC applies it — the proposed paymentTerms replace the old
+ *   ones as a whole, fields left out are dropped — and re-schedules the next payment).
  *   amendMandateByInitiator / amendMandateByPayer need ACTIVE / SUSPENDED and a replacement account that
  *   exists (404), is ACTIVE (422 INVALID_ACCOUNT_STATUS) and has the same holder (422 PERMISSION_DENIED);
  *   the counterparty receives MAMN.

@@ -11,6 +11,7 @@
 import { randomUUID } from 'node:crypto'
 import type { components } from '../../contract/generated/b2b-types.js'
 import type { AppContext } from '../../context.js'
+import { requestComponents } from '../../contract/index.js'
 import { compact, type ActionOwner } from '../../events/notify.js'
 import { isoDate, isoUtc } from '../../lib/clock.js'
 import { badRequest, forbidden, notFound, unprocessable } from '../../lib/errors.js'
@@ -112,7 +113,17 @@ export const DUE_PAYMENT_LEAD_MS = DAY_MS
 const HEX32 = /^[0-9a-f]{32}$/i
 const UUID36 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const BSB_ACCOUNT_RE = /^\d{11,15}$/
-const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/
+/**
+ * The spec's pattern for GetMandateActionsActionDto.resolutionRequestedBy (real calendar dates, at most 3
+ * fractional digits, Z), where a request's resolutionRequestedBy is served back.
+ */
+const ACTION_DATETIME_RE = ((): RegExp => {
+  const dto = requestComponents.find((c) => c.$id === 'req:GetMandateActionsActionDto') as { properties?: { resolutionRequestedBy?: { pattern?: string } } } | undefined
+  const pattern = dto?.properties?.resolutionRequestedBy?.pattern
+  if (!pattern) throw new Error('payto: GetMandateActionsActionDto.resolutionRequestedBy.pattern is missing from the generated contract')
+  return new RegExp(pattern)
+})()
+const RESOLUTION_REQUESTED_BY_INVALID = 'BAD_REQUEST: resolutionRequestedBy must be a UTC date-time on a calendar date with at most 3 fractional digits, like 2023-09-10T10:00:00.000Z'
 
 /** Hyphenated lowercase form of a mandate / action id given in either encoding (unknown shapes pass through). */
 export function normaliseMandateId(id: string): string {
@@ -357,7 +368,7 @@ export class PayToService {
     if (debtor.accountId === creditor.accountId) throw unprocessable('INVALID_ARGUMENT: the debtor account must differ from the creditor account')
     const paymentTerms = parseTerms(body.paymentTerms)
     if (body.validityEndDate && body.validityEndDate < body.validityStartDate) throw unprocessable('INVALID_ARGUMENT: validityEndDate must not precede validityStartDate')
-    if (body.resolutionRequestedBy !== undefined && !ISO_DATETIME_RE.test(body.resolutionRequestedBy)) throw badRequest('BAD_REQUEST: resolutionRequestedBy must be a UTC date-time like 2023-09-10T10:00:00.000Z')
+    if (body.resolutionRequestedBy !== undefined && !ACTION_DATETIME_RE.test(body.resolutionRequestedBy)) throw badRequest(RESOLUTION_REQUESTED_BY_INVALID)
 
     const now = this.ctx.clock.now()
     const m: Mandate = compact({
@@ -470,7 +481,7 @@ export class PayToService {
       this.repo.saveMandate(m)
       return this.addAction(m, {
         type: 'AMEND', status: 'COMPLETED', bilateral: false, partyRole: 'PAYMENT_INITIATOR', resolved: true,
-        details: { amendment: { creditorInformation: compact({ accountId: next.id, accountNumber: next.bsb + next.accountNumber, ultimatePartyName: body.ultimatePartyName }) } },
+        details: { amendment: { creditorInformation: compact({ accountId: next.id, accountNumber: next.bsb + next.accountNumber, ultimatePartyName: mmsName(body.ultimatePartyName) }) } },
         cxEventNameCreation: 'Payment agreement amended', cxEventNameResolution: 'Payment agreement amended',
       })
     })()
@@ -517,7 +528,7 @@ export class PayToService {
     const m = this.requireAsInitiator(id)
     this.requireStatus(m, ['ACTIVE', 'SUSPENDED'], 'amend')
     if (!body.paymentTerms && body.validityEndDate === undefined) throw badRequest('BAD_REQUEST: paymentTerms or validityEndDate is required')
-    if (body.resolutionRequestedBy !== undefined && !ISO_DATETIME_RE.test(body.resolutionRequestedBy)) throw badRequest('BAD_REQUEST: resolutionRequestedBy must be a UTC date-time like 2023-09-10T10:00:00.000Z')
+    if (body.resolutionRequestedBy !== undefined && !ACTION_DATETIME_RE.test(body.resolutionRequestedBy)) throw badRequest(RESOLUTION_REQUESTED_BY_INVALID)
     if (this.repo.pendingAction(m.id)) throw unprocessable(`INVALID_STATE: Mandate ${m.id} already has a pending action awaiting resolution`)
     const proposal: AmendProposal = {}
     if (body.paymentTerms) {
@@ -651,7 +662,7 @@ export class PayToService {
       const verb = { SUSPEND: 'suspended', RELEASE: 'released', CANCEL: 'cancelled' }[opts.change]
       return this.addAction(m, {
         type: 'STATUS_CHANGE', status: 'COMPLETED', partyRole: opts.side === 'PAYER' ? 'DEBTOR' : 'PAYMENT_INITIATOR', resolved: true,
-        details: { statusChange: compact({ change: opts.change, reasonCode: opts.reasonCode, reasonDescription: opts.reasonDescription }) },
+        details: { statusChange: compact({ change: opts.change, reasonCode: opts.reasonCode, reasonDescription: cut(opts.reasonDescription, 256) }) },
         cxEventNameCreation: `Payment agreement ${verb}`, cxEventNameResolution: `Payment agreement ${verb}`,
       })
     })()
@@ -1126,20 +1137,21 @@ export class PayToService {
   private creationDetails(m: Mandate, body?: CreateMandateRequestBody): NonNullable<ActionDetails['creation']> {
     const creditor = m.creditor.accountId ? this.accounts.find(m.creditor.accountId) : undefined
     const initiatorName = this.partyName(m.creditor, creditor) ?? 'Initiator'
+    const initiatorMmsName = mmsName(initiatorName) ?? '?'
     return compact({
       automaticExtensionIndicator: false,
       creditorInformation: partyInformation(m.creditor, initiatorName),
       debtorInformation: partyInformation(m.debtor, this.partyName(m.debtor, m.debtor.accountId ? this.accounts.find(m.debtor.accountId) : undefined) ?? 'Debtor'),
-      description: m.description || undefined,
+      description: cut(m.description, 140),
       establishmentScheme: 'AUTHORISED_PAYMENT_MANDATE' as const,
       // ^[ -~]{1,35}$: ids go in their 32-hex form
       initiationRequestIdentification: uuid().replace(/-/g, ''),
       mandatePurposeCode: m.purposeCode,
       mandateType: 'DIRECT_DEBIT' as const,
       paymentInformation: paymentInformation(m.paymentTerms),
-      paymentInitiatorInformation: { partyIdentification: (m.creditor.accountId ?? m.id).replace(/-/g, ''), partyIdentificationTypeCode: 'BANK_PARTY_ID' as const, partyLegalName: initiatorName, partyName: initiatorName, partyServicerBic: BIC },
+      paymentInitiatorInformation: { partyIdentification: (m.creditor.accountId ?? m.id).replace(/-/g, ''), partyIdentificationTypeCode: 'BANK_PARTY_ID' as const, partyLegalName: initiatorMmsName, partyName: initiatorMmsName, partyServicerBic: BIC },
       resolutionRequestedBy: body?.resolutionRequestedBy,
-      transferArrangement: m.transferArrangement,
+      transferArrangement: cut(m.transferArrangement, 140),
       validityEndDate: m.validityEndDate,
       validityStartDate: m.validityStartDate,
     })
@@ -1261,20 +1273,40 @@ function paymentInformation(t: PaymentTerms): PaymentInformation {
   })
 }
 
-/** GetMandateActionsDetailsCreation{Creditor,Debtor}InformationDto. */
+/** GetMandateActionsDetailsCreation{Creditor,Debtor}InformationDto (names fitted to ^[ -~]{1,140}$). */
 function partyInformation(p: PartyDetails, name: string): PartyInformation {
+  const partyName = mmsName(name) ?? '?'
   return compact({
     accountId: p.accountId,
     accountNumber: p.accountNumber,
-    accountAliasIdentification: p.accountAliasIdentification,
+    accountAliasIdentification: cut(p.accountAliasIdentification, 2048),
     accountAliasTypeCode: p.accountAliasType,
     accountIdentificationTypeCode: p.accountNumber ? ('BASIC_BANK_ACCOUNT_NUMBER' as const) : ('ALIAS' as const),
     accountServicerBic: p.accountNumber?.startsWith(LOCAL_BSB) ? BIC : undefined,
-    partyName: name,
+    partyName,
     partyReference: p.partyReference,
     partyType: p.partyType,
-    ultimatePartyName: p.ultimatePartyName ?? name,
+    ultimatePartyName: mmsName(p.ultimatePartyName) ?? partyName,
   })
+}
+
+/**
+ * Free text served in an MMS action DTO, cut to the DTO's maxLength (in code points); undefined when empty
+ * (the DTOs' minLength is 1). The mandate itself keeps the text as the client sent it.
+ */
+export function cut(s: string | undefined, max: number): string | undefined {
+  if (!s) return undefined
+  const chars = Array.from(s)
+  return chars.length > max ? chars.slice(0, max).join('') : s
+}
+
+/**
+ * A name fitted to the action DTOs' `^[ -~]{1,140}$`: accents stripped (José -> Jose), any other character
+ * outside printable ASCII replaced by `?`, cut to 140; undefined when empty.
+ */
+export function mmsName(s: string | undefined): string | undefined {
+  if (!s) return undefined
+  return cut(s.normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^ -~]/gu, '?'), 140)
 }
 
 /** ISO date-time (any precision) -> isoUtc microsecond form. */

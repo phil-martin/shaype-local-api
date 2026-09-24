@@ -351,6 +351,9 @@ describe('createMandate', () => {
       [mandateBody(creditor, { accountId: debtor.accountHayId! }, { paymentTerms: { frequency: 'ADHOC', type: 'VARIABLE', amount: AUD(0) } }), 400, /greater than 0/],
       [mandateBody(creditor, { accountId: debtor.accountHayId! }, { validityEndDate: '2020-10-05' }), 422, /validityEndDate must not precede/],
       [mandateBody(creditor, { accountId: debtor.accountHayId! }, { resolutionRequestedBy: 'tomorrow' }), 400, /resolutionRequestedBy/],
+      // served in actions[].resolutionRequestedBy, whose spec pattern allows real calendar dates and at most 3 fractional digits
+      [mandateBody(creditor, { accountId: debtor.accountHayId! }, { resolutionRequestedBy: '2030-02-30T10:00:00.000Z' }), 400, /resolutionRequestedBy/],
+      [mandateBody(creditor, { accountId: debtor.accountHayId! }, { resolutionRequestedBy: '2030-02-28T10:00:00.123456Z' }), 400, /resolutionRequestedBy/],
       [mandateBody(creditor, { accountId: debtor.accountHayId! }, { paymentTerms: { frequency: 'MONTHLY', type: 'FIXED', amount: AUD(5), firstPayment: { date: '2030-01-10' }, lastPayment: { date: '2029-01-10' } } }), 422, /lastPayment.date/],
       [mandateBody(creditor, { accountId: debtor.accountHayId! }, { paymentTerms: { frequency: 'MONTHLY', type: 'FIXED', amount: AUD(5), countPerPeriod: 'two' } }), 400, /countPerPeriod/],
       [{ ...mandateBody(creditor, { accountId: debtor.accountHayId! }), creditorDetails: { partyType: 'PERSON' } }, 400, /^BAD_REQUEST:/],
@@ -856,6 +859,7 @@ describe('amendMandatePaymentTerms', () => {
       [{ paymentTerms: { ...terms, type: 'FIXED' } }, 422, /cannot be amended/],
       [{ validityEndDate: '2019-01-01' }, 422, /validityEndDate must not precede/],
       [{ validityEndDate: '2040-01-01', resolutionRequestedBy: 'soon' }, 400, /resolutionRequestedBy/],
+      [{ validityEndDate: '2040-01-01', resolutionRequestedBy: '2031-04-31T00:00:00.000Z' }, 400, /resolutionRequestedBy/],
       [{ paymentTerms: { ...terms, maximumAmount: AUD(1.005) } }, 400, /2 decimal places/],
     ]
     for (const [payload, status, message] of cases) {
@@ -1634,6 +1638,41 @@ describe('response contract', () => {
     const summaries = await app.inject({ method: 'GET', url: `/v1/payto/mandates?accountIds=${debtor.accountHayId}&pageNumber=1&pageSize=50` })
     ok(summaries, 'getMandates')
     expect(summaries.json().result.find((r: { mandateId: string }) => r.mandateId === mms.id)).toEqual({ debtorAccountId: debtor.accountHayId, mandateId: mms.id, paymentTerms: { frequency: 'ADHOC', maximumAmount: AUD(9.5) }, purposeCode: 'OTHER', status: 'CREATED' })
+  })
+})
+
+describe('free text in the action DTOs', () => {
+  it('fits stored free text into the MMS action DTO limits: printable ASCII names (1-140), transferArrangement (1-140), reasonDescription (1-256)', async () => {
+    const holder = await newCustomer()
+    const creditor = await newAccount({ holder })
+    const replacement = await newAccount({ holder, fund: 1 })
+    const debtor = await newAccount()
+    const body = mandateBody(creditor, { accountId: debtor.accountHayId!, partyName: 'José Müller-Łukasz' }, { transferArrangement: 'T'.repeat(200) })
+    body.creditorDetails.ultimatePartyName = '株式会社'
+    const res = await app.inject({ method: 'POST', url: '/v1/payto/initiator/mandates', payload: body })
+    expect(res.statusCode, res.body).toBe(200)
+    const id = res.json().mandateId as string
+    // the mandate itself keeps what the client sent
+    expect(await getMandate(id)).toMatchObject({ transferArrangement: 'T'.repeat(200), debtorDetails: { partyName: 'José Müller-Łukasz' }, creditorDetails: { ultimatePartyName: '株式会社' } })
+    expect((await patch(`/v1/payto/payer/mandates/${id}/resolve?resolution=ACCEPT`)).statusCode).toBe(200)
+    expect((await patch(`/v1/payto/initiator/mandates/${id}/suspend`, { reasonDescription: 'R'.repeat(300) })).statusCode).toBe(200)
+    expect((await app.inject({ method: 'PUT', url: `/v1/payto/initiator/mandates/${id}`, payload: { creditorAccountId: replacement.accountHayId, ultimatePartyName: `Ünïcödé Energy ${'E'.repeat(150)}` } })).statusCode).toBe(200)
+    const empty = await createMandate(creditor, { accountId: debtor.accountHayId! }, { transferArrangement: '' })
+    for (const mandateId of [id, empty]) {
+      const acts = await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${mandateId}/actions` })
+      expect(acts.statusCode).toBe(200)
+      assertStrictResponse('getMandateActionsByInitiator', acts.json())
+    }
+    const [create, suspend, amend] = await actions(id)
+    expect(create!.details!.creation).toMatchObject({
+      transferArrangement: 'T'.repeat(140),
+      debtorInformation: { partyName: 'Jose Muller-?ukasz', ultimatePartyName: 'Jose Muller-?ukasz' },
+      creditorInformation: { partyName: '????', ultimatePartyName: '????' },
+      paymentInitiatorInformation: { partyName: '????', partyLegalName: '????' },
+    })
+    expect(suspend!.details!.statusChange).toEqual({ change: 'SUSPEND', reasonDescription: 'R'.repeat(256) })
+    expect(amend!.details!.amendment!.creditorInformation).toMatchObject({ ultimatePartyName: `Unicode Energy ${'E'.repeat(125)}` })
+    expect((await actions(empty))[0]!.details!.creation!.transferArrangement).toBeUndefined()
   })
 })
 
