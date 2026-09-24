@@ -363,6 +363,17 @@ describe('generateAuthHold (POST /v0/utils/generate-auth-hold)', () => {
     const [q] = await txs(a.accountHayId!)
     expect(q.transactionEvent.originalCurrencyAmount).toBeUndefined()
   })
+
+  it('a declined or refused non-AUD authorisation carries originalCurrencyAmount negative, like currencyAmount', async () => {
+    const { account: a, card } = await setup(10)
+    await post('/v0/utils/generate-auth-hold', { amount: -5, cardToken: card.cardToken, currency: 'USD', declineReason: 'RESTRICTED_CARD' })
+    await post('/v0/utils/generate-auth-hold', { amount: -50, cardToken: card.cardToken, currency: 'EUR' })
+    const events = (await txs(a.accountHayId!)).map((p) => p.transactionEvent)
+    expect(events.map((e) => [e.outcome, e.currencyAmount, e.originalCurrencyAmount])).toEqual([
+      ['REFUSED_RULES', { currency: 'AUD', amount: -5 }, { currency: 'USD', amount: -5 }],
+      ['REFUSED_NOT_ENOUGH_FUNDS', { currency: 'AUD', amount: -50 }, { currency: 'EUR', amount: -50 }],
+    ])
+  })
 })
 
 describe('generateCardTransaction (POST /v0/utils/generate-card-transaction)', () => {
@@ -512,6 +523,26 @@ describe('generateHoldAndUpdateHoldTransactions (POST /v0/utils/generate-update-
       ['CARD_TRANSACTION', 'ACCEPTED', -4], ['CARD_TRANSACTION', 'REFUSED_CARD_PREFERENCE', -1], ['CARD_TRANSACTION_SETTLED', 'ACCEPTED', -4],
     ])
     expect(await balances(a.accountHayId!)).toEqual({ total: 96, held: 0, available: 96 })
+  })
+
+  it('a non-AUD hold keeps originalCurrencyAmount in step with the update (1:1) through to the settlement', async () => {
+    const { account: a, card } = await setup()
+    await post('/v0/utils/generate-update-auth-hold', { amount: -5, updateHoldAmount: -3, cardToken: card.cardToken, currency: 'USD' })
+    await flush()
+    const up = (await txs(a.accountHayId!)).map((p) => p.transactionEvent)
+    expect(up.map((e) => [e.transactionType, e.currencyAmount.amount, e.originalCurrencyAmount])).toEqual([
+      ['CARD_TRANSACTION', -5, { currency: 'USD', amount: -5 }], ['CARD_TRANSACTION', -8, { currency: 'USD', amount: -8 }], ['CARD_TRANSACTION_SETTLED', -8, { currency: 'USD', amount: -8 }],
+    ])
+    await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
+    await post('/v0/utils/generate-update-auth-hold', { amount: -5, updateHoldAmount: 2, cardToken: card.cardToken, currency: 'USD' })
+    await flush()
+    const down = (await txs(a.accountHayId!)).map((p) => p.transactionEvent)
+    expect(down.map((e) => [e.transactionType, e.currencyAmount.amount, e.originalCurrencyAmount?.amount])).toEqual([
+      ['CARD_TRANSACTION', -5, -5], ['CARD_TRANSACTION_REFUND', 2, undefined], ['CARD_TRANSACTION_SETTLED', -3, -3],
+    ])
+    const settled = (await get(`/v1/transactions/${down[2].transactionHayId}`)).json()
+    expect(settled).toMatchObject({ transactionChannel: 'VISA_CARD_PRESENT_INTERNATIONAL', currencyAmount: { amount: -3, currency: 'AUD' }, originalCurrencyAmount: { amount: -3, currency: 'USD' } })
+    expect(await balances(a.accountHayId!)).toEqual({ total: 89, held: 0, available: 89 })
   })
 
   it('validates updateHoldAmount (non-zero, a decrease no larger than the hold) and the delays', async () => {

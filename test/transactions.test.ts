@@ -779,6 +779,28 @@ describe('holds (services.transactions.holds, GET /v1/holds/{holdId}, GET /v0/ac
     expect(ev.transactionEvent).toMatchObject({ originalCurrencyAmount: { currency: 'USD', amount: -1 } })
     assertValidNotification(ev)
   })
+
+  it('a refused FX authorisation carries originalCurrencyAmount negative like currencyAmount', async () => {
+    const a = await fundedAccount(100)
+    const usd = { originalAmount: { amountCents: 100, currency: 'USD' } }
+    expect(svc.holds.authorise(holdInput(a.accountHayId!, 150, { ...usd, refusal: { outcome: 'REFUSED_RULES', cardPreferenceOutcome: 'OK', cardProcessorResponse: 'RESTRICTED_CARD' } })).outcome).toBe('REFUSED_RULES')
+    expect(svc.holds.authorise(holdInput(a.accountHayId!, 50_000, usd)).outcome).toBe('REFUSED_NOT_ENOUGH_FUNDS')
+    const events = (await txEvents(a.accountHayId!)).slice(-2).map((p) => p.transactionEvent)
+    expect(events.map((e) => [e.outcome, e.currencyAmount.amount, e.originalCurrencyAmount])).toEqual([
+      ['REFUSED_RULES', -1.5, { currency: 'USD', amount: -1 }], ['REFUSED_NOT_ENOUGH_FUNDS', -500, { currency: 'USD', amount: -1 }],
+    ])
+  })
+
+  it('an FX hold keeps its original-currency amount in step with increases and decreases (at the authorisation rate)', async () => {
+    const a = await fundedAccount(10_000)
+    const fx = svc.holds.authorise(holdInput(a.accountHayId!, 150, { originalAmount: { amountCents: 100, currency: 'USD' } })).hold!
+    expect(svc.holds.increase(fx.id, 15).hold).toMatchObject({ amount: 165, originalAmount: 110 })
+    expect((await txEvents(a.accountHayId!)).at(-1).transactionEvent).toMatchObject({ currencyAmount: AUD(-1.65), originalCurrencyAmount: { currency: 'USD', amount: -1.1 } })
+    expect(svc.holds.decrease(fx.id, 30).hold).toMatchObject({ amount: 135, originalAmount: 90 })
+    expect((await app.inject({ method: 'GET', url: `/v1/holds/${fx.id}` })).json()).toMatchObject({ currencyAmount: AUD(-1.35), originalCurrencyAmount: { currency: 'USD', amount: -0.9 } })
+    const settled = svc.holds.settle(fx.id).transaction!
+    expect(await getTransaction(settled.id)).toMatchObject({ currencyAmount: AUD(-1.35), originalCurrencyAmount: { currency: 'USD', amount: -0.9 } })
+  })
 })
 
 describe('services.transactions.post (the engine other domains call)', () => {

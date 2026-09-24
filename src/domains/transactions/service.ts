@@ -117,6 +117,7 @@ export interface AuthoriseHoldInput {
   type?: HoldType
   /** default from cardUsage / type (VISA_ATM, VISA_CONTACTLESS, VISA_CARD_PRESENT, VISA_CARD_NOT_PRESENT, APPLE_PAY_*), _INTERNATIONAL when the original currency differs */
   channel?: TransactionChannel
+  /** positive cents, like amountCents; webhooks and reads render it negative */
   originalAmount?: Money
   description?: string
   category?: string
@@ -734,7 +735,8 @@ export class HoldsService {
     const refuse = (outcome: LedgerOutcome, extra: Partial<RefusalDetails> = {}): HoldResult => {
       this.ledger.notifyRefused(account, actionOwner, outcome, compact({
         amountCents: -input.amountCents,
-        originalAmount: input.originalAmount,
+        // signed like amountCents (the input carries the positive magnitude, as the accepted hold stores it)
+        originalAmount: input.originalAmount && { amountCents: -input.originalAmount.amountCents, currency: input.originalAmount.currency },
         webhookType: 'CARD_TRANSACTION',
         transactionTime,
         isPending: false,
@@ -819,6 +821,7 @@ export class HoldsService {
     this.ctx.db.transaction(() => {
       const after = this.accounts.adjust(account.id, { heldDelta: deltaCents })
       const now = isoUtc(this.ctx.clock.now())
+      rescaleOriginal(hold, hold.amount + deltaCents)
       hold.amount += deltaCents
       hold.portions = [...hold.portions, { amount: deltaCents, at: now }]
       hold.updatedAt = now
@@ -840,6 +843,7 @@ export class HoldsService {
     if (deltaCents === hold.amount) return this.reverse(holdId, opts)
     this.ctx.db.transaction(() => {
       const after = this.accounts.adjust(hold.accountId, { heldDelta: -deltaCents })
+      rescaleOriginal(hold, hold.amount - deltaCents)
       hold.amount -= deltaCents
       hold.portions = releasePortions(hold.portions, deltaCents)
       hold.updatedAt = isoUtc(this.ctx.clock.now())
@@ -950,6 +954,15 @@ function holdRefusalDetails(hold: Hold, amountCents: Cents, webhookType: Webhook
     description: hold.description,
     category: hold.category,
   })
+}
+
+/**
+ * An FX hold's original-currency amount follows its amount at the authorisation's rate (original / amount),
+ * so an increment or a partial reversal keeps the two consistent through to the settlement [decision].
+ */
+function rescaleOriginal(hold: Hold, newAmount: Cents): void {
+  if (hold.originalAmount === undefined || !(hold.amount > 0)) return
+  hold.originalAmount = Math.round((hold.originalAmount * newAmount) / hold.amount)
 }
 
 /** Releases `cents` from the newest portions first (a partial reversal corrects the latest authorisation) [decision]. */

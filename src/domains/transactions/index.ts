@@ -51,7 +51,9 @@
  *   (CANCELLED, same webhook as a reversal). Account rules are evaluated here (REFUSED_RULES +
  *   ruleDetails); card status/preference refusals arrive pre-decided from the caller and are applied after
  *   the account status gate. Hold category defaults to the merchant category code. Hold events use the
- *   authorisation time.
+ *   authorisation time. An FX hold's original-currency amount follows increases / decreases at the
+ *   authorisation's rate (rounded to the cent); every webhook renders it signed like currencyAmount,
+ *   refusals included.
  * - Time: caller-supplied transactionTimeUtc and search bounds keep their microsecond digits (Date only
  *   holds milliseconds); a malformed value is a 400.
  * - Search: both bounds inclusive on the sortBy timestamp, newest first, ties by posting order; an unknown
