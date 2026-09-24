@@ -30,8 +30,9 @@
  *   cardProcessorResponse mapped per C17 (CARD_EXPIRED->EXPIRED_CARD, WRONG_CVV->CVV_FAIL,
  *   CVV_BLOCKED->CVV2_FAILURE, the rest verbatim) — the cards domain's processor-decline vocabulary (W5)
  *   rather than the matrix's "outcome usually ACCEPTED", which would report a declined, unheld transaction as
- *   accepted. It also moves the card state (W5): WRONG_CVV / INCORRECT_PIN spend a try, CVV_BLOCKED /
- *   ALLOWED_PIN_RETRIES_EXCEEDED block. Nothing is held and nothing settles after a decline.
+ *   accepted. When that decline is the outcome sent (the account gate runs first: a LOCKED / CLOSED
+ *   account refuses without it) it also moves the card state (W5): WRONG_CVV / INCORRECT_PIN spend a try,
+ *   CVV_BLOCKED / ALLOWED_PIN_RETRIES_EXCEEDED block. Nothing is held and nothing settles after a decline.
  * - Delays: settlementDelayInSeconds / updateHoldDelayInSeconds are honoured on the virtual clock
  *   (ctx.scheduler.later; POST /_admin/clock advanceMs fires them); an omitted delay is config.asyncDelayMs
  *   (spec §5.5). The settlement of the hold + update mock is due settlementDelayInSeconds after the update

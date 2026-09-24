@@ -282,6 +282,20 @@ describe('generateAuthHold (POST /v0/utils/generate-auth-hold)', () => {
     expect(p.transactionEvent).toMatchObject({ outcome: 'REFUSED_RULES', cardProcessorResponse: 'ALLOWED_PIN_RETRIES_EXCEEDED' })
   })
 
+  it('declineReason leaves the card alone when the account gate refuses first (the processor decline is never sent)', async () => {
+    const { account: a, card } = await setup()
+    await blockAccount(a.accountHayId!)
+    await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
+    for (const declineReason of ['WRONG_CVV', 'CVV_BLOCKED', 'INCORRECT_PIN', 'ALLOWED_PIN_RETRIES_EXCEEDED']) {
+      expect((await post('/v0/utils/generate-auth-hold', { amount: -1, cardToken: card.cardToken, declineReason })).statusCode).toBe(200)
+    }
+    const events = (await txs(a.accountHayId!)).map((p) => p.transactionEvent)
+    expect(events.map((e) => [e.outcome, e.cardProcessorResponse])).toEqual(Array(4).fill(['REFUSED_ACCOUNT_BLOCKED', undefined]))
+    expect((await get(`/v0/cards/${card.cardHayId}/cvv/status`)).json()).toEqual({ cvvRemainingTries: 3 })
+    expect((await get(`/v0/cards/${card.cardHayId}/pin/status`)).json()).toEqual({ enabled: true })
+    expect(built.ctx.services.cards.get(card.cardHayId!).pinRemainingTries).toBe(3)
+  })
+
   it('runs the card checks: cardUsage CONTACTLESS with the default preferences is REFUSED_CARD_PREFERENCE / CONTACTLESS_DISABLED', async () => {
     const { account: a, card } = await setup()
     expect((await post('/v0/utils/generate-auth-hold', { amount: -2, cardToken: card.cardToken, cardUsage: 'CONTACTLESS' })).statusCode).toBe(200)

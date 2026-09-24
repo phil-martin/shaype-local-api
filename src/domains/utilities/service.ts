@@ -267,7 +267,8 @@ export class UtilitiesService {
   private authorise(body: HoldBody): { holdId?: string } {
     const { card, account } = this.cardAndAccount(body.cardToken)
     const cents = cardAmountCents(body.amount)
-    const refusal = body.declineReason ? this.processorDecline(card, body.declineReason) : undefined
+    const decline = body.declineReason
+    const refusal = decline ? processorDecline(decline) : undefined
     const r = this.cards.authoriseHold(card, compact({
       amountCents: cents,
       cardUsage: CARD_USAGE[body.cardUsage ?? 'CARD_PRESENT'],
@@ -276,20 +277,17 @@ export class UtilitiesService {
       actionOwner: 'PLATFORM' as const,
       refusal,
     }))
+    // the account gate runs before a caller refusal: only a decline that was actually sent moves the card
+    if (decline && r.outcome === refusal?.outcome) this.declineEffects(card, decline)
     return r.outcome === 'ACCEPTED' && r.hold ? { holdId: r.hold.id } : {}
   }
 
-  /**
-   * A processor decline (00-open-questions W5): REFUSED_RULES with cardPreferenceOutcome OK and the mapped
-   * cardProcessorResponse, like the cards domain's own processor declines. The card state follows the
-   * reason: a wrong CVV / PIN spends a try, CVV_BLOCKED / ALLOWED_PIN_RETRIES_EXCEEDED block it.
-   */
-  private processorDecline(card: Card, reason: DeclineReason): CallerRefusal {
+  /** The card state a processor decline implies (W5): a wrong CVV / PIN spends a try, CVV_BLOCKED / ALLOWED_PIN_RETRIES_EXCEEDED block it. */
+  private declineEffects(card: Card, reason: DeclineReason): void {
     if (reason === 'WRONG_CVV') this.cards.recordCvvFailure(card.id)
     else if (reason === 'CVV_BLOCKED') this.cards.blockCvv(card.id)
     else if (reason === 'INCORRECT_PIN') this.cards.recordPinFailure(card.id)
     else if (reason === 'ALLOWED_PIN_RETRIES_EXCEEDED') this.cards.blockPin(card.id)
-    return { outcome: 'REFUSED_RULES', cardPreferenceOutcome: 'OK', cardProcessorResponse: DECLINE_PROCESSOR_RESPONSE[reason] }
   }
 
   /** The hold update: a partial / full reversal, or an increment that passes the card checks again (then the ledger's). No-op once the hold is closed. */
@@ -595,6 +593,14 @@ export class UtilitiesService {
     if (delay <= 0) fn()
     else this.ctx.scheduler.later(fn, delay)
   }
+}
+
+/**
+ * A processor decline (00-open-questions W5): REFUSED_RULES with cardPreferenceOutcome OK and the mapped
+ * cardProcessorResponse, like the cards domain's own processor declines.
+ */
+function processorDecline(reason: DeclineReason): CallerRefusal {
+  return { outcome: 'REFUSED_RULES', cardPreferenceOutcome: 'OK', cardProcessorResponse: DECLINE_PROCESSOR_RESPONSE[reason] }
 }
 
 /** Card-mock amount: negative (schema), at most 2 dp -> positive cents. */
