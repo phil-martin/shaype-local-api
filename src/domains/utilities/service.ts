@@ -458,9 +458,10 @@ export class UtilitiesService {
    * (CUSCAL_DE_CREDIT_IN), DEBIT -> DIRECT_DEBIT_TRANSFER (negative, CUSCAL_DE_DEBIT_IN, originType
    * DIRECT_DEBIT, DIRECT_DEBIT_PER_DAY + funds), the sender as counterpart; refusals emit the refused
    * TRANSACTION. RETURN (DEBIT): the local account is the sender of an outbound direct debit in flight, which
-   * direct-entry marks RETURNED (DIRECT_ENTRY webhook only; 404 when nothing matches). REFUSAL: validated and
-   * accepted without a platform effect (00-webhook-matrix §8: undocumented; DirectEntryEventDto only models
-   * outbound debits). Idempotency is the route's.
+   * direct-entry marks RETURNED (DIRECT_ENTRY webhook only; 404 when nothing matches). REFUSAL (DEBIT; spec
+   * §5.5, W7): the local account is the recipient (the docs sample), the sender of an outbound direct debit
+   * in flight, which direct-entry marks INCOMPLETE (DIRECT_ENTRY webhook only; 404 when nothing matches).
+   * Idempotency is the route's.
    */
   inboundDe(body: GenerateInboundDeRequestBody): GenericMessage {
     anchored(body.recipientBsb, BSB_RE, 'recipientBsb')
@@ -479,7 +480,10 @@ export class UtilitiesService {
     }
     if (body.recordType === 'REFUSAL') {
       if (!body.refusalReason) throw badRequest('BAD_REQUEST: refusalReason is required for record type REFUSAL')
-      this.localAccount(body.recipientBsb, body.recipientAccountNumber, 'Recipient')
+      if (body.transactionType !== 'DEBIT') throw unprocessable('INVALID_ARGUMENT: only refusals of outbound direct debits (transactionType DEBIT) are supported')
+      // the docs sample's orientation: the local account (the direct debit's sender) is the recipient here
+      const refused = this.directEntry.refuseOutbound({ senderBsb: body.recipientBsb, senderAccountNumber: body.recipientAccountNumber, amountCents: cents, refusalReason: body.refusalReason })
+      if (!refused) throw notFound(`NOT_FOUND: No outbound direct debit of ${fromCents(cents)} from BSB ${body.recipientBsb} account ${body.recipientAccountNumber} is awaiting settlement`)
       return done
     }
 

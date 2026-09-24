@@ -5,7 +5,7 @@
  * (getScheduledPayments, getScheduledPaymentById, cancelScheduledPayment) operations, plus the
  * test-control route POST /_admin/scheduled-payments (routes.ts documents the body). Publishes
  * ctx.services.directEntry (service.ts: instructions; .schedules: ScheduledPaymentsService) for
- * utilities (returnOutbound) and registers the INFLIGHT_OUTBOUND_DIRECT_DEBITS closure checker with accounts.
+ * utilities (returnOutbound, refuseOutbound) and registers the INFLIGHT_OUTBOUND_DIRECT_DEBITS closure checker with accounts.
  *
  * Contract deviations: none — every response follows the declared schema, including the deprecated
  * createDirectDebitV0's 422 DirectDebitResponse body.
@@ -27,6 +27,8 @@
  *   directEntry.returnOutbound (the utilities RETURN mock: most recent SUBMITTED, else ACCEPTED, with the
  *   same sender BSB + account number + amount) or when the recipient is itself a local account and its
  *   debit leg is refused (DIRECT_DEBIT_PER_DAY, funds, blocked / closed) — the debtor institution's return.
+ *   INCOMPLETE also through directEntry.refuseOutbound (the utilities REFUSAL mock, matched the same way;
+ *   return reason OTHER, the refusal reason in `details`; W7).
  *   Post-COMPLETE returns are not modelled. Terminal statuses never change again.
  * - Money: COMPLETE posts DIRECT_DEBIT_TRANSFER, positive, CUSCAL_DE_DEBIT_OUT, originType DIRECT_DEBIT,
  *   category BANK_TRANSFER, counterpart = the recipient (00-transactions C1/C8); a local recipient is
@@ -77,7 +79,7 @@ import { registerEvents } from './events.js'
 import { registerRoutes } from './routes.js'
 
 export { DirectEntryService, V0_STATUS, REJECTING_BSB, v0FilterStatuses } from './service.js'
-export type { CreateDirectDebitRequestBody, DirectDebitResponse, DirectDebitResponseV1, DeTransactionDetails, DeTransactionDetailsV1, DirectEntryStatusResponseV1, DeReturnReason, ListQuery, ReturnInput, CreateResult } from './service.js'
+export type { CreateDirectDebitRequestBody, DirectDebitResponse, DirectDebitResponseV1, DeTransactionDetails, DeTransactionDetailsV1, DirectEntryStatusResponseV1, DeReturnReason, ListQuery, ReturnInput, RefusalInput, CreateResult } from './service.js'
 export { ScheduledPaymentsService, validateRecipient } from './schedules.js'
 export type { CreateScheduleInput, OccurrenceResult } from './schedules.js'
 export type { DeInstruction, DeStatus, DeStatusV0, ScheduledPayment, ScheduleStatus, ScheduleType, ScheduleFrequency, HayScheduledPayment, HayArchivedScheduledPayment, ScheduledPaymentRecipient } from './repo.js'

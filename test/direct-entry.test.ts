@@ -472,6 +472,28 @@ describe('createDirectDebitV1: lifecycle', () => {
     }
   })
 
+  it('is INCOMPLETE when the recipient institution refuses it (refuseOutbound, matched like returnOutbound; W7) and the later hops become no-ops', async () => {
+    const sender = await newAccount()
+    svc.progressDelayMs = DAY_MS
+    try {
+      const body = await acceptedDd(sender, { amount: 45 })
+      await advanceClock(DAY_MS)
+      expect(await deStatus(body.transactionId)).toBe('SUBMITTED')
+      const match = { senderBsb: LOCAL_BSB, senderAccountNumber: sender.accountNumber!, refusalReason: 'NO_ARRANGEMENT' }
+      expect(svc.refuseOutbound({ ...match, amountCents: 4400 })).toBeUndefined()
+      const refused = svc.refuseOutbound({ ...match, amountCents: 4500 })
+      expect(refused).toMatchObject({ id: body.transactionId, status: 'INCOMPLETE', returnReason: 'OTHER', details: expect.stringContaining('NO_ARRANGEMENT') })
+      expect(svc.refuseOutbound({ ...match, amountCents: 4500 })).toBeUndefined()
+      await advanceClock(DAY_MS)
+      expect(await deStatus(body.transactionId)).toBe('INCOMPLETE')
+      expect((await deEvents(body.transactionId)).map((e) => e.directEntryEvent.status)).toEqual(['RECEIVED', 'ACCEPTED', 'SUBMITTED', 'INCOMPLETE'])
+      expect((await getAccount(sender.accountHayId!)).totalBalance).toBe(0)
+    } finally {
+      svc.progressDelayMs = undefined
+      await resetClock()
+    }
+  })
+
   it('returnOutbound prefers the most recent SUBMITTED instruction over a newer ACCEPTED one of the same amount', async () => {
     const sender = await newAccount()
     svc.progressDelayMs = DAY_MS

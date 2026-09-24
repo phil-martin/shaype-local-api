@@ -51,6 +51,16 @@ export interface ReturnInput {
   returnReason?: DeReturnReason
 }
 
+/** A refusal of an outbound direct debit, matched like a return: the local sender (credited) account + amount. */
+export interface RefusalInput {
+  senderBsb: string
+  senderAccountNumber: string
+  /** positive cents */
+  amountCents: Cents
+  /** GenerateInboundDeRequestBody.refusalReason, e.g. RETURN_RECEIVED_OUT_OF_TIME */
+  refusalReason: string
+}
+
 declare module '../../context.js' {
   interface ServiceMap {
     directEntry: DirectEntryService
@@ -332,6 +342,18 @@ export class DirectEntryService {
     if (!r) return undefined
     const reason = input.returnReason ?? 'REFER_TO_CUSTOMER'
     return this.transition(r, 'RETURNED', 'PLATFORM', { details: `Returned by the recipient institution: ${reason}`, returnReason: reason })
+  }
+
+  /**
+   * A refusal from the recipient institution (utilities: generate-de-inbound REFUSAL/DEBIT; 00-open-questions
+   * W7), matched like returnOutbound: the instruction becomes INCOMPLETE with return reason OTHER and the
+   * refusal reason in `details`. Nothing has moved before COMPLETE, so only the status changes. Returns
+   * undefined when nothing matches.
+   */
+  refuseOutbound(input: RefusalInput): DeInstruction | undefined {
+    const r = this.repo.findMatching(input.senderBsb, input.senderAccountNumber, input.amountCents, ['SUBMITTED', 'ACCEPTED'])
+    if (!r) return undefined
+    return this.transition(r, 'INCOMPLETE', 'PLATFORM', { details: `Refused by the recipient institution: ${input.refusalReason}`, returnReason: 'OTHER' })
   }
 
   // ---------------------------------------------------------------- internals

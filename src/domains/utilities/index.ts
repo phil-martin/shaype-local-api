@@ -70,9 +70,11 @@
  *   out of the recipient, checked against DIRECT_DEBIT_PER_DAY (REFUSED_DAILY_DIRECT_DEBIT_LIMIT_BREACHED) and
  *   funds; RETURN (returnReason required, 400; DEBIT only, else 422) -> directEntry.returnOutbound on the
  *   local sender's in-flight outbound direct debit of that amount -> DIRECT_ENTRY RETURNED only (C9; 404 when
- *   none matches); REFUSAL (refusalReason required, 400) is accepted with no platform effect: the matrix
- *   leaves it undocumented, DirectEntryEventDto models outbound debits only and direct-entry exposes no
- *   refusal transition. The optional idempotencyKey replays.
+ *   none matches); REFUSAL (refusalReason required, 400; DEBIT only, else 422; spec §5.5 "RETURN/REFUSAL ->
+ *   DIRECT_ENTRY" and W7 win over the matrix's "nothing") -> directEntry.refuseOutbound on the in-flight
+ *   outbound direct debit of that amount whose sender is the local account, given as the recipient as in the
+ *   docs sample -> INCOMPLETE (return reason OTHER, the refusal reason in `details`) -> DIRECT_ENTRY
+ *   INCOMPLETE only (404 when none matches). The optional idempotencyKey replays.
  * - Mandate notifications: the spec's comma-joined trigger enums are split (by gen-contract); PCRD is also
  *   accepted on the Initiator mock, MCRR / MAMR are refused on both (400, C14). payto.emitMandateNotification
  *   sends exactly one MANDATE (the requested trigger, to that side; actionId from actionDetails) and applies

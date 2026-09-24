@@ -858,13 +858,44 @@ describe('generateInboundDeTransaction (POST /v0/utils/generate-de-inbound)', ()
     }
   })
 
-  it('RETURN needs returnReason, REFUSAL needs refusalReason (400); REFUSAL is accepted without a platform effect', async () => {
+  it('REFUSAL / DEBIT (spec §5.5, W7): the matching in-flight outbound direct debit becomes INCOMPLETE: DIRECT_ENTRY INCOMPLETE only', async () => {
+    const { customer, account: a } = await newAccount()
+    built.ctx.services.directEntry.progressDelayMs = 60_000
+    try {
+      const transactionId = randomUUID()
+      const dd = await post('/v1/direct-debits', {
+        idempotencyKey: randomUUID(), transactionId, amount: 11.98, description: 'Gym', senderBsb: a.bsb, senderAccountNumber: a.accountNumber, senderName: 'Local',
+        recipientBsb: EXTERNAL_BSB, recipientAccountNumber: '112836327', recipientName: 'External',
+      })
+      expect(dd.json().outcome, dd.body).toBe('ACCEPTED')
+      await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
+      // the docs sample's orientation: the local account is the recipient, the external party the sender
+      const body = deBody(a, { recordType: 'REFUSAL', refusalReason: 'RETURN_RECEIVED_OUT_OF_TIME', transactionType: 'DEBIT' })
+      const res = await post('/v0/utils/generate-de-inbound', body)
+      expect(res.statusCode, res.body).toBe(200)
+      expect(res.json()).toEqual({ message: 'Inbound Direct Entry request generated.' })
+      const got = (await get(`/v1/direct-debits/${transactionId}`)).json()
+      expect(got).toMatchObject({ outcome: 'INCOMPLETE', details: expect.stringContaining('RETURN_RECEIVED_OUT_OF_TIME') })
+      const ps = await payloads()
+      expect(ps.map((p) => p.type)).toEqual(['DIRECT_ENTRY'])
+      expect(ps[0]).toMatchObject({ customerHayId: customer, actionOwner: 'PLATFORM', directEntryEvent: { transactionId, type: 'DEBIT', direction: 'OUTBOUND', status: 'INCOMPLETE' } })
+      expect(await balances(a.accountHayId!)).toEqual({ total: 0, held: 0, available: 0 })
+      // nothing left to refuse; only direct debits can be refused
+      expectError(await post('/v0/utils/generate-de-inbound', body), 404, /^NOT_FOUND: /)
+      expectError(await post('/v0/utils/generate-de-inbound', { ...body, transactionType: 'CREDIT' }), 422, /^INVALID_ARGUMENT: /)
+    } finally {
+      built.ctx.services.directEntry.progressDelayMs = undefined
+      await clock({ advanceMs: 180_000 })
+    }
+    // the later hops were no-ops: the refusal is terminal
+    expect((await payloads()).filter((p) => p.type === 'DIRECT_ENTRY')).toHaveLength(1)
+  })
+
+  it('RETURN needs returnReason, REFUSAL needs refusalReason (400)', async () => {
     const { account: a } = await newAccount({ fund: 20 })
     await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
     expectError(await post('/v0/utils/generate-de-inbound', deBody(a, { recordType: 'RETURN', transactionType: 'DEBIT' })), 400, /^BAD_REQUEST: returnReason/)
     expectError(await post('/v0/utils/generate-de-inbound', deBody(a, { recordType: 'REFUSAL', transactionType: 'DEBIT' })), 400, /^BAD_REQUEST: refusalReason/)
-    const res = await post('/v0/utils/generate-de-inbound', deBody(a, { recordType: 'REFUSAL', refusalReason: 'RETURN_RECEIVED_OUT_OF_TIME', transactionType: 'DEBIT' }))
-    expect(res.statusCode, res.body).toBe(200)
     expect(await payloads()).toEqual([])
     expect(await balances(a.accountHayId!)).toEqual({ total: 20, held: 0, available: 20 })
   })
