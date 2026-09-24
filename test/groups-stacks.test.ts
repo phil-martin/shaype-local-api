@@ -32,8 +32,6 @@ beforeAll(async () => {
 })
 afterAll(async () => { await built.app.close() })
 
-const services = () => built.ctx.services as unknown as Record<string, unknown>
-
 let n = 0
 async function flush(): Promise<void> {
   await app.inject({ method: 'POST', url: '/_admin/flush' })
@@ -145,6 +143,20 @@ async function stackTransactions(accountId: string, query = 'offset=0&limit=100'
   expect(res.statusCode, res.body).toBe(200)
   return res.json()
 }
+async function newCard(accountId: string, customerHayId: string): Promise<S['HayCard']> {
+  const res = await post('/v0/cards/create', {
+    idempotencyKey: randomUUID(), accountId, customerHayId, cardType: 'VIRTUAL', firstName: 'Grp', lastName: 'Member', email: 'grp@example.com',
+    phoneNumber: { countryCodePrefix: '61', numberAfterPrefix: '412345678' }, pin: '1234',
+    deliveryAddress: { line1: '1 Test St', townOrCity: 'Sydney', administrativeRegion: 'NSW', postcode: '2000', countryCodeIso: 'AUS' },
+  })
+  expect(res.statusCode, res.body).toBe(200)
+  return res.json()
+}
+async function getCard(id: string): Promise<S['HayCard']> {
+  const res = await app.inject({ method: 'GET', url: `/v0/cards/${id}` })
+  expect(res.statusCode, res.body).toBe(200)
+  return res.json()
+}
 async function allPayloads(): Promise<any[]> {
   await flush()
   const res = await app.inject({ method: 'GET', url: '/_admin/notifications?limit=1000' })
@@ -218,6 +230,21 @@ describe('createHayGroup (POST /v0/groups/create)', () => {
     expect(again.statusCode).toBe(200)
     expect(again.json()).toEqual(first.json())
     expectError(await post('/v0/groups/create', { ...body, groupName: 'Other' }), 422, /^IDEMPOTENCY_KEY_REUSED/)
+  })
+
+  it('writes the group and its members atomically: a failure while adding members leaves no group behind', async () => {
+    const [m1, m2] = [await newCustomer(), await newCustomer()]
+    const repo = (groups as unknown as { repo: { addMember: (g: string, c: string) => void } }).repo
+    const real = repo.addMember.bind(repo)
+    const addMember = vi.spyOn(repo, 'addMember').mockImplementationOnce(real).mockImplementationOnce(() => { throw new Error('disk full') })
+    const name = `Atomic ${randomUUID().slice(0, 8)}`
+    try {
+      expect(() => groups.create({ customerHayIds: [m1, m2], groupName: name })).toThrow('disk full')
+    } finally {
+      addMember.mockRestore()
+    }
+    expect(built.ctx.db.prepare('SELECT count(*) AS n FROM groups WHERE name = ?').get(name)).toEqual({ n: 0 })
+    expect(groups.groupIdsForCustomer(m1)).toEqual([])
   })
 
   it('refuses an empty member list (422), an unknown member (404), an INACTIVE member (422 PERMISSION_DENIED) and a bad enum (400)', async () => {
@@ -322,6 +349,23 @@ describe('createHayAccountForGroup (POST /v0/groups/{groupHayId}/account)', () =
     expect(groups.accounts(g.groupHayId!).map((a) => a.id)).toEqual([first.hayAccount!.accountHayId, second.hayAccount!.accountHayId])
   })
 
+  it('reports the first-created open account once an earlier group account is CLOSED (GET, addCustomers, removeCustomer)', async () => {
+    const [m1, m2, m3] = [await newCustomer(), await newCustomer(), await newCustomer()]
+    for (const m of [m1, m2]) await newAccount(m, { lowRisk: false }) // open personal accounts keep them ACTIVE through the closure
+    const g = await newGroup([m1, m2])
+    const first = await newGroupAccount(g.groupHayId!)
+    expect((await post(`/v0/accounts/${first.accountHayId}/close`)).statusCode).toBe(202)
+    await flush()
+    expect((await getAccount(first.accountHayId!)).status).toBe('CLOSED')
+    expect((await getGroup(g.groupHayId!)).hayAccount).toMatchObject({ accountHayId: first.accountHayId, status: 'CLOSED' }) // only a closed one: still reported
+    const second = await newGroupAccount(g.groupHayId!)
+    expect((await getGroup(g.groupHayId!)).hayAccount).toMatchObject({ accountHayId: second.accountHayId, status: 'APPROVED' })
+    const added = await post(`/v0/groups/${g.groupHayId}/addCustomers`, { customerHayIds: [m3] })
+    expect(added.json().hayAccount.accountHayId).toBe(second.accountHayId)
+    const removed = await post(`/v0/groups/${g.groupHayId}/removeCustomer`, { customerId: m3 })
+    expect(removed.json().hayAccount.accountHayId).toBe(second.accountHayId)
+  })
+
   it('v1 createAccount with a GROUP holder works through the published service and lists under the group', async () => {
     const [m1, m2] = [await newCustomer(), await newCustomer()]
     const g = await newGroup([m1, m2])
@@ -392,6 +436,16 @@ describe('removeCustomerFromGroup (POST /v0/groups/{groupHayId}/removeCustomer)'
     expect((await allPayloads()).length).toBe(before) // config.emitCustomerInactive is off
   })
 
+  it('a member whose only account link was the group it leaves (open group account, no personal account) becomes INACTIVE', async () => {
+    const [m1, m2] = [await newCustomer(), await newCustomer()]
+    const g = await newGroup([m1, m2])
+    const a = await newGroupAccount(g.groupHayId!)
+    expect((await post(`/v0/groups/${g.groupHayId}/removeCustomer`, { customerId: m2 })).statusCode).toBe(200)
+    expect(await customer(m2)).toMatchObject({ status: 'INACTIVE' })
+    expect((await customer(m1)).status).toBe('ACTIVE')
+    expect((await getAccount(a.accountHayId!)).status).toBe('APPROVED')
+  })
+
   it('a customer with no linked account at all keeps its status; a member of another group with an open account stays ACTIVE', async () => {
     const [m1, m2, m3] = [await newCustomer(), await newCustomer(), await newCustomer()]
     const g = await newGroup([m1, m2])
@@ -404,21 +458,29 @@ describe('removeCustomerFromGroup (POST /v0/groups/{groupHayId}/removeCustomer)'
     expect((await customer(m1)).status).toBe('ACTIVE')
   })
 
-  it('cancels the cards the customer holds on the group accounts through the cards service when it offers the cascade', async () => {
+  it("voids the removed member's cards on the group accounts (CARD_STATUS_CHANGE {INACTIVE}, PLATFORM); other members' cards and its own personal cards stay ACTIVE", async () => {
     const [m1, m2] = [await newCustomer(), await newCustomer()]
+    const personal = await newAccount(m2, { lowRisk: false })
     const g = await newGroup([m1, m2])
     const a1 = await newGroupAccount(g.groupHayId!)
-    const a2 = (await post(`/v0/groups/${g.groupHayId}/account`, { idempotencyKey: randomUUID() })).json().hayAccount as HayAccount
-    const cancelForCustomerOnAccount = vi.fn()
-    const previous = services().cards
-    services().cards = { ...(previous as object | undefined), cancelForCustomerOnAccount }
-    try {
-      expect((await post(`/v0/groups/${g.groupHayId}/removeCustomer`, { customerId: m2 })).statusCode).toBe(200)
-    } finally {
-      if (previous === undefined) delete services().cards
-      else services().cards = previous
+    const a2 = await newGroupAccount(g.groupHayId!)
+    const c1 = await newCard(a1.accountHayId!, m1)
+    const c2 = await newCard(a1.accountHayId!, m2)
+    const c3 = await newCard(a2.accountHayId!, m2)
+    const own = await newCard(personal.accountHayId!, m2)
+    for (const c of [c1, c2, c3, own]) expect(c.cardStatus).toBe('ACTIVE')
+    const before = new Set((await allPayloads()).map((p) => p.idempotencyKey))
+    expect((await post(`/v0/groups/${g.groupHayId}/removeCustomer`, { customerId: m2 })).statusCode).toBe(200)
+    expect((await getCard(c2.cardHayId!)).cardStatus).toBe('INACTIVE')
+    expect((await getCard(c3.cardHayId!)).cardStatus).toBe('INACTIVE')
+    expect((await getCard(c1.cardHayId!)).cardStatus).toBe('ACTIVE')
+    expect((await getCard(own.cardHayId!)).cardStatus).toBe('ACTIVE')
+    const fresh = (await allPayloads()).filter((p) => !before.has(p.idempotencyKey) && p.type === 'CARD_STATUS_CHANGE')
+    expect(fresh.map((p) => p.cardHayId).sort()).toEqual([c2.cardHayId, c3.cardHayId].sort())
+    for (const p of fresh) {
+      expect(p).toMatchObject({ customerHayId: m2, actionOwner: 'PLATFORM', cardStatusChangeEvent: { cardStatus: 'INACTIVE' } })
+      assertValidNotification(p)
     }
-    expect(cancelForCustomerOnAccount.mock.calls).toEqual([[m2, a1.accountHayId, expect.any(String)], [m2, a2.accountHayId, expect.any(String)]])
   })
 
   it('emits CUSTOMER_STATUS_UPDATED {INACTIVE} (PLATFORM) for the cascade when config.emitCustomerInactive is on', async () => {
@@ -524,6 +586,14 @@ describe('createStack / getAllStacks', () => {
     expect((await listStacks(id, true)).map((s) => s.status)).toEqual(['CLOSED', 'OPEN'])
   })
 
+  it('refuses only characters that render as emoji: text symbols (© ® ™ ‼ ↔ ❤) are accepted, emoji and VS16 emoji sequences are not', async () => {
+    const id = (await newAccount()).accountHayId!
+    for (const name of ['Rent ©', 'Brand® ™', 'Now‼ ↔', 'Love ❤']) expect((await post(`/v0/accounts/${id}/stacks`, { name })).statusCode, name).toBe(200)
+    for (const name of ['Party 🎉', 'Love ❤\uFE0F', 'Trip 🇦🇺', '©\uFE0F']) {
+      expectError(await post(`/v0/accounts/${id}/stacks`, { name }), 422, /^INVALID_ARGUMENT: Stack names cannot contain emojis/)
+    }
+  })
+
   it('validates targetAmount: negative 400 (schema), > 2 dp 400, above the MAX_BALANCE limit 422', async () => {
     const a = await newAccount()
     const id = a.accountHayId!
@@ -583,6 +653,21 @@ describe('updateStack (PUT /v0/accounts/{accountId}/stacks/{stackId})', () => {
     expectError(await app.inject({ method: 'PUT', url: `/v0/accounts/${other.accountHayId}/stacks/${stackId}`, payload: { name: 'x' } }), 404, /^NOT_FOUND: Stack/)
     expect((await post(`/v0/accounts/${accountId}/stacks/${stackId}/close`)).statusCode).toBe(200)
     expectError(await app.inject({ method: 'PUT', url: `/v0/accounts/${accountId}/stacks/${stackId}`, payload: { name: 'x' } }), 422, /^STACK_CLOSED/)
+  })
+})
+
+describe('stack-scoped operations on an unknown account', () => {
+  it('answer 404 NOT_FOUND: Account (not Stack) like getAllStacks / createStack / the transaction lists', async () => {
+    const { holder, stackId } = await fundedWithStack(10)
+    const base = `/v0/accounts/${UNKNOWN_ID}/stacks`
+    const account404 = new RegExp(`^NOT_FOUND: Account ${UNKNOWN_ID}`)
+    expectError(await app.inject({ method: 'PUT', url: `${base}/${stackId}`, payload: { name: 'x' } }), 404, account404)
+    expectError(await post(`${base}/${stackId}/close`), 404, account404)
+    expectError(await transferIn(UNKNOWN_ID, stackId, { amount: 1, customerId: holder }), 404, account404)
+    expectError(await transferOut(UNKNOWN_ID, stackId, { amount: 1, customerId: holder }), 404, account404)
+    expectError(await post(`${base}/transactions`, { amount: 1, customerId: holder, withdrawalStackId: stackId, depositStackId: UNKNOWN_ID }), 404, account404)
+    expectError(await app.inject({ method: 'GET', url: `${base}/${stackId}/transactions?offset=0&limit=10` }), 404, account404)
+    expect(() => stacks.roundUp(UNKNOWN_ID, stackId, 1)).toThrow(account404)
   })
 })
 
@@ -659,7 +744,7 @@ describe('accountToStackTransfer (transfer-in)', () => {
     const stranger = await newCustomer()
     expectError(await transferIn(accountId, stackId, { amount: 1, customerId: stranger }), 422, new RegExp(`^PERMISSION_DENIED: Customer ${stranger} does not hold account ${accountId}`))
     expectError(await transferIn(accountId, UNKNOWN_ID, { amount: 1, customerId: holder }), 404, /^NOT_FOUND: Stack/)
-    expectError(await transferIn(UNKNOWN_ID, stackId, { amount: 1, customerId: holder }), 404, /^NOT_FOUND: Stack/)
+    expectError(await transferIn(UNKNOWN_ID, stackId, { amount: 1, customerId: holder }), 404, new RegExp(`^NOT_FOUND: Account ${UNKNOWN_ID}`))
     expect((await post(`/v0/accounts/${accountId}/block`, { note: 'x', accountBlockStyle: 'ACCOUNT_ONLY' })).statusCode).toBe(200)
     expectError(await transferIn(accountId, stackId, { amount: 1, customerId: holder }), 422, new RegExp(`^ACCOUNT_BLOCKED: Account ${accountId} is LOCKED`))
     expect((await post(`/v0/accounts/${accountId}/unblock`, { note: 'x' })).statusCode).toBe(200)
@@ -697,7 +782,7 @@ describe('stackToAccountTransfer (transfer-out)', () => {
     expect(res.json()).toEqual({ outcome: 'ACCEPTED', transactionId: expect.stringMatching(UUID_RE) })
     expect(await getAccount(accountId)).toMatchObject({ totalBalance: 100, availableBalance: 65.5, stacksBalance: 34.5 })
     expect(await stack(accountId, stackId)).toMatchObject({ balance: 34.5 })
-    const [latest] = await stackTransactions(accountId, 'offset=0&limit=1')
+    const [latest] = await stackTransactions(accountId, 'offset=1&limit=1') // oldest first: the transfer-in, then this
     expect(latest).toMatchObject({ hayId: res.json().transactionId, amount: -25.5, notes: 'back', customerId: holder, originType: 'CUSTOMER', type: 'STANDARD' })
     expect((await transferOut(accountId, stackId, { amount: 34.51, customerId: holder })).json()).toEqual({ outcome: 'REFUSED_INSUFFICIENT_FUNDS' })
     expect((await transferOut(accountId, stackId, { amount: 34.5, customerId: holder })).json().outcome).toBe('ACCEPTED')
@@ -726,7 +811,7 @@ describe('stackToStackTransfer (POST /v0/accounts/{accountId}/stacks/transaction
     expect(await stack(accountId, from)).toMatchObject({ balance: 24.75 })
     expect(await stack(accountId, to)).toMatchObject({ balance: 45.25 })
 
-    const [w] = await stackTransactions(accountId, 'offset=0&limit=10', from)
+    const w = (await stackTransactions(accountId, 'offset=0&limit=10', from)).at(-1)
     const [d] = await stackTransactions(accountId, 'offset=0&limit=10', to)
     expect(w).toMatchObject({ hayId: out.withdrawalTransactionId, stackHayId: from, amount: -45.25, counterpartTransactionId: out.depositTransactionId, notes: 'rebalance', customerId: holder, originType: 'CUSTOMER', type: 'STANDARD' })
     expect(d).toMatchObject({ hayId: out.depositTransactionId, stackHayId: to, amount: 45.25, counterpartTransactionId: out.withdrawalTransactionId, notes: 'rebalance' })
@@ -783,8 +868,8 @@ describe('closeStack (POST /v0/accounts/{accountId}/stacks/{stackId}/close)', ()
     expect(closed).toMatchObject({ status: 'CLOSED', balance: 0, closedAtUtc: expect.stringMatching(ISO_MICROS) })
     const txs = await stackTransactions(accountId)
     expect(txs).toHaveLength(2)
-    expect(txs[0]).toMatchObject({ stackHayId: stackId, amount: -33.33, originType: 'OPERATIONS', customerId: holder, type: 'STANDARD', stack: { status: 'CLOSED', balance: 0 } })
-    expect(txs[1]).toMatchObject({ amount: 33.33, originType: 'CUSTOMER' })
+    expect(txs[0]).toMatchObject({ amount: 33.33, originType: 'CUSTOMER' })
+    expect(txs[1]).toMatchObject({ stackHayId: stackId, amount: -33.33, originType: 'OPERATIONS', customerId: holder, type: 'STANDARD', stack: { status: 'CLOSED', balance: 0 } })
     // history stays visible through the by-stack list; a repeat close confirms without a new record
     expect(await stackTransactions(accountId, 'offset=0&limit=10', stackId)).toHaveLength(2)
     expect((await post(`/v0/accounts/${accountId}/stacks/${stackId}/close`)).json()).toBe(true)
@@ -811,14 +896,14 @@ describe('closeStack (POST /v0/accounts/{accountId}/stacks/{stackId}/close)', ()
     const gs = await createStack(ga.accountHayId!, 'Shared')
     expect((await transferIn(ga.accountHayId!, gs, { amount: 8, customerId: m1 })).json().outcome).toBe('ACCEPTED')
     expect((await post(`/v0/accounts/${ga.accountHayId}/stacks/${gs}/close`)).json()).toBe(true)
-    const [sweep] = await stackTransactions(ga.accountHayId!)
+    const sweep = (await stackTransactions(ga.accountHayId!)).at(-1)
     expect(sweep).toMatchObject({ amount: -8, originType: 'OPERATIONS' })
     expect(sweep).not.toHaveProperty('customerId')
   })
 })
 
 describe('stack transaction lists', () => {
-  it('lists newest first with paging, filters by type (ROUND_UP records come from the platform hook) and embeds the stack', async () => {
+  it('lists in posting order (oldest first, spec §4) with paging, filters by type (ROUND_UP records come from the platform hook) and embeds the stack', async () => {
     const { holder, accountId, stackId } = await fundedWithStack(100, 'Main')
     const other = await createStack(accountId, 'Other')
     for (const amount of [1, 2, 3]) expect((await transferIn(accountId, stackId, { amount, customerId: holder })).json().outcome).toBe('ACCEPTED')
@@ -827,17 +912,39 @@ describe('stack transaction lists', () => {
     expect(ru.outcome).toBe('ACCEPTED')
 
     const all = await stackTransactions(accountId)
-    expect(all.map((t) => t.amount)).toEqual([0.55, 4, 3, 2, 1])
-    expect(all[0]).toMatchObject({ hayId: ru.transactionId, type: 'ROUND_UP', originType: 'TRANSACTION', originId: UNKNOWN_ID, stackHayId: stackId, stack: { name: 'Main', balance: 6.55 } })
-    expect(all[0]).not.toHaveProperty('customerId')
-    expect((await stackTransactions(accountId, 'offset=1&limit=2')).map((t) => t.amount)).toEqual([4, 3])
-    expect((await stackTransactions(accountId, 'offset=4&limit=2')).map((t) => t.amount)).toEqual([1])
+    expect(all.map((t) => t.amount)).toEqual([1, 2, 3, 4, 0.55])
+    expect(all[4]).toMatchObject({ hayId: ru.transactionId, type: 'ROUND_UP', originType: 'TRANSACTION', originId: UNKNOWN_ID, stackHayId: stackId, stack: { name: 'Main', balance: 6.55 } })
+    expect(all[4]).not.toHaveProperty('customerId')
+    expect((await stackTransactions(accountId, 'offset=1&limit=2')).map((t) => t.amount)).toEqual([2, 3])
+    expect((await stackTransactions(accountId, 'offset=4&limit=2')).map((t) => t.amount)).toEqual([0.55])
     expect((await stackTransactions(accountId, 'offset=0&limit=10&type=ROUND_UP')).map((t) => t.amount)).toEqual([0.55])
-    expect((await stackTransactions(accountId, 'offset=0&limit=10&type=STANDARD')).map((t) => t.amount)).toEqual([4, 3, 2, 1])
-    expect((await stackTransactions(accountId, 'offset=0&limit=10', stackId)).map((t) => t.amount)).toEqual([0.55, 3, 2, 1])
+    expect((await stackTransactions(accountId, 'offset=0&limit=10&type=STANDARD')).map((t) => t.amount)).toEqual([1, 2, 3, 4])
+    expect((await stackTransactions(accountId, 'offset=0&limit=10', stackId)).map((t) => t.amount)).toEqual([1, 2, 3, 0.55])
     expect((await stackTransactions(accountId, 'offset=0&limit=10&type=STANDARD', other)).map((t) => t.amount)).toEqual([4])
     expect((await stackTransactions(accountId, 'offset=0&limit=10&type=ROUND_UP', other))).toEqual([])
     expect(await getAccount(accountId)).toMatchObject({ availableBalance: 89.45, stacksBalance: 10.55 })
+  })
+
+  it('runs a fixed number of queries per page, however many rows it returns (no per-row stack lookup)', async () => {
+    const small = await fundedWithStack(100, 'Small')
+    const big = await fundedWithStack(100, 'Big')
+    const bigOther = await createStack(big.accountId, 'Big 2')
+    expect((await transferIn(small.accountId, small.stackId, { amount: 1, customerId: small.holder })).json().outcome).toBe('ACCEPTED')
+    for (const amount of [1, 2, 3]) {
+      expect((await transferIn(big.accountId, big.stackId, { amount, customerId: big.holder })).json().outcome).toBe('ACCEPTED')
+      expect((await transferIn(big.accountId, bigOther, { amount, customerId: big.holder })).json().outcome).toBe('ACCEPTED')
+    }
+    const prepare = vi.spyOn(built.ctx.db, 'prepare')
+    try {
+      const count = async (accountId: string, rows: number) => {
+        prepare.mockClear()
+        expect(await stackTransactions(accountId)).toHaveLength(rows)
+        return prepare.mock.calls.length
+      }
+      expect(await count(big.accountId, 6)).toBe(await count(small.accountId, 1))
+    } finally {
+      prepare.mockRestore()
+    }
   })
 
   it('validates paging (offset and limit required, limit 1..1000, offset >= 0, type enum) and ids (404)', async () => {
@@ -879,6 +986,6 @@ describe('webhooks emitted around this domain', () => {
     const payloads = await allPayloads()
     expect(payloads.length).toBeGreaterThan(10)
     for (const p of payloads) assertValidNotification(p)
-    expect(new Set(payloads.map((p) => p.type))).toEqual(new Set(['ACCOUNT_STATUS_CHANGE', 'CUSTOMER_STATUS_UPDATED', 'ONBOARDING_PASSED', 'ONBOARDING_FAILED', 'TRANSACTION']))
+    expect(new Set(payloads.map((p) => p.type))).toEqual(new Set(['ACCOUNT_STATUS_CHANGE', 'CARD_STATUS_CHANGE', 'CUSTOMER_STATUS_UPDATED', 'ONBOARDING_PASSED', 'ONBOARDING_FAILED', 'TRANSACTION']))
   })
 })

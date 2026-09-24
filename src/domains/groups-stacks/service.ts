@@ -12,7 +12,6 @@ import { badRequest, notFound, unprocessable } from '../../lib/errors.js'
 import { uuid } from '../../lib/ids.js'
 import { fromCents, hasAtMostTwoDecimals, toCents, type Cents } from '../../lib/money.js'
 import type { Account } from '../accounts/index.js'
-import { deps } from './deps.js'
 import type { BusinessIdentifiers, Group, GroupType, GroupsStacksRepo, Stack, StackOriginType, StackTransaction, StackTransactionType } from './repo.js'
 
 type S = components['schemas']
@@ -59,7 +58,8 @@ declare module '../../context.js' {
 
 /** Customer statuses that can never join a group: closed or rejected records. */
 const UNJOINABLE: ReadonlySet<string> = new Set(['INACTIVE', 'REJECTED'])
-const EMOJI_RE = /\p{Extended_Pictographic}/u
+/** Characters that render as emoji: default-emoji code points, or a pictograph forced to emoji style by VS16 (text symbols such as © ™ ↔ pass). */
+const EMOJI_RE = /\p{Emoji_Presentation}|\p{Extended_Pictographic}\uFE0F/u
 
 /** Request amount -> cents; more than two decimal places or a non-positive value is a 400, never rounded. */
 function requestCents(amount: number, field: string, opts: { allowZero?: boolean } = {}): Cents {
@@ -133,10 +133,11 @@ export class GroupsService {
 
   /**
    * HayJointAccount: the group plus its account — `account` when the caller just created one, else the
-   * group's first-created account; omitted while the group has none.
+   * group's first-created non-CLOSED account, else its first-created account; omitted while it has none.
    */
   toJointAccount(g: Group, account?: Account): HayJointAccount {
-    const a = account ?? this.accounts(g.id)[0]
+    const all = account ? [] : this.accounts(g.id)
+    const a = account ?? all.find((x) => x.status !== 'CLOSED') ?? all[0]
     return compact({
       groupHayId: g.id,
       name: g.name,
@@ -202,8 +203,9 @@ export class GroupsService {
   /**
    * removeCustomerFromGroup: unknown customer -> 404; not a member -> 422 NOT_A_MEMBER; the final member
    * -> 422 LAST_GROUP_MEMBER. Synchronous cascade (00-open-questions T1/S18): the customer's cards on the
-   * group's accounts are cancelled (cards dep, when present) and the customer becomes INACTIVE when it
-   * is linked only to CLOSED accounts (its own and those of its remaining groups).
+   * group's accounts are voided (cards.cancelAllForAccount restricted to the cardholder) and the customer
+   * becomes INACTIVE when no open account remains (personal or through a remaining group) and it was
+   * linked to at least one account — including those of the group just left.
    */
   removeMember(id: string, customerId: string): Group {
     const g = this.get(id)
@@ -220,17 +222,12 @@ export class GroupsService {
     this.ctx.events.emit('group.membershipChanged', { group: structuredClone(g), added: [], removed: [customerId] })
 
     const groupAccounts = this.accounts(g.id)
-    const cards = deps(this.ctx).cards
-    if (cards) {
-      if (typeof cards.cancelForCustomerOnAccount === 'function') {
-        for (const a of groupAccounts) cards.cancelForCustomerOnAccount(customerId, a.id, 'Customer removed from group')
-      } else {
-        this.ctx.log.warn({ groupId: g.id, customerId }, 'groups: cards.cancelForCustomerOnAccount is not implemented; cards on the group accounts were not cancelled')
-      }
-    }
+    for (const a of groupAccounts) this.ctx.services.cards.cancelAllForAccount(a.id, 'Customer removed from group', { customerId })
     const accounts = this.ctx.services.accounts
     const c = customers.find(customerId)
-    if (c && c.status !== 'INACTIVE' && !accounts.hasOpenAccounts(customerId) && this.hasAnyAccount(customerId)) customers.markInactive(customerId)
+    // "linked" counts the accounts of the group just left, so leaving the only (joint) account deactivates the customer
+    const linked = groupAccounts.length > 0 || this.hasAnyAccount(customerId)
+    if (c && c.status !== 'INACTIVE' && linked && !accounts.hasOpenAccounts(customerId)) customers.markInactive(customerId)
     return g
   }
 
@@ -265,8 +262,9 @@ export class StacksService {
     return this.repo.stackById(id)
   }
 
-  /** The stack, which must belong to the account. @throws 404 when unknown or on another account */
+  /** The stack, which must belong to the account. @throws 404 NOT_FOUND: Account for an unknown account, NOT_FOUND: Stack when the stack is unknown or on another account */
   get(accountId: string, stackId: string): Stack {
+    this.ctx.services.accounts.get(accountId)
     const s = this.repo.stackById(stackId)
     if (!s || s.accountId !== accountId) throw notFound(`NOT_FOUND: Stack ${stackId} not found`)
     return s
@@ -300,8 +298,9 @@ export class StacksService {
     }
   }
 
-  transactionToResponse(t: StackTransaction): HayStackTransaction {
-    const stack = this.repo.stackById(t.stackId)
+  /** `stacks` (id -> stack) lets a list resolve every embedded stack from one query instead of one per row. */
+  transactionToResponse(t: StackTransaction, stacks?: ReadonlyMap<string, Stack>): HayStackTransaction {
+    const stack = stacks ? stacks.get(t.stackId) : this.repo.stackById(t.stackId)
     return compact({
       hayId: t.id,
       accountHayId: t.accountId,
@@ -318,13 +317,16 @@ export class StacksService {
     })
   }
 
-  /** getAllStackTransactions / getTransactionsForStack: newest first, `type` filter, offset/limit (limit 1..1000, offset >= 0 -> 400). */
+  /** getAllStackTransactions / getTransactionsForStack: posting order (oldest first, spec §4), `type` filter, offset/limit (limit 1..1000, offset >= 0 -> 400). */
   listTransactions(accountId: string, page: { offset: number; limit: number; type?: StackTransactionType | null }, stackId?: string): HayStackTransaction[] {
     this.ctx.services.accounts.get(accountId)
     if (stackId) this.get(accountId, stackId)
     if (!Number.isInteger(page.limit) || page.limit < 1 || page.limit > 1000) throw badRequest('BAD_REQUEST: limit must be between 1 and 1000')
     if (!Number.isInteger(page.offset) || page.offset < 0) throw badRequest('BAD_REQUEST: offset must be greater than or equal to 0')
-    return this.repo.transactions({ accountId, stackId, type: page.type ?? undefined, offset: page.offset, limit: page.limit }).map((t) => this.transactionToResponse(t))
+    const rows = this.repo.transactions({ accountId, stackId, type: page.type ?? undefined, offset: page.offset, limit: page.limit })
+    if (!rows.length) return []
+    const byId = new Map(this.repo.stacksForAccount(accountId, true).map((s) => [s.id, s]))
+    return rows.map((t) => this.transactionToResponse(t, byId))
   }
 
   // ---------------------------------------------------------------- create / update / close

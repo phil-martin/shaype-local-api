@@ -69,11 +69,14 @@ export class GroupsStacksRepo {
     return nextSeq(this.db, 'group')
   }
 
+  /** The group row and its member rows, atomically. */
   insertGroup(g: Group, seq: number): void {
-    this.db
-      .prepare('INSERT INTO groups(id, seq, name, group_type, business_identifiers, created_at, updated_at) VALUES (?,?,?,?,?,?,?)')
-      .run(g.id, seq, g.name, g.groupType, g.businessIdentifiers === undefined ? null : JSON.stringify(g.businessIdentifiers), g.createdAt, g.updatedAt ?? null)
-    for (const cid of g.customerHayIds) this.addMember(g.id, cid)
+    this.db.transaction(() => {
+      this.db
+        .prepare('INSERT INTO groups(id, seq, name, group_type, business_identifiers, created_at, updated_at) VALUES (?,?,?,?,?,?,?)')
+        .run(g.id, seq, g.name, g.groupType, g.businessIdentifiers === undefined ? null : JSON.stringify(g.businessIdentifiers), g.createdAt, g.updatedAt ?? null)
+      for (const cid of g.customerHayIds) this.addMember(g.id, cid)
+    })()
   }
 
   saveGroup(g: Group): void {
@@ -171,7 +174,7 @@ export class GroupsStacksRepo {
     return r ? transactionFromRow(r) : undefined
   }
 
-  /** Newest first (transaction time, then posting order), paged. */
+  /** Posting (= creation) order, oldest first (spec §4: no sortBy -> creation time ascending), paged. */
   transactions(f: StackTransactionFilter): StackTransaction[] {
     const where = ['account_id = ?']
     const args: unknown[] = [f.accountId]
@@ -179,7 +182,7 @@ export class GroupsStacksRepo {
     if (f.type) { where.push('type = ?'); args.push(f.type) }
     args.push(f.limit, f.offset)
     return (this.db
-      .prepare(`SELECT * FROM stack_transactions WHERE ${where.join(' AND ')} ORDER BY transaction_time DESC, seq DESC LIMIT ? OFFSET ?`)
+      .prepare(`SELECT * FROM stack_transactions WHERE ${where.join(' AND ')} ORDER BY seq ASC LIMIT ? OFFSET ?`)
       .all(...args) as Row[]).map(transactionFromRow)
   }
 }
