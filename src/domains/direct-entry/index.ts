@@ -46,7 +46,7 @@
  *   (actionOwner CLIENT: the portal is the client's). Dates are UTC calendar days; a schedule is due when
  *   nextRunDate <= today at any tick (request or clock change), missed periods are caught up in order.
  *   Occurrences are anchored on startDate; a MONTHLY / QUARTERLY day that does not exist rolls forward
- *   (30 Feb -> 2 Mar). ONE_TIME carries numberOfPayments 1 and no frequency / endDate. Whichever of
+ *   (30 Feb -> 1 Mar, the first day that exists after it). ONE_TIME carries numberOfPayments 1 and no frequency / endDate. Whichever of
  *   numberOfPayments / endDate is reached first ends the schedule (COMPLETED, set right after the last
  *   occurrence). Occurrences post through the ledger like makeTransferV1 (internal legs for BSB 636220,
  *   INTERBANK_TRANSFER_OUT via CUSCAL_NPP_TRANSFER_OUT otherwise) or BPAY_TRANSFER_OUT, stamped

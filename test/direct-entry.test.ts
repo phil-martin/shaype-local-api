@@ -615,14 +615,22 @@ describe('scheduled payments', () => {
     await setClock('2027-01-31T10:00:00Z')
     try {
       const account = await fundedAccount(1000)
-      expect(occurrence('2027-01-31', 'MONTHLY', 1)).toBe('2027-03-03')
+      // "next available date where invalid date is encountered in schedule i.e. 30th February": 1 March
+      expect(occurrence('2027-01-31', 'MONTHLY', 1)).toBe('2027-03-01')
+      expect(occurrence('2027-01-30', 'MONTHLY', 1)).toBe('2027-03-01')
+      expect(occurrence('2028-01-30', 'MONTHLY', 1)).toBe('2028-03-01') // leap year: 29 Feb exists, 30 Feb does not
+      expect(occurrence('2028-01-29', 'MONTHLY', 1)).toBe('2028-02-29')
       expect(occurrence('2027-01-31', 'MONTHLY', 2)).toBe('2027-03-31')
+      expect(occurrence('2027-01-31', 'MONTHLY', 3)).toBe('2027-05-01')
+      expect(occurrence('2026-11-30', 'QUARTERLY', 1)).toBe('2027-03-01')
+      expect(occurrence('2026-11-30', 'QUARTERLY', 2)).toBe('2027-05-30')
+      expect(occurrence('2027-12-31', 'MONTHLY', 2)).toBe('2028-03-01') // year rollover, then 31 Feb
       expect(nextOccurrence('2027-01-31', 'QUARTERLY', '2027-01-31')).toBe('2027-05-01')
       const s = await createSchedule(scheduleInput(account, { frequency: 'MONTHLY', startDate: '2027-01-31', endDate: '2027-03-15', amount: 10 }))
       expect(await getSchedule(account.accountHayId!, s.hayId!)).toMatchObject({ status: 'ACTIVE', numberOfProcessedPayments: 1 })
-      await setClock('2027-03-02T10:00:00Z')
+      await setClock('2027-02-28T10:00:00Z')
       expect((await getSchedule(account.accountHayId!, s.hayId!)).numberOfProcessedPayments).toBe(1)
-      await setClock('2027-04-10T10:00:00Z') // 3 March ran late; 31 March is after endDate
+      await setClock('2027-04-10T10:00:00Z') // 1 March ran late; 31 March is after endDate
       expect(await getSchedule(account.accountHayId!, s.hayId!)).toMatchObject({ status: 'COMPLETED', numberOfProcessedPayments: 2 })
 
       const weekly = await createSchedule(scheduleInput(account, { frequency: 'WEEKLY', startDate: '2027-04-01', numberOfPayments: 5, amount: 1 }))
