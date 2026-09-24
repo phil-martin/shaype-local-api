@@ -141,11 +141,16 @@ export class DirectEntryRepo {
     return rows.map(toInstruction)
   }
 
-  /** Most recent instruction in one of `statuses` matching the sender BSB + account number + amount. */
+  /**
+   * The instruction matching the sender BSB + account number + amount whose status comes first in
+   * `statuses` (priority order), the most recent one within that status.
+   */
   findMatching(senderBsb: string, senderAccountNumber: string, amount: Cents, statuses: readonly DeStatus[]): DeInstruction | undefined {
+    const marks = statuses.map(() => '?').join(',')
+    const priority = `CASE status ${statuses.map((_, i) => `WHEN ? THEN ${i}`).join(' ')} END`
     const r = this.db
-      .prepare(`SELECT * FROM de_instructions WHERE sender_bsb = ? AND sender_account_number = ? AND amount = ? AND status IN (${statuses.map(() => '?').join(',')}) ORDER BY seq DESC LIMIT 1`)
-      .get(senderBsb, senderAccountNumber, amount, ...statuses) as Record<string, unknown> | undefined
+      .prepare(`SELECT * FROM de_instructions WHERE sender_bsb = ? AND sender_account_number = ? AND amount = ? AND status IN (${marks}) ORDER BY ${priority}, seq DESC LIMIT 1`)
+      .get(senderBsb, senderAccountNumber, amount, ...statuses, ...statuses) as Record<string, unknown> | undefined
     return r ? toInstruction(r) : undefined
   }
 

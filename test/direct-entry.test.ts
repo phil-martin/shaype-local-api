@@ -433,6 +433,28 @@ describe('createDirectDebitV1: lifecycle', () => {
     }
   })
 
+  it('returnOutbound prefers the most recent SUBMITTED instruction over a newer ACCEPTED one of the same amount', async () => {
+    const sender = await newAccount()
+    svc.progressDelayMs = DAY_MS
+    try {
+      const older = await acceptedDd(sender, { amount: 33 })
+      await advanceClock(DAY_MS)
+      expect(await deStatus(older.transactionId)).toBe('SUBMITTED')
+      const newer = await acceptedDd(sender, { amount: 33 })
+      expect(await deStatus(newer.transactionId)).toBe('ACCEPTED')
+      const match = { senderBsb: LOCAL_BSB, senderAccountNumber: sender.accountNumber!, amountCents: 3300 }
+      expect(svc.returnOutbound(match)?.id).toBe(older.transactionId)
+      expect(await deStatus(newer.transactionId)).toBe('ACCEPTED')
+      expect(svc.returnOutbound(match)?.id).toBe(newer.transactionId) // no SUBMITTED left: the ACCEPTED one
+      expect(svc.returnOutbound(match)).toBeUndefined()
+      await advanceClock(2 * DAY_MS) // drain the pending hops (no-ops now)
+      expect(await deStatus(newer.transactionId)).toBe('RETURNED')
+    } finally {
+      svc.progressDelayMs = undefined
+      await resetClock()
+    }
+  })
+
   it('debits a local recipient in the same transaction; its DIRECT_DEBIT_PER_DAY limit or funds refusal returns the instruction', async () => {
     const sender = await newAccount()
     const debtor = await fundedAccount(1000)
