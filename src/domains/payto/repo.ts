@@ -2,6 +2,7 @@
  * SQL for mandates, mandate_actions, mandate_instructions and mandate_schedules: rows <-> entities.
  */
 import type { components } from '../../contract/generated/b2b-types.js'
+import type Database from 'better-sqlite3'
 import { json, nextSeq, type Db } from '../../db/index.js'
 import type { Cents } from '../../lib/money.js'
 
@@ -198,44 +199,68 @@ export interface MandateFilter {
 }
 
 type Row = Record<string, unknown>
+type Statement = Database.Statement<unknown[]>
 
 export class MandateRepo {
+  /** Prepared statements by SQL text: tick() runs on every request, so nothing is re-prepared per call. */
+  private readonly statements = new Map<string, Statement>()
+
   constructor(private readonly db: Db) {}
+
+  private stmt(sql: string): Statement {
+    let s = this.statements.get(sql)
+    if (!s) {
+      s = this.db.prepare(sql)
+      this.statements.set(sql, s)
+    }
+    return s
+  }
+
+  // ---------------------------------------------------------------- settings (meta table: wiped by /_admin/reset)
+
+  setting(key: string): string | undefined {
+    return (this.stmt('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined)?.value
+  }
+
+  setSetting(key: string, value: string | undefined): void {
+    if (value === undefined) this.stmt('DELETE FROM meta WHERE key = ?').run(key)
+    else this.stmt('INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value)
+  }
 
   // ---------------------------------------------------------------- mandates
 
   insertMandate(m: Mandate): void {
     const r = mandateToRow(m)
     const cols = Object.keys(r)
-    this.db.prepare(`INSERT INTO mandates(seq, ${cols.join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})`).run(nextSeq(this.db, 'mandate'), ...cols.map((k) => r[k]))
+    this.stmt(`INSERT INTO mandates(seq, ${cols.join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})`).run(nextSeq(this.db, 'mandate'), ...cols.map((k) => r[k]))
   }
 
   saveMandate(m: Mandate): void {
     const r = mandateToRow(m)
     const cols = Object.keys(r).filter((k) => k !== 'id')
-    this.db.prepare(`UPDATE mandates SET ${cols.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...cols.map((k) => r[k]), m.id)
+    this.stmt(`UPDATE mandates SET ${cols.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...cols.map((k) => r[k]), m.id)
   }
 
   setLastDueDate(mandateId: string, dueDate: string): void {
-    this.db.prepare('UPDATE mandates SET last_due_date = ? WHERE id = ?').run(dueDate, mandateId)
+    this.stmt('UPDATE mandates SET last_due_date = ? WHERE id = ?').run(dueDate, mandateId)
   }
 
   mandateById(id: string): Mandate | undefined {
-    const r = this.db.prepare('SELECT * FROM mandates WHERE id = ?').get(id) as Row | undefined
+    const r = this.stmt('SELECT * FROM mandates WHERE id = ?').get(id) as Row | undefined
     return r ? mandateFromRow(r) : undefined
   }
 
   mandateIdsForCreditorAccount(accountId: string): string[] {
-    return (this.db.prepare('SELECT id FROM mandates WHERE creditor_account_id = ? ORDER BY seq ASC').all(accountId) as { id: string }[]).map((r) => r.id)
+    return (this.stmt('SELECT id FROM mandates WHERE creditor_account_id = ? ORDER BY seq ASC').all(accountId) as { id: string }[]).map((r) => r.id)
   }
 
   mandatesForAccount(accountId: string): Mandate[] {
-    return (this.db.prepare('SELECT * FROM mandates WHERE creditor_account_id = ? OR debtor_account_id = ? ORDER BY seq ASC').all(accountId, accountId) as Row[]).map(mandateFromRow)
+    return (this.stmt('SELECT * FROM mandates WHERE creditor_account_id = ? OR debtor_account_id = ? ORDER BY seq ASC').all(accountId, accountId) as Row[]).map(mandateFromRow)
   }
 
   /** Mandates whose validity ended before `today` (YYYY-MM-DD) and are not yet CANCELLED. */
   expiredMandates(today: string): Mandate[] {
-    return (this.db.prepare(`SELECT * FROM mandates WHERE status != 'CANCELLED' AND validity_end_date IS NOT NULL AND validity_end_date < ? ORDER BY seq ASC`).all(today) as Row[]).map(mandateFromRow)
+    return (this.stmt(`SELECT * FROM mandates WHERE status != 'CANCELLED' AND validity_end_date IS NOT NULL AND validity_end_date < ? ORDER BY seq ASC`).all(today) as Row[]).map(mandateFromRow)
   }
 
   /** Payer-side search: only mandates whose debtor is a local account (Cuscal restricts the cache to the Payer's own accounts). */
@@ -256,7 +281,7 @@ export class MandateRepo {
       where.push(`status IN (${filter.statuses.map(() => '?').join(', ')})`)
       args.push(...filter.statuses)
     }
-    const sql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+    const sql = `WHERE ${where.join(' AND ')}`
     const totalCount = (this.db.prepare(`SELECT COUNT(*) AS n FROM mandates ${sql}`).get(...args) as { n: number }).n
     const result = (this.db.prepare(`SELECT * FROM mandates ${sql} ORDER BY seq ASC LIMIT ? OFFSET ?`).all(...args, page.limit, page.offset) as Row[]).map(mandateFromRow)
     return { result, totalCount }
@@ -267,40 +292,40 @@ export class MandateRepo {
   insertAction(a: MandateAction): void {
     const r = actionToRow(a)
     const cols = Object.keys(r)
-    this.db.prepare(`INSERT INTO mandate_actions(seq, ${cols.join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})`).run(nextSeq(this.db, 'mandate-action'), ...cols.map((k) => r[k]))
+    this.stmt(`INSERT INTO mandate_actions(seq, ${cols.join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})`).run(nextSeq(this.db, 'mandate-action'), ...cols.map((k) => r[k]))
   }
 
   saveAction(a: MandateAction): void {
     const r = actionToRow(a)
     const cols = Object.keys(r).filter((k) => k !== 'id')
-    this.db.prepare(`UPDATE mandate_actions SET ${cols.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...cols.map((k) => r[k]), a.id)
+    this.stmt(`UPDATE mandate_actions SET ${cols.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...cols.map((k) => r[k]), a.id)
   }
 
   actionById(id: string): MandateAction | undefined {
-    const r = this.db.prepare('SELECT * FROM mandate_actions WHERE id = ?').get(id) as Row | undefined
+    const r = this.stmt('SELECT * FROM mandate_actions WHERE id = ?').get(id) as Row | undefined
     return r ? actionFromRow(r) : undefined
   }
 
   actionsForMandate(mandateId: string): MandateAction[] {
-    return (this.db.prepare('SELECT * FROM mandate_actions WHERE mandate_id = ? ORDER BY seq ASC').all(mandateId) as Row[]).map(actionFromRow)
+    return (this.stmt('SELECT * FROM mandate_actions WHERE mandate_id = ? ORDER BY seq ASC').all(mandateId) as Row[]).map(actionFromRow)
   }
 
   /** Oldest PENDING action of the mandate, optionally of one type. */
   pendingAction(mandateId: string, type?: ActionType): MandateAction | undefined {
     const r = (type
-      ? this.db.prepare(`SELECT * FROM mandate_actions WHERE mandate_id = ? AND status = 'PENDING' AND type = ? ORDER BY seq ASC LIMIT 1`).get(mandateId, type)
-      : this.db.prepare(`SELECT * FROM mandate_actions WHERE mandate_id = ? AND status = 'PENDING' ORDER BY seq ASC LIMIT 1`).get(mandateId)) as Row | undefined
+      ? this.stmt(`SELECT * FROM mandate_actions WHERE mandate_id = ? AND status = 'PENDING' AND type = ? ORDER BY seq ASC LIMIT 1`).get(mandateId, type)
+      : this.stmt(`SELECT * FROM mandate_actions WHERE mandate_id = ? AND status = 'PENDING' ORDER BY seq ASC LIMIT 1`).get(mandateId)) as Row | undefined
     return r ? actionFromRow(r) : undefined
   }
 
   latestAction(mandateId: string): MandateAction | undefined {
-    const r = this.db.prepare('SELECT * FROM mandate_actions WHERE mandate_id = ? ORDER BY seq DESC LIMIT 1').get(mandateId) as Row | undefined
+    const r = this.stmt('SELECT * FROM mandate_actions WHERE mandate_id = ? ORDER BY seq DESC LIMIT 1').get(mandateId) as Row | undefined
     return r ? actionFromRow(r) : undefined
   }
 
   /** PENDING actions whose expiryTime (ISO ms) is at or before `nowIso`. */
   expiredPendingActions(nowIso: string): MandateAction[] {
-    return (this.db.prepare(`SELECT * FROM mandate_actions WHERE status = 'PENDING' AND expiry_time IS NOT NULL AND expiry_time <= ? ORDER BY seq ASC`).all(nowIso) as Row[]).map(actionFromRow)
+    return (this.stmt(`SELECT * FROM mandate_actions WHERE status = 'PENDING' AND expiry_time IS NOT NULL AND expiry_time <= ? ORDER BY seq ASC`).all(nowIso) as Row[]).map(actionFromRow)
   }
 
   // ---------------------------------------------------------------- instructions
@@ -312,76 +337,76 @@ export class MandateRepo {
   insertInstruction(i: PaymentInstruction): void {
     const r = instructionToRow(i)
     const cols = Object.keys(r)
-    this.db.prepare(`INSERT INTO mandate_instructions(seq, ${cols.join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})`).run(nextSeq(this.db, 'mandate-instruction-row'), ...cols.map((k) => r[k]))
+    this.stmt(`INSERT INTO mandate_instructions(seq, ${cols.join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})`).run(nextSeq(this.db, 'mandate-instruction-row'), ...cols.map((k) => r[k]))
   }
 
   saveInstruction(i: PaymentInstruction): void {
     const r = instructionToRow(i)
     const cols = Object.keys(r).filter((k) => k !== 'id')
-    this.db.prepare(`UPDATE mandate_instructions SET ${cols.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...cols.map((k) => r[k]), i.id)
+    this.stmt(`UPDATE mandate_instructions SET ${cols.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...cols.map((k) => r[k]), i.id)
   }
 
   instructionById(id: string): PaymentInstruction | undefined {
-    const r = this.db.prepare('SELECT * FROM mandate_instructions WHERE id = ?').get(id) as Row | undefined
+    const r = this.stmt('SELECT * FROM mandate_instructions WHERE id = ?').get(id) as Row | undefined
     return r ? instructionFromRow(r) : undefined
   }
 
   /** Newest first (docs/map/00-open-questions.md G2: payment-instruction lists are newest first). */
   instructionsForMandate(mandateId: string): PaymentInstruction[] {
-    return (this.db.prepare('SELECT * FROM mandate_instructions WHERE mandate_id = ? ORDER BY seq DESC').all(mandateId) as Row[]).map(instructionFromRow)
+    return (this.stmt('SELECT * FROM mandate_instructions WHERE mandate_id = ? ORDER BY seq DESC').all(mandateId) as Row[]).map(instructionFromRow)
   }
 
   setStub(instructionId: string, stub: StubView): void {
-    this.db.prepare('UPDATE mandate_instructions SET stub = ? WHERE id = ?').run(JSON.stringify(stub), instructionId)
+    this.stmt('UPDATE mandate_instructions SET stub = ? WHERE id = ?').run(JSON.stringify(stub), instructionId)
   }
 
   clearStubs(mandateId: string): void {
-    this.db.prepare('UPDATE mandate_instructions SET stub = NULL WHERE mandate_id = ? AND stub IS NOT NULL').run(mandateId)
+    this.stmt('UPDATE mandate_instructions SET stub = NULL WHERE mandate_id = ? AND stub IS NOT NULL').run(mandateId)
   }
 
   deleteInstruction(id: string): void {
-    this.db.prepare('DELETE FROM mandate_instructions WHERE id = ?').run(id)
+    this.stmt('DELETE FROM mandate_instructions WHERE id = ?').run(id)
   }
 
   deleteInstructions(mandateId: string, origin: InstructionOrigin): void {
-    this.db.prepare('DELETE FROM mandate_instructions WHERE mandate_id = ? AND origin = ?').run(mandateId, origin)
+    this.stmt('DELETE FROM mandate_instructions WHERE mandate_id = ? AND origin = ?').run(mandateId, origin)
   }
 
   // ---------------------------------------------------------------- schedules
 
   insertSchedule(s: ScheduledPayment): void {
-    this.db
-      .prepare('INSERT INTO mandate_schedules(notification_id, mandate_id, due_date, payment_date_time, amount, announce, announced_at, created_at) VALUES (?,?,?,?,?,?,?,?)')
+    this
+      .stmt('INSERT INTO mandate_schedules(notification_id, mandate_id, due_date, payment_date_time, amount, announce, announced_at, created_at) VALUES (?,?,?,?,?,?,?,?)')
       .run(s.notificationId, s.mandateId, s.dueDate, s.paymentDateTime, s.amountCents ?? null, s.announce ? 1 : 0, s.announcedAt ?? null, s.createdAt)
   }
 
   saveSchedule(s: ScheduledPayment): void {
-    this.db
-      .prepare('UPDATE mandate_schedules SET due_date = ?, payment_date_time = ?, amount = ?, announce = ?, announced_at = ? WHERE notification_id = ?')
+    this
+      .stmt('UPDATE mandate_schedules SET due_date = ?, payment_date_time = ?, amount = ?, announce = ?, announced_at = ? WHERE notification_id = ?')
       .run(s.dueDate, s.paymentDateTime, s.amountCents ?? null, s.announce ? 1 : 0, s.announcedAt ?? null, s.notificationId)
   }
 
   /** Schedules to announce whose initiation time is at or before `untilIso` (isoUtc) and that were not announced yet. */
   schedulesToAnnounce(untilIso: string): ScheduledPayment[] {
-    return (this.db.prepare('SELECT * FROM mandate_schedules WHERE announce = 1 AND announced_at IS NULL AND payment_date_time <= ? ORDER BY payment_date_time ASC').all(untilIso) as Row[]).map(scheduleFromRow)
+    return (this.stmt('SELECT * FROM mandate_schedules WHERE announce = 1 AND announced_at IS NULL AND payment_date_time <= ? ORDER BY payment_date_time ASC').all(untilIso) as Row[]).map(scheduleFromRow)
   }
 
   scheduleById(notificationId: string): ScheduledPayment | undefined {
-    const r = this.db.prepare('SELECT * FROM mandate_schedules WHERE notification_id = ?').get(notificationId) as Row | undefined
+    const r = this.stmt('SELECT * FROM mandate_schedules WHERE notification_id = ?').get(notificationId) as Row | undefined
     return r ? scheduleFromRow(r) : undefined
   }
 
   scheduleForMandate(mandateId: string): ScheduledPayment | undefined {
-    const r = this.db.prepare('SELECT * FROM mandate_schedules WHERE mandate_id = ?').get(mandateId) as Row | undefined
+    const r = this.stmt('SELECT * FROM mandate_schedules WHERE mandate_id = ?').get(mandateId) as Row | undefined
     return r ? scheduleFromRow(r) : undefined
   }
 
   deleteSchedule(mandateId: string): void {
-    this.db.prepare('DELETE FROM mandate_schedules WHERE mandate_id = ?').run(mandateId)
+    this.stmt('DELETE FROM mandate_schedules WHERE mandate_id = ?').run(mandateId)
   }
 
   dueSchedules(nowIso: string): ScheduledPayment[] {
-    return (this.db.prepare('SELECT * FROM mandate_schedules WHERE payment_date_time <= ? ORDER BY payment_date_time ASC').all(nowIso) as Row[]).map(scheduleFromRow)
+    return (this.stmt('SELECT * FROM mandate_schedules WHERE payment_date_time <= ? ORDER BY payment_date_time ASC').all(nowIso) as Row[]).map(scheduleFromRow)
   }
 }
 

@@ -105,6 +105,7 @@ export const BIC = 'ANNCAU22XXX'
 export const UNSUPPORTED_BSBS: ReadonlySet<string> = new Set(['000000', '999999'])
 export const NOT_PROVIDED = 'Not provided'
 const SAME_ACCOUNT = 'INVALID_ARGUMENT: the debtor account must differ from the creditor account'
+const PAYMENT_PROGRESS_DELAY_KEY = 'payto:paymentProgressDelayMs'
 const DAY_MS = 24 * 60 * 60 * 1000
 /** MMS authorisation window for bilateral actions (docs: 6 days). */
 export const ACTION_EXPIRY_MS = 6 * DAY_MS
@@ -174,14 +175,21 @@ declare module '../../context.js' {
 }
 
 export class PayToService {
+  constructor(private readonly ctx: AppContext, private readonly repo: MandateRepo) {}
+
   /**
    * Delay of the asynchronous hop of a staging payment trajectory (non-final -> final status). Undefined =
    * the scheduler's default (config.asyncDelayMs). Tests raise it to observe the non-final status and drive
-   * the hop with the virtual clock.
+   * the hop with the virtual clock. Kept in the database, so /_admin/reset puts it back to the default.
    */
-  paymentProgressDelayMs: number | undefined = undefined
+  get paymentProgressDelayMs(): number | undefined {
+    const v = this.repo.setting(PAYMENT_PROGRESS_DELAY_KEY)
+    return v === undefined ? undefined : Number(v)
+  }
 
-  constructor(private readonly ctx: AppContext, private readonly repo: MandateRepo) {}
+  set paymentProgressDelayMs(ms: number | undefined) {
+    this.repo.setSetting(PAYMENT_PROGRESS_DELAY_KEY, ms === undefined ? undefined : String(ms))
+  }
 
   private get accounts() { return this.ctx.services.accounts }
   private get customers() { return this.ctx.services.customers }
@@ -199,10 +207,6 @@ export class PayToService {
     const m = this.find(id)
     if (!m) throw notFound(`NOT_FOUND: Mandate ${id} not found`)
     return m
-  }
-
-  require(id: string): Mandate {
-    return this.get(id)
   }
 
   /** The client is the Payer only for a local debtor account. @throws 404 unknown, 403 otherwise */
@@ -810,8 +814,9 @@ export class PayToService {
       const outcome: PaymentOutcome = final === 'ACCEPTED_AND_SETTLED' && mandate.status !== 'ACTIVE' ? { status: 'REJECTED', reasonCode: 'AG01' } : this.reach(mandate, current, final, 'PLATFORM')
       this.finish(mandate, current, outcome, 'PLATFORM')
     }
-    if (this.paymentProgressDelayMs === undefined) this.ctx.scheduler.later(hop)
-    else this.ctx.scheduler.later(hop, this.paymentProgressDelayMs)
+    const delayMs = this.paymentProgressDelayMs
+    if (delayMs === undefined) this.ctx.scheduler.later(hop)
+    else this.ctx.scheduler.later(hop, delayMs)
   }
 
   /** Agreement checks (docs:payto-payment "Shaype confirms the request is consistent with the PayTo agreement"). */
@@ -1321,7 +1326,7 @@ function partyInformation(p: PartyDetails, name: string): PartyInformation {
  * Free text served in an MMS action DTO, cut to the DTO's maxLength (in code points); undefined when empty
  * (the DTOs' minLength is 1). The mandate itself keeps the text as the client sent it.
  */
-export function cut(s: string | undefined, max: number): string | undefined {
+function cut(s: string | undefined, max: number): string | undefined {
   if (!s) return undefined
   const chars = Array.from(s)
   return chars.length > max ? chars.slice(0, max).join('') : s
@@ -1331,7 +1336,7 @@ export function cut(s: string | undefined, max: number): string | undefined {
  * A name fitted to the action DTOs' `^[ -~]{1,140}$`: accents stripped (José -> Jose), any other character
  * outside printable ASCII replaced by `?`, cut to 140; undefined when empty.
  */
-export function mmsName(s: string | undefined): string | undefined {
+function mmsName(s: string | undefined): string | undefined {
   if (!s) return undefined
   return cut(s.normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^ -~]/gu, '?'), 140)
 }

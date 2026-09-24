@@ -1819,3 +1819,21 @@ describe('webhook contract', () => {
     }
   })
 })
+
+// ---------------------------------------------------------------- test knobs (last: resets the shared app)
+
+describe('test knobs', () => {
+  it('/_admin/reset also resets paymentProgressDelayMs', async () => {
+    svc.paymentProgressDelayMs = DAY_MS
+    expect(svc.paymentProgressDelayMs).toBe(DAY_MS)
+    expect((await app.inject({ method: 'POST', url: '/_admin/reset' })).statusCode).toBe(200)
+    expect(svc.paymentProgressDelayMs).toBeUndefined()
+    // and with the default delay a trajectory hop settles at once again
+    const debtor = await newAccount({ fund: 10 })
+    const { id } = await activeMandate({ debtor, overrides: { description: 'paymentstatus:sent' } })
+    const res = await app.inject({ method: 'POST', url: '/v1/payto/payments/adhoc', payload: { idempotencyKey: randomUUID(), mandateId: id, amount: AUD(1) } })
+    expect(res.json().transactionStatus).toBe('SENT')
+    await flush()
+    expect(svc.instruction(id, res.json().instructionId).status).toBe('ACCEPTED_AND_SETTLED')
+  })
+})
