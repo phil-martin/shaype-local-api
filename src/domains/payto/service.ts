@@ -708,12 +708,26 @@ export class PayToService {
    * ACCP debits the local debtor account only (INTERBANK_TRANSFER_OUT with mandatePaymentDetails; the creditor
    * leg is the RAP mock's generateInboundNppTransactionV2) and answers MANDATE_PAYMENT_ACCEPTED; RJCT (or a
    * refused debit) answers MANDATE_PAYMENT_REJECTED with the reason.
+   *
+   * The documented staging flow is makeAdhocPayment, then the RAPAIN with its instructionId: an instruction id
+   * already known on this mandate is reconciled, never paid twice. A final one is a no-op (no debit, no
+   * webhook; the stored instruction is answered); a non-final one (a staging trajectory in flight) is finished
+   * by the RAPAIN like a new one (debtor leg for the RAPAIN's instructed amount, or the RJCT). A stubbed
+   * search entry with that id is superseded. @throws 422 DUPLICATE_INSTRUCTION when the id is another mandate's
    */
   receivePaymentInstruction(input: ReceivePaymentInput): { instruction: PaymentInstruction; transactionId?: string } {
     const m = this.get(input.mandateId)
-    if (this.repo.instructionById(input.instructionId)) throw unprocessable(`DUPLICATE_INSTRUCTION: Payment instruction ${input.instructionId} already exists`)
+    let existing = this.repo.instructionById(input.instructionId)
+    if (existing && existing.mandateId !== m.id) throw unprocessable(`DUPLICATE_INSTRUCTION: Payment instruction ${input.instructionId} belongs to mandate ${existing.mandateId}`)
+    if (existing?.origin === 'STUB') {
+      this.repo.deleteInstruction(existing.id)
+      existing = undefined
+    }
+    if (existing && isFinalStatus(existing.status)) return { instruction: existing, transactionId: existing.transactionId }
     const actionOwner = input.actionOwner ?? 'PLATFORM'
-    const instruction = this.newInstruction(m, 'INBOUND', { amountCents: input.amountCents, currency: input.currency ?? 'AUD' }, input.endToEndId ?? NOT_PROVIDED, input.description, input.instructionId)
+    const instruction = existing
+      ? { ...existing, amountCents: input.amountCents }
+      : this.newInstruction(m, 'INBOUND', { amountCents: input.amountCents, currency: input.currency ?? 'AUD' }, input.endToEndId ?? NOT_PROVIDED, input.description, input.instructionId)
     let outcome: PaymentOutcome
     if (input.status === 'RJCT') outcome = { status: 'REJECTED', reasonCode: input.reasonCode ?? 'AB01' }
     else if (!m.debtor.accountId) outcome = { status: 'REJECTED', reasonCode: 'AC02' }

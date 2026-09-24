@@ -1150,8 +1150,64 @@ describe('receivePaymentInstruction (RAPAIN, for utilities)', () => {
     expect(rejected.transactionId).toBeUndefined()
     const short = svc.receivePaymentInstruction({ mandateId: id, instructionId: `${BIC}I20230718000000000077260`, amountCents: 5000, status: 'ACCP' })
     expect(short.instruction).toMatchObject({ status: 'REJECTED', reasonCode: 'AM04' })
-    expect(() => svc.receivePaymentInstruction({ mandateId: id, instructionId: `${BIC}I20230718000000000077260`, amountCents: 1, status: 'RJCT' })).toThrow(expect.objectContaining({ status: 422 }))
+    // an instruction id already final on this mandate is a no-op; one of another mandate is refused
+    await clearNotifications()
+    const replay = svc.receivePaymentInstruction({ mandateId: id, instructionId: `${BIC}I20230718000000000077260`, amountCents: 1, status: 'RJCT' })
+    expect(replay.instruction).toMatchObject({ status: 'REJECTED', reasonCode: 'AM04', amountCents: 5000 })
+    expect(await allPayloads()).toEqual([])
+    const other = await activeMandate({ debtor })
+    expect(() => svc.receivePaymentInstruction({ mandateId: other.id, instructionId: `${BIC}I20230718000000000077260`, amountCents: 1, status: 'RJCT' })).toThrow(expect.objectContaining({ status: 422 }))
     expect((await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${id}/search` })).json().paymentInstructions).toHaveLength(3)
+    // a RAPAIN supersedes a stubbed search entry with its id
+    const stubId = `${BIC}I20230718000000000077270`
+    svc.addStubInstructions(id, [{ instructionIdentification: stubId, instructedAmount: 1, creationDateTime: '2023-07-18T00:00:00.000Z', transactionStatus: 'ACSC' }])
+    const overStub = svc.receivePaymentInstruction({ mandateId: id, instructionId: stubId, amountCents: 100, status: 'ACCP' })
+    expect(overStub.instruction).toMatchObject({ id: stubId, origin: 'INBOUND', status: 'ACCEPTED_AND_SETTLED' })
+    expect((await getAccount(debtor.accountHayId!)).availableBalance).toBe(19)
+  })
+
+  it('the documented staging flow: makeAdhocPayment, then RAPAIN with its instructionId reconciles instead of paying twice', async () => {
+    const debtor = await newAccount({ fund: 30 })
+    const { id, creditor } = await activeMandate({ debtor })
+    // settled locally already: the RAPAIN is a no-op (no second debit, no second MANDATE_PAYMENT)
+    const paid = await adhoc(id, { amount: AUD(10) })
+    expect(paid.transactionStatus).toBe('ACCEPTED_AND_SETTLED')
+    await clearNotifications()
+    const again = svc.receivePaymentInstruction({ mandateId: mmsId(id), instructionId: paid.instructionId, amountCents: 1000, initiatingPartyName: 'ACME', status: 'ACCP' })
+    expect(again.instruction).toMatchObject({ id: paid.instructionId, origin: 'ADHOC', status: 'ACCEPTED_AND_SETTLED' })
+    expect(again.transactionId).toBe(svc.instruction(id, paid.instructionId).transactionId)
+    expect(await allPayloads()).toEqual([])
+    expect((await getAccount(debtor.accountHayId!)).availableBalance).toBe(20)
+    expect(svc.instructions(id)).toHaveLength(1)
+
+    // still in flight (staging trajectory): the RAPAIN finishes it (ACCP: debtor leg; RJCT: rejected); the later hops are no-ops
+    svc.paymentProgressDelayMs = DAY_MS
+    try {
+      const inFlight = async (): Promise<AdhocResponse> => {
+        const res = await app.inject({ method: 'POST', url: '/v1/payto/payments/adhoc', payload: { idempotencyKey: randomUUID(), mandateId: id, amount: AUD(5), description: 'paymentstatus:sent' } })
+        expect(res.json().transactionStatus).toBe('SENT')
+        return res.json() as AdhocResponse
+      }
+      const sent = await inFlight()
+      const settled = svc.receivePaymentInstruction({ mandateId: id, instructionId: sent.instructionId, amountCents: 500, status: 'ACCP' })
+      expect(settled.instruction).toMatchObject({ id: sent.instructionId, origin: 'ADHOC', status: 'ACCEPTED_AND_SETTLED', transactionId: settled.transactionId })
+      expect((await getAccount(debtor.accountHayId!)).availableBalance).toBe(15)
+      expect((await getAccount(creditor.accountHayId!)).availableBalance).toBe(10) // the creditor leg arrives with the RAP mock
+      const refused = await inFlight()
+      const rejected = svc.receivePaymentInstruction({ mandateId: id, instructionId: refused.instructionId, amountCents: 500, status: 'RJCT', reasonCode: 'AM04' })
+      expect(rejected.instruction).toMatchObject({ status: 'REJECTED', reasonCode: 'AM04' })
+      await advanceClock(DAY_MS)
+      expect(svc.instruction(id, sent.instructionId).status).toBe('ACCEPTED_AND_SETTLED')
+      expect(svc.instruction(id, refused.instructionId)).toMatchObject({ status: 'REJECTED', reasonCode: 'AM04' })
+      expect((await getAccount(debtor.accountHayId!)).availableBalance).toBe(15)
+      expect((await paymentEvents(id)).map((e) => [e.mandatePaymentEventDto.instructionId, e.mandatePaymentEventDto.paymentStatus])).toEqual([
+        [sent.instructionId, 'MANDATE_PAYMENT_ACCEPTED'], [refused.instructionId, 'MANDATE_PAYMENT_REJECTED'],
+      ])
+      expect(svc.instructions(id)).toHaveLength(3)
+    } finally {
+      svc.paymentProgressDelayMs = undefined
+      await app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
+    }
   })
 })
 

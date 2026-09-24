@@ -63,7 +63,10 @@
  *   (scheduler.later; test knob paymentProgressDelayMs) to the second status, settlement by default; RJCT is
  *   reason AB01. Without a hint the outcome is final at once.
  * - Inbound RAPAIN (receivePaymentInstruction): ACCP debits the local debtor only (the creditor leg is the
- *   RAP mock), RJCT rejects with the given reason (AB01 by default); MANDATE_PAYMENT either way.
+ *   RAP mock), RJCT rejects with the given reason (AB01 by default); MANDATE_PAYMENT either way. The
+ *   documented flow sends it with a makeAdhocPayment instructionId: an id already on the mandate is
+ *   reconciled (final: no-op, no second debit or webhook; in flight: the RAPAIN finishes it; a stubbed
+ *   search entry is superseded); an id of another mandate is 422 DUPLICATE_INSTRUCTION.
  * - Scheduler (non-ADHOC mandates the client initiates): on activation the next due date (firstPayment.date
  *   or validityStartDate plus n periods, the day clamped once per date so month ends do not drift, bounded
  *   by lastPayment.date / validityEndDate; INTRA_DAY steps daily, pointInTime / countPerPeriod are

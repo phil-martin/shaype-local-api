@@ -326,6 +326,10 @@ export class MandateRepo {
     return (this.db.prepare('SELECT * FROM mandate_instructions WHERE mandate_id = ? ORDER BY seq DESC').all(mandateId) as Row[]).map(instructionFromRow)
   }
 
+  deleteInstruction(id: string): void {
+    this.db.prepare('DELETE FROM mandate_instructions WHERE id = ?').run(id)
+  }
+
   deleteInstructions(mandateId: string, origin: InstructionOrigin): void {
     this.db.prepare('DELETE FROM mandate_instructions WHERE mandate_id = ? AND origin = ?').run(mandateId, origin)
   }
