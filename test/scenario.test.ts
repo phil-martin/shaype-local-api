@@ -227,27 +227,12 @@ function summarise(n: any): Record<string, unknown> {
 
 // ---------------------------------------------------------------------------------------------- card mocks
 
-/**
- * Mock card purchase / refund. Journey (a) runs with either implementation:
- * - httpMocks: the Utilities API (/v0/utils/*), the way an integrating system drives them.
- * - inProcessMocks: NOT HTTP. While the utilities domain (C1) is unimplemented its operations answer from the
- *   generic stub and move no money, so this stand-in drives the ledger effects the design prescribes (spec
- *   §5.5, docs/map/utilities.md: hold now, settlement after settlementDelayInSeconds on the virtual clock; a
- *   refund is one settled CARD_TRANSACTION_REFUND with no hold link) through ctx.services. It exists only
- *   until C1 merges; delete it and its test then.
- */
+/** Mock card purchase / refund through the Utilities API (/v0/utils/*), the way an integrating system drives them. */
 interface CardMocks {
   purchase(cardToken: string, amount: number, settlementDelayInSeconds: number): Promise<void>
   refund(cardToken: string, amount: number): Promise<void>
 }
 const MERCHANT = { merchantName: 'IGA (Mt Cotton)', merchantId: '000009493578577', merchantCategoryCode: '5411' }
-const CARD_MOCK_OPERATIONS = ['generateCardTransaction', 'generateRefundTransaction']
-
-/** Whether the server implements the card mocks (GET /_admin/operations lists them as handled, not stubbed). */
-async function utilitiesLive(api: Client): Promise<boolean> {
-  const ops = (await api.ok('GET', '/_admin/operations')) as { stubbed: string[] }
-  return !CARD_MOCK_OPERATIONS.some((id) => ops.stubbed.includes(id))
-}
 
 function httpMocks(api: Client): CardMocks {
   return {
@@ -256,26 +241,6 @@ function httpMocks(api: Client): CardMocks {
     },
     async refund(cardToken, amount) {
       await api.ok('POST', '/v0/utils/generate-refund-transaction', { amount: -amount, cardToken, merchantDetails: MERCHANT })
-    },
-  }
-}
-
-function inProcessMocks(e: Env): CardMocks {
-  const { cards, transactions } = e.built.ctx.services
-  const merchant = { name: MERCHANT.merchantName, merchantId: MERCHANT.merchantId, merchantCategoryCode: Number(MERCHANT.merchantCategoryCode) }
-  return {
-    async purchase(cardToken, amount, settlementDelayInSeconds) {
-      const r = cards.authoriseHold(cardToken, { amountCents: Math.round(amount * 100), merchant })
-      expect(r.outcome).toBe('ACCEPTED')
-      e.built.ctx.scheduler.later(() => { transactions.holds.settle(r.hold!.id) }, settlementDelayInSeconds * 1000)
-    },
-    async refund(cardToken, amount) {
-      const card = cards.resolve(cardToken)
-      const r = transactions.post({
-        accountId: card.accountId, amountCents: Math.round(amount * 100), type: 'CARD_PAYMENT_REVERSAL', channel: 'VISA_REFUND_DOMESTIC',
-        counterpart: { name: merchant.name, merchantDetails: merchant }, cardId: card.id,
-      })
-      expect(r.outcome).toBe('ACCEPTED')
     },
   }
 }
@@ -395,14 +360,8 @@ describe('journey (a): onboard -> account -> risk LOW -> virtual card -> mock pu
     expectWellFormed(receiver)
   }
 
-  it('over HTTP: the purchase and refund through the Utilities API mocks (/v0/utils/*)', async ({ skip }) => {
-    skip(!(await utilitiesLive(env.api)), 'the utilities domain (C1) is still stubbed: /v0/utils/* move no money')
+  it('over HTTP: the purchase and refund through the Utilities API mocks (/v0/utils/*)', async () => {
     await journey(httpMocks(env.api))
-  })
-
-  it('IN-PROCESS FALLBACK, not HTTP: the purchase and refund driven through ctx.services while utilities is stubbed', async ({ skip }) => {
-    skip(await utilitiesLive(env.api), 'the utilities domain is implemented: the HTTP variant covers this journey; delete this fallback')
-    await journey(inProcessMocks(env))
   })
 })
 
