@@ -6,7 +6,7 @@ import { assertValidNotification } from './webhook-schema.js'
 import type { BuiltServer } from '../src/server.js'
 import { LOCAL_PRODUCT_ID } from '../src/domains/accounts/index.js'
 import { LOCAL_BSB } from '../src/lib/ids.js'
-import { addDays, nextBusinessDay, nextOccurrence, occurrence, type DirectEntryService, type CreateScheduleInput } from '../src/domains/direct-entry/index.js'
+import { addDays, nextBusinessDay, nextOccurrence, occurrence, sydneyDate, type DirectEntryService, type CreateScheduleInput } from '../src/domains/direct-entry/index.js'
 
 type S = components['schemas']
 type HayAccount = S['HayAccount']
@@ -205,7 +205,8 @@ describe('createDirectDebitV1: lifecycle', () => {
     const res = await createDd(body)
     expect(res.statusCode, res.body).toBe(200)
     const created = res.json() as DdResponseV1
-    const processingDate = nextBusinessDay(await today())
+    const clockNow = (await app.inject({ method: 'GET', url: '/_admin/clock' })).json().now as string
+    const processingDate = nextBusinessDay(sydneyDate(new Date(clockNow))) // T4: the Sydney creation date
     expect(created).toEqual({
       transactionId: body.transactionId,
       outcome: 'ACCEPTED',
@@ -255,6 +256,8 @@ describe('createDirectDebitV1: lifecycle', () => {
     const posted = await getTransaction(tx[0].transactionEvent.transactionHayId)
     expect(posted).toMatchObject({ type: 'DIRECT_DEBIT_TRANSFER', transactionChannel: 'CUSCAL_DE_DEBIT_OUT', originType: 'DIRECT_DEBIT', originId: body.transactionId, currencyAmount: { amount: 250.5 } })
     expect(posted.transactionTimeUtc).toMatch(ISO_MICROS)
+    // credited before the stated processingDate: the record says when it took effect
+    expect(final.transactionDetails?.processingDate).toBe(sydneyDate(new Date(posted.transactionTimeUtc!)))
   })
 
   it('one id across create, the DIRECT_ENTRY and TRANSACTION webhooks and every lookup (00-open-questions I3)', async () => {
@@ -325,6 +328,25 @@ describe('createDirectDebitV1: lifecycle', () => {
       await resetClock()
     }
     expect((await getAccount(sender.accountHayId!)).totalBalance).toBe(7)
+  })
+
+  it('processingDate is the next business day of the Sydney creation date (T4), brought forward to the Sydney date of an earlier COMPLETE posting', async () => {
+    const sender = await newAccount()
+    svc.progressDelayMs = DAY_MS
+    try {
+      await setClock('2026-09-24T20:00:00Z') // Thursday 20:00 UTC = Friday 06:00 in Sydney
+      const { transactionId } = await acceptedDd(sender, { amount: 3 })
+      expect(((await getDd(transactionId)) as DdResponseV1).transactionDetails?.processingDate).toBe('2026-09-28') // Monday
+      await advanceClock(2 * DAY_MS) // COMPLETE on Sunday 27 September (Sydney)
+      expect(await deStatus(transactionId)).toBe('COMPLETE')
+      const final = (await getDd(transactionId)) as DdResponseV1
+      expect(final.transactionDetails?.processingDate).toBe('2026-09-27')
+      expect(((await getDd(transactionId, 'v0')) as DdResponse).transactionDetails?.processingDate).toBe('2026-09-27')
+      expect((await getTransaction(transactionId)).transactionTimeUtc).toMatch(/^2026-09-26T20:00/)
+    } finally {
+      svc.progressDelayMs = undefined
+      await resetClock()
+    }
   })
 
   it('replays the same idempotencyKey + body without new webhooks; a different body is 422; a reused transactionId is 422 DUPLICATE_TRANSACTION_ID', async () => {

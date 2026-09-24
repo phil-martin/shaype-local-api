@@ -38,7 +38,8 @@
  *   (outcome REJECTED, details = the reason).
  * - Lists: fromUtc / toUtc are whole UTC days on creation time, both inclusive; fromUtc > toUtc, limit
  *   outside 1..1000 and a negative offset are 400; creation order (spec §4). processingDate = the first
- *   Monday–Friday after the creation date (UTC). Unknown ids are 404 (spec §4).
+ *   Monday–Friday after the creation date in Australia/Sydney (T4), brought forward at COMPLETE to the
+ *   Sydney date of the credit when that is earlier (the transfer took effect then). Unknown ids are 404 (spec §4).
  * - Validation the schema misses is a 400: amount > 0 with <= 2 dp; BSB / account-number patterns
  *   anchored (the spec's are not).
  * - Test knob: ctx.services.directEntry.progressDelayMs (default undefined = config.asyncDelayMs) is the
@@ -81,7 +82,7 @@ export { ScheduledPaymentsService, validateRecipient } from './schedules.js'
 export type { CreateScheduleInput, OccurrenceResult } from './schedules.js'
 export type { DeInstruction, DeStatus, DeStatusV0, ScheduledPayment, ScheduleStatus, ScheduleType, ScheduleFrequency, HayScheduledPayment, HayArchivedScheduledPayment, ScheduledPaymentRecipient } from './repo.js'
 export { DE_STATUSES, DE_TERMINAL, SCHEDULE_TERMINAL } from './repo.js'
-export { addDays, addMonths, nextBusinessDay, nextOccurrence, occurrence, isIsoDate } from './dates.js'
+export { addDays, addMonths, nextBusinessDay, nextOccurrence, occurrence, isIsoDate, sydneyDate } from './dates.js'
 
 export function register(app: FastifyInstance, ctx: AppContext): void {
   const svc = new DirectEntryService(ctx, new DirectEntryRepo(ctx.db))

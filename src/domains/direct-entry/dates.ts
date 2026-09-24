@@ -1,6 +1,7 @@
 /**
  * Calendar-date helpers (YYYY-MM-DD, UTC — docs/map/crosscutting.md: everything is UTC unless the
- * field says otherwise). Business days are Monday to Friday with no holiday table.
+ * field says otherwise; the one exception is a Direct Entry processingDate, a Sydney day per
+ * 00-open-questions T4, see sydneyDate). Business days are Monday to Friday with no holiday table.
  */
 import type { ScheduleFrequency } from './repo.js'
 
@@ -38,6 +39,14 @@ export function addMonths(date: string, months: number): string {
   const daysInTarget = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate()
   if (d > daysInTarget) return render(new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 1)))
   return render(new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth(), d)))
+}
+
+const SYDNEY = new Intl.DateTimeFormat('en-AU', { timeZone: 'Australia/Sydney', year: 'numeric', month: '2-digit', day: '2-digit' })
+
+/** The Australia/Sydney calendar date (YYYY-MM-DD) of an instant. */
+export function sydneyDate(at: Date): string {
+  const p = Object.fromEntries(SYDNEY.formatToParts(at).map((x) => [x.type, x.value]))
+  return `${p.year}-${p.month}-${p.day}`
 }
 
 /** The first Monday–Friday strictly after `date`. */

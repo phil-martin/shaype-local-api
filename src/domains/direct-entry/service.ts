@@ -10,14 +10,14 @@
 import type { components } from '../../contract/generated/b2b-types.js'
 import type { AppContext } from '../../context.js'
 import { compact, type ActionOwner } from '../../events/notify.js'
-import { isoDate, isoUtc } from '../../lib/clock.js'
+import { isoUtc } from '../../lib/clock.js'
 import { badRequest, notFound, unprocessable } from '../../lib/errors.js'
 import { fromCents, type Cents } from '../../lib/money.js'
 import type { Account } from '../accounts/repo.js'
 import type { ClosureCheckerError } from '../accounts/service.js'
 import type { LedgerOutcome, PostInput } from '../transactions/service.js'
 import { requestCents } from '../transactions/service.js'
-import { isIsoDate, nextBusinessDay } from './dates.js'
+import { isIsoDate, nextBusinessDay, sydneyDate } from './dates.js'
 import { ACCOUNT_NUMBER_RE, BSB_RE, resolveLocalAccount } from './local.js'
 import { DE_TERMINAL, type DeInstruction, type DeStatus, type DeStatusV0, type DirectEntryRepo } from './repo.js'
 import { ScheduledPaymentsService } from './schedules.js'
@@ -220,7 +220,7 @@ export class DirectEntryService {
       recipientAccountNumber: body.recipientAccountNumber,
       recipientName: body.recipientName,
       status: 'RECEIVED',
-      processingDate: nextBusinessDay(isoDate(now)),
+      processingDate: nextBusinessDay(sydneyDate(now)),
       createdAt: stamp,
       updatedAt: stamp,
     })
@@ -316,7 +316,9 @@ export class DirectEntryService {
       if (outcome !== 'ACCEPTED') return this.transition(r, 'INCOMPLETE', 'PLATFORM', { details: outcome })
       if (debit) this.ledger.apply(debit)
       const posted = this.ledger.apply(credit)
-      return this.transition(r, 'COMPLETE', 'PLATFORM', { ledgerTransactionId: posted.id })
+      // the transfer took effect today: a processingDate still ahead is brought forward to it
+      const postedOn = sydneyDate(this.ctx.clock.now())
+      return this.transition(r, 'COMPLETE', 'PLATFORM', { ledgerTransactionId: posted.id, ...(postedOn < r.processingDate ? { processingDate: postedOn } : {}) })
     })()
   }
 
@@ -349,7 +351,7 @@ export class DirectEntryService {
     else this.ctx.scheduler.later(fn, delay)
   }
 
-  private transition(r: DeInstruction, status: DeStatus, actionOwner: ActionOwner, patch: { details?: string; ledgerTransactionId?: string; returnReason?: string } = {}): DeInstruction {
+  private transition(r: DeInstruction, status: DeStatus, actionOwner: ActionOwner, patch: { details?: string; ledgerTransactionId?: string; returnReason?: string; processingDate?: string } = {}): DeInstruction {
     if (DE_TERMINAL.has(r.status)) throw new Error(`Direct Entry ${r.id} is ${r.status}; cannot move to ${status}`)
     const updatedAt = isoUtc(this.ctx.clock.now())
     this.repo.updateInstruction(r.id, { status, ...patch, updatedAt })

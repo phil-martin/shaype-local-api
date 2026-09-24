@@ -106,13 +106,14 @@ export class DirectEntryRepo {
     )
   }
 
-  updateInstruction(id: string, patch: Partial<Pick<DeInstruction, 'status' | 'details' | 'ledgerTransactionId' | 'returnReason'>> & { updatedAt: string }): void {
+  updateInstruction(id: string, patch: Partial<Pick<DeInstruction, 'status' | 'details' | 'ledgerTransactionId' | 'returnReason' | 'processingDate'>> & { updatedAt: string }): void {
     const sets: string[] = ['updated_at = ?']
     const args: unknown[] = [patch.updatedAt]
     if (patch.status !== undefined) { sets.push('status = ?'); args.push(patch.status) }
     if ('details' in patch) { sets.push('details = ?'); args.push(patch.details ?? null) }
     if (patch.ledgerTransactionId !== undefined) { sets.push('ledger_transaction_id = ?'); args.push(patch.ledgerTransactionId) }
     if (patch.returnReason !== undefined) { sets.push('return_reason = ?'); args.push(patch.returnReason) }
+    if (patch.processingDate !== undefined) { sets.push('processing_date = ?'); args.push(patch.processingDate) }
     args.push(id)
     this.db.prepare(`UPDATE de_instructions SET ${sets.join(', ')} WHERE id = ?`).run(...args)
   }
