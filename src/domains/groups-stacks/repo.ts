@@ -69,11 +69,14 @@ export class GroupsStacksRepo {
     return nextSeq(this.db, 'group')
   }
 
+  /** The group row and its member rows, atomically. */
   insertGroup(g: Group, seq: number): void {
-    this.db
-      .prepare('INSERT INTO groups(id, seq, name, group_type, business_identifiers, created_at, updated_at) VALUES (?,?,?,?,?,?,?)')
-      .run(g.id, seq, g.name, g.groupType, g.businessIdentifiers === undefined ? null : JSON.stringify(g.businessIdentifiers), g.createdAt, g.updatedAt ?? null)
-    for (const cid of g.customerHayIds) this.addMember(g.id, cid)
+    this.db.transaction(() => {
+      this.db
+        .prepare('INSERT INTO groups(id, seq, name, group_type, business_identifiers, created_at, updated_at) VALUES (?,?,?,?,?,?,?)')
+        .run(g.id, seq, g.name, g.groupType, g.businessIdentifiers === undefined ? null : JSON.stringify(g.businessIdentifiers), g.createdAt, g.updatedAt ?? null)
+      for (const cid of g.customerHayIds) this.addMember(g.id, cid)
+    })()
   }
 
   saveGroup(g: Group): void {

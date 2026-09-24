@@ -298,8 +298,9 @@ export class StacksService {
     }
   }
 
-  transactionToResponse(t: StackTransaction): HayStackTransaction {
-    const stack = this.repo.stackById(t.stackId)
+  /** `stacks` (id -> stack) lets a list resolve every embedded stack from one query instead of one per row. */
+  transactionToResponse(t: StackTransaction, stacks?: ReadonlyMap<string, Stack>): HayStackTransaction {
+    const stack = stacks ? stacks.get(t.stackId) : this.repo.stackById(t.stackId)
     return compact({
       hayId: t.id,
       accountHayId: t.accountId,
@@ -322,7 +323,10 @@ export class StacksService {
     if (stackId) this.get(accountId, stackId)
     if (!Number.isInteger(page.limit) || page.limit < 1 || page.limit > 1000) throw badRequest('BAD_REQUEST: limit must be between 1 and 1000')
     if (!Number.isInteger(page.offset) || page.offset < 0) throw badRequest('BAD_REQUEST: offset must be greater than or equal to 0')
-    return this.repo.transactions({ accountId, stackId, type: page.type ?? undefined, offset: page.offset, limit: page.limit }).map((t) => this.transactionToResponse(t))
+    const rows = this.repo.transactions({ accountId, stackId, type: page.type ?? undefined, offset: page.offset, limit: page.limit })
+    if (!rows.length) return []
+    const byId = new Map(this.repo.stacksForAccount(accountId, true).map((s) => [s.id, s]))
+    return rows.map((t) => this.transactionToResponse(t, byId))
   }
 
   // ---------------------------------------------------------------- create / update / close

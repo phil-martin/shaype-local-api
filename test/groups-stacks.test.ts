@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { components } from '../src/contract/generated/b2b-types.js'
 import { startApp } from './helpers.js'
 import { assertValidNotification } from './webhook-schema.js'
@@ -230,6 +230,21 @@ describe('createHayGroup (POST /v0/groups/create)', () => {
     expect(again.statusCode).toBe(200)
     expect(again.json()).toEqual(first.json())
     expectError(await post('/v0/groups/create', { ...body, groupName: 'Other' }), 422, /^IDEMPOTENCY_KEY_REUSED/)
+  })
+
+  it('writes the group and its members atomically: a failure while adding members leaves no group behind', async () => {
+    const [m1, m2] = [await newCustomer(), await newCustomer()]
+    const repo = (groups as unknown as { repo: { addMember: (g: string, c: string) => void } }).repo
+    const real = repo.addMember.bind(repo)
+    const addMember = vi.spyOn(repo, 'addMember').mockImplementationOnce(real).mockImplementationOnce(() => { throw new Error('disk full') })
+    const name = `Atomic ${randomUUID().slice(0, 8)}`
+    try {
+      expect(() => groups.create({ customerHayIds: [m1, m2], groupName: name })).toThrow('disk full')
+    } finally {
+      addMember.mockRestore()
+    }
+    expect(built.ctx.db.prepare('SELECT count(*) AS n FROM groups WHERE name = ?').get(name)).toEqual({ n: 0 })
+    expect(groups.groupIdsForCustomer(m1)).toEqual([])
   })
 
   it('refuses an empty member list (422), an unknown member (404), an INACTIVE member (422 PERMISSION_DENIED) and a bad enum (400)', async () => {
@@ -908,6 +923,28 @@ describe('stack transaction lists', () => {
     expect((await stackTransactions(accountId, 'offset=0&limit=10&type=STANDARD', other)).map((t) => t.amount)).toEqual([4])
     expect((await stackTransactions(accountId, 'offset=0&limit=10&type=ROUND_UP', other))).toEqual([])
     expect(await getAccount(accountId)).toMatchObject({ availableBalance: 89.45, stacksBalance: 10.55 })
+  })
+
+  it('runs a fixed number of queries per page, however many rows it returns (no per-row stack lookup)', async () => {
+    const small = await fundedWithStack(100, 'Small')
+    const big = await fundedWithStack(100, 'Big')
+    const bigOther = await createStack(big.accountId, 'Big 2')
+    expect((await transferIn(small.accountId, small.stackId, { amount: 1, customerId: small.holder })).json().outcome).toBe('ACCEPTED')
+    for (const amount of [1, 2, 3]) {
+      expect((await transferIn(big.accountId, big.stackId, { amount, customerId: big.holder })).json().outcome).toBe('ACCEPTED')
+      expect((await transferIn(big.accountId, bigOther, { amount, customerId: big.holder })).json().outcome).toBe('ACCEPTED')
+    }
+    const prepare = vi.spyOn(built.ctx.db, 'prepare')
+    try {
+      const count = async (accountId: string, rows: number) => {
+        prepare.mockClear()
+        expect(await stackTransactions(accountId)).toHaveLength(rows)
+        return prepare.mock.calls.length
+      }
+      expect(await count(big.accountId, 6)).toBe(await count(small.accountId, 1))
+    } finally {
+      prepare.mockRestore()
+    }
   })
 
   it('validates paging (offset and limit required, limit 1..1000, offset >= 0, type enum) and ids (404)', async () => {
