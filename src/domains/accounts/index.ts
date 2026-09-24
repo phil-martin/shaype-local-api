@@ -1,7 +1,7 @@
 /**
  * accounts domain — spec §5.2 (docs/superpowers/specs/2026-09-24-shaype-local-api-design.md) and docs/map/accounts.md.
  * Owns the "Accounts API" operations except makeTransferV0/V1 and getPendingHolds (transactions domain)
- * plus getAllProducts. Publishes ctx.services.accounts (service.ts) for the ledger, cards, groups and
+ * plus the seeded reference data getAllProducts and getAllMerchantCategoryCodes (mccs.ts). Publishes ctx.services.accounts (service.ts) for the ledger, cards, groups and
  * payment domains; expected shapes of later domains' services: deps.ts.
  *
  * Contract deviations: none — every response follows the declared schema. getAllProducts is bound by

@@ -3,9 +3,9 @@
 <!-- progress:start -->
 ## Implementation progress
 
-**Full-fidelity operations: 143 / 143 (100%)**  `████████████████████`
+**Full-fidelity operations: 144 / 144 (100%)**  `████████████████████`
 
-All 169 operations of the spec are routed and schema-validated; the 26 stub-only operations answer with deterministic spec-shaped data. Test files: 16. Updated 2026-09-24 at `950e0a0`.
+All 169 operations of the spec are routed and schema-validated; the 25 stub-only operations answer with deterministic spec-shaped data. Test files: 16. Updated 2026-09-24 at `726b268`.
 
 | Section | Implemented | Progress | Status |
 |---|---|---|---|
@@ -18,6 +18,7 @@ All 169 operations of the spec are routed and schema-validated; the 26 stub-only
 | Groups API | 6 / 6 | `████████████████████` 100% | ✅ complete |
 | Holds API | 1 / 1 | `████████████████████` 100% | ✅ complete |
 | KYC API | 4 / 4 | `████████████████████` 100% | ✅ complete |
+| Merchant Category Codes API | 1 / 1 | `████████████████████` 100% | ✅ complete |
 | NPP API | 1 / 1 | `████████████████████` 100% | ✅ complete |
 | PayID API | 8 / 8 | `████████████████████` 100% | ✅ complete |
 | PayTo API | 22 / 22 | `████████████████████` 100% | ✅ complete |
@@ -29,7 +30,6 @@ All 169 operations of the spec are routed and schema-validated; the 26 stub-only
 | Click to Pay API | stub-only | `████████████████████` 100% | ✅ stub (by design) |
 | FX API | stub-only | `████████████████████` 100% | ✅ stub (by design) |
 | Liquidity API | stub-only | `████████████████████` 100% | ✅ stub (by design) |
-| Merchant Category Codes API | stub-only | `████████████████████` 100% | ✅ stub (by design) |
 | Perks API | stub-only | `████████████████████` 100% | ✅ stub (by design) |
 | Tokens API | stub-only | `████████████████████` 100% | ✅ stub (by design) |
 
@@ -173,7 +173,7 @@ In that mode do not call `/_admin/flush` while an effect is pending (it waits in
 
 ## Stub-only sections
 
-Perks, FX, Liquidity, Click to Pay, Tokens and Merchant Category Codes are outside the local model: their operations validate the request like any other and answer with deterministic example data built from the response schema, with the header `x-shaype-local-stub: <operationId>`. `GET /_admin/operations` lists every stubbed operationId; an operation that a domain has not implemented yet is listed there too.
+Perks, FX, Liquidity, Click to Pay and Tokens are outside the local model (Merchant Category Codes serve a seeded ISO 18245 reference list): their operations validate the request like any other and answer with deterministic example data built from the response schema, with the header `x-shaype-local-stub: <operationId>`. `GET /_admin/operations` lists every stubbed operationId; an operation that a domain has not implemented yet is listed there too.
 
 ## Conventions
 

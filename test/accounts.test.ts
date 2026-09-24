@@ -15,7 +15,7 @@ const ACCOUNT_OPS = [
   'createAccount', 'getHayAccount', 'searchAccounts', 'blockAccount', 'unblockAccount', 'closeAccount', 'updateCopOptOut',
   'updateMaxBalanceLimit', 'updateOverdraftLimit', 'getAccountRiskLevel', 'changeAccountRiskLevel', 'getCardsForAccountId',
   'getAccountLimits', 'setAccountLimit', 'deleteAccountLimit', 'getAccountRules', 'addAccountRule', 'getAccountRuleById', 'disableRule',
-  'createAccountCustomData', 'deleteAccountCustomData', 'getAllProducts',
+  'createAccountCustomData', 'deleteAccountCustomData', 'getAllProducts', 'getAllMerchantCategoryCodes',
 ]
 const UNKNOWN_ID = '11111111-1111-4111-8111-111111111111'
 const ISO_MICROS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/
@@ -107,6 +107,23 @@ describe('getAllProducts', () => {
     const res = await app.inject({ method: 'GET', url: '/v1/products' })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual([{ id: LOCAL_PRODUCT_ID, name: 'Local Everyday Account', description: expect.any(String), countryIsoCode: 'AUS' }])
+  })
+})
+
+describe('getAllMerchantCategoryCodes (GET /v0/mccs)', () => {
+  it('lists seeded ISO 18245 reference data: unique four-digit codes in ascending order, each with a description, usable in MERCHANT_CODE_BLOCK rules', async () => {
+    const res = await app.inject({ method: 'GET', url: '/v0/mccs' })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['x-shaype-local-stub']).toBeUndefined()
+    const mccs = res.json() as { code: number; description: string }[]
+    expect(mccs.length).toBeGreaterThan(50)
+    for (const m of mccs) {
+      expect(Number.isInteger(m.code) && m.code >= 1000 && m.code <= 9999, String(m.code)).toBe(true)
+      expect(m.description.length).toBeGreaterThan(3)
+    }
+    expect(mccs.map((m) => m.code)).toEqual([...new Set(mccs.map((m) => m.code))].sort((a, b) => a - b))
+    expect(mccs).toContainEqual({ code: 5411, description: 'Grocery Stores, Supermarkets' })
+    expect(mccs).toContainEqual({ code: 5812, description: 'Eating Places, Restaurants' })
   })
 })
 

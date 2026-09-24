@@ -16,7 +16,7 @@ const START = '<!-- progress:start -->'
 const END = '<!-- progress:end -->'
 
 /** Sections that are stub-only by design (spec-shaped deterministic responses, no state). */
-const STUB_ONLY = new Set(['Perks API', 'FX API', 'Liquidity API', 'Click to Pay API', 'Tokens API', 'Merchant Category Codes API'])
+const STUB_ONLY = new Set(['Perks API', 'FX API', 'Liquidity API', 'Click to Pay API', 'Tokens API'])
 
 const { app, stubbed } = await buildServer({ logLevel: 'silent', auth: false })
 await app.ready()

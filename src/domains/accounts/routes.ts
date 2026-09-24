@@ -1,6 +1,6 @@
 /**
  * The "Accounts API" operations owned by this domain (transfers and holds belong to transactions) plus
- * getAllProducts. Input arrives validated against the spec schemas; the response is serialized through
+ * the seeded reference data: getAllProducts and getAllMerchantCategoryCodes. Input arrives validated against the spec schemas; the response is serialized through
  * the success schema by defineRoute().
  */
 import type { FastifyInstance } from 'fastify'
@@ -10,6 +10,7 @@ import type { AppContext } from '../../context.js'
 import { badRequest } from '../../lib/errors.js'
 import { withIdempotency } from '../../lib/idempotency.js'
 import { deps } from './deps.js'
+import { MERCHANT_CATEGORY_CODES } from './mccs.js'
 import type { LimitType } from './products.js'
 import type { CloseReason } from './repo.js'
 import type { AccountsService, AddRuleInput } from './service.js'
@@ -23,6 +24,7 @@ const CLOSE_REASONS: ReadonlySet<string> = new Set(['SUSPICIOUS', 'DECEASED', 'C
 
 export function registerRoutes(app: FastifyInstance, ctx: AppContext, svc: AccountsService): void {
   defineRoute(app, ctx, 'getAllProducts', () => svc.productSummaries())
+  defineRoute(app, ctx, 'getAllMerchantCategoryCodes', () => MERCHANT_CATEGORY_CODES)
 
   defineRoute<never, never, S['CreateAccountRequestBody']>(app, ctx, 'createAccount', async (req) => {
     const b = req.body

@@ -16,7 +16,7 @@ This document is the ground truth for implementers. Per-domain field lists, enum
 | Domain (folder) | Tags | Ops | Fidelity |
 |---|---|---|---|
 | customers | Customers API | 11 | full |
-| accounts (+products) | Accounts API (excl. transfers, holds), Products API | 23 | full |
+| accounts (+products, MCCs) | Accounts API (excl. transfers, holds), Products API, Merchant Category Codes API | 23 | full |
 | transactions | Transactions API, Holds API, `getPendingHolds`, `makeTransferV0/V1` | 12 | full |
 | cards | Cards API | 19 | full |
 | utilities | Utilities API | 13 | full (mock generators drive the ledger + webhooks) |
@@ -26,7 +26,7 @@ This document is the ground truth for implementers. Per-domain field lists, enum
 | groups-stacks | Groups API, Stacks API | 15 | full |
 | kyc | KYC API | 4 | full |
 | payto | PayTo API | 22 | full |
-| stubs | Perks, FX, Liquidity, Click to Pay, Tokens, Merchant Category Codes | 25 | spec-shaped deterministic responses (`src/stubs`) |
+| stubs | Perks, FX, Liquidity, Click to Pay, Tokens | 25 | spec-shaped deterministic responses (`src/stubs`) |
 
 Total 169. `getAllProducts` and `getAllMerchantCategoryCodes` return seeded reference data.
 
@@ -183,7 +183,7 @@ Mandates (initiator and payer sides) with the statuses and transitions in `docs/
 
 ## 6. Admin API (`/_admin`, no auth)
 
-`GET /health`, `GET /operations` (handled vs stubbed), `POST /reset`, `GET|POST /clock` (`{ set | freeze | advanceMs | reset }`), `GET /notifications?type&status&sinceSeq&limit&order`, `DELETE /notifications`, `GET /notifications/:id`, `POST /notifications/:id/redeliver`, `POST /notifications/flush` (await idle), `POST /scheduled-payments`.
+`GET /health`, `GET /operations` (handled vs stubbed), `POST /reset`, `POST /flush` (await deferred work due within ~9 s and webhook delivery; later steps counted in `deferred`), `GET|POST /clock` (`{ set | freeze | advanceMs | reset }`), `GET /notifications?type&status&sinceSeq&limit&order`, `DELETE /notifications`, `GET /notifications/:id`, `POST /notifications/:id/redeliver`, `POST /notifications/flush` (await idle), `POST /scheduled-payments`.
 
 ## 7. Testing
 
