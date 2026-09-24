@@ -29,7 +29,6 @@ const DEVIATIONS: Record<string, Record<string, JsonSchema>> = {
   retrieveBillers: { '200': { type: 'array', items: { $ref: 'res:BPayBillerResponse#' } } },
 }
 
-const PROTECTED = /^\/v[01]\//
 const ERROR_RESPONSE: JsonSchema = { $ref: 'res:ErrorResponse#' }
 
 /** What to do with a body answered with a given status: validate it, refuse the status, or let it through. */
@@ -62,8 +61,8 @@ export function installResponseValidation(app: FastifyInstance): void {
 
   /** The operation a /v0 or /v1 request was routed to, or undefined when the response is not checked. */
   const operationOf = (req: FastifyRequest): string | undefined => {
-    const operationId = (req.routeOptions.config as { operationId?: string } | undefined)?.operationId
-    return operationId && PROTECTED.test(req.url.split('?')[0] ?? '') ? operationId : undefined
+    // the routed operation, whatever the raw target looked like (percent-escaped or absolute-form)
+    return (req.routeOptions.config as { operationId?: string } | undefined)?.operationId
   }
 
   /** Validates `body`; answers the 500 violation body (and sets the status) when it breaks the contract. */

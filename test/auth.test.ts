@@ -1,3 +1,4 @@
+import http from 'node:http'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { getToken, startApp } from './helpers.js'
 import type { BuiltServer } from '../src/server.js'
@@ -42,6 +43,30 @@ describe('client-credentials auth', () => {
     expect(res.statusCode).toBe(403)
     expect(res.json().message).toContain('expired')
     await built.app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
+  })
+
+  it('guards the routed operation, not the raw request target: percent-encoded and absolute-form /v1 paths still need a token', async () => {
+    const other = await startApp({ auth: true })
+    try {
+      const base = await other.app.listen({ port: 0, host: '127.0.0.1' })
+      const { port } = new URL(base)
+      const raw = (path: string) => new Promise<{ status: number; body: any }>((resolve, reject) => {
+        const req = http.request({ host: '127.0.0.1', port, method: 'GET', path }, (res) => {
+          const chunks: Buffer[] = []
+          res.on('data', (c: Buffer) => chunks.push(c))
+          res.on('end', () => resolve({ status: res.statusCode!, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }))
+        })
+        req.on('error', reject)
+        req.end()
+      })
+      for (const path of ['/v1/products', '/%76%31/products', '/v%31/products', `http://127.0.0.1:${port}/v1/products`]) {
+        const res = await raw(path)
+        expect(res.status, path).toBe(403)
+        expect(res.body).toMatchObject({ status: '403', message: 'FORBIDDEN: Missing bearer token' })
+      }
+    } finally {
+      await other.app.close()
+    }
   })
 
   it('leaves /_admin and /oauth2 unprotected', async () => {
