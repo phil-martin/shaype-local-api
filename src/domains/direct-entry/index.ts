@@ -62,7 +62,8 @@
  *   anything else -> FAILED); otherwise it is skipped and the next occurrence stands.
  * - cancelScheduledPayment: ACTIVE -> CANCELLED; already CANCELLED is an idempotent 200; any other
  *   terminal status is 422 INVALID_STATUS_TRANSITION; no webhook. Closing an account cancels its
- *   ACTIVE schedules (PLATFORM); ACTIVE schedules never block closure, in-flight instructions do.
+ *   ACTIVE schedules (PLATFORM) and a CLOSED account takes no new one (422 ACCOUNT_CLOSED); ACTIVE
+ *   schedules never block closure, in-flight instructions do.
  */
 import type { FastifyInstance } from 'fastify'
 import type { AppContext } from '../../context.js'

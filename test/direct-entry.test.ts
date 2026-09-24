@@ -887,5 +887,12 @@ describe('scheduled payments', () => {
     await flush()
     expect((await getAccount(account.accountHayId!)).status).toBe('CLOSED')
     expect((await getSchedule(account.accountHayId!, s.hayId!)).status).toBe('CANCELLED')
+
+    // a closed account takes no new schedule (closure would never cancel it: S7's resource gate)
+    const before = (await allPayloads()).length
+    expectError(await app.inject({ method: 'POST', url: '/_admin/scheduled-payments', payload: scheduleInput(account, { startDate: await today() }) }), 422, /^ACCOUNT_CLOSED: /)
+    await flush()
+    expect((await allPayloads()).length).toBe(before)
+    expect((await app.inject({ method: 'GET', url: `/v0/accounts/${account.accountHayId}/scheduledPayments` })).json()).toHaveLength(1)
   })
 })

@@ -117,12 +117,15 @@ export class ScheduledPaymentsService {
    * the event is a creation notification). A replacement keeps the processed counters and resumes at its
    * first occurrence on or after today and strictly after the day of the last payment (never replaying a
    * paid occurrence). Validation failures are 400; an unknown account 404; a customer that does not hold
-   * the account 422 PERMISSION_DENIED; replacing a non-ACTIVE schedule 422 INVALID_STATUS_TRANSITION; a
-   * replacement with no occurrence left (count reached, past endDate, ONE_TIME already due) 422 INVALID_SCHEDULE.
+   * the account 422 PERMISSION_DENIED; a CLOSED account 422 ACCOUNT_CLOSED; replacing a non-ACTIVE schedule
+   * 422 INVALID_STATUS_TRANSITION; a replacement with no occurrence left (count reached, past endDate,
+   * ONE_TIME already due) 422 INVALID_SCHEDULE.
    */
   create(input: CreateScheduleInput): ScheduledPayment {
     if (!isUuid(input.accountId)) throw badRequest('BAD_REQUEST: accountId must be a UUID')
     const account = this.accounts.get(input.accountId)
+    // Closure cancels schedules only when it happens, so a closed account must not take a new one (S7 resource gate).
+    if (account.status === 'CLOSED') throw unprocessable(`ACCOUNT_CLOSED: Account ${account.id} is closed`)
     const holders = this.accounts.holderCustomerIds(account)
     const customerId = input.customerHayId ?? holders[0] ?? account.holderId
     if (!holders.includes(customerId)) throw unprocessable(`PERMISSION_DENIED: Customer ${customerId} does not hold account ${account.id}`)
