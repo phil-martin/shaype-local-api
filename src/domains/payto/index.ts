@@ -69,9 +69,9 @@
  * - Staging trajectories (F21, docs:payto-staging-testing-suite): `paymentstatus:<mms>[&<mms>]` or
  *   `paymentstatus:timeout_rjct` in the payment's description, else the mandate's, forces the outcome after
  *   the agreement checks: the first status is answered at once; a non-final one then moves asynchronously
- *   (scheduler.later; test knob paymentProgressDelayMs, reset by /_admin/reset) to the second status, settlement by default; RJCT is
- *   reason AB01. Without a hint the outcome is final at once. A hop that would settle on a mandate no
- *   longer ACTIVE (cancelled / suspended meanwhile) rejects with AG01 instead.
+ *   (scheduler.later; test knob paymentProgressDelayMs, reset by /_admin/reset) to the second status,
+ *   settlement by default; RJCT is reason AB01. Without a hint the outcome is final at once. A hop that
+ *   would settle on a mandate no longer ACTIVE (cancelled / suspended meanwhile) rejects with AG01 instead.
  * - Inbound RAPAIN (receivePaymentInstruction): ACCP debits the local debtor only (the creditor leg is the
  *   RAP mock), RJCT rejects with the given reason (AB01 by default); MANDATE_PAYMENT either way. The
  *   documented flow sends it with a makeAdhocPayment instructionId: an id already on the mandate is
@@ -85,10 +85,10 @@
  * - Scheduler (non-ADHOC mandates the client initiates): on activation the next due date (firstPayment.date
  *   or validityStartDate plus n periods, the day clamped once per date so month ends do not drift, bounded
  *   by lastPayment.date / validityEndDate; INTRA_DAY steps daily, pointInTime / countPerPeriod are
- *   recorded only) is initiated when the virtual clock
- *   reaches it, at least one day after scheduling. A due date once initiated is never scheduled again
- *   (the mandate records it), whatever re-schedules the mandate (MAMC, release, mock MCRC). USAGE_BASED / VARIABLE mandates get MANDATE_DUE_PAYMENT
- *   one day before (webhook-matrix), so that setScheduledPaymentInitiationRequestAmount (USAGE_BASED /
+ *   recorded only) is initiated when the virtual clock reaches it, at least one day after scheduling. A
+ *   due date once initiated is never scheduled again (the mandate records it), whatever re-schedules the
+ *   mandate (MAMC, release, mock MCRC). USAGE_BASED / VARIABLE mandates get MANDATE_DUE_PAYMENT one day
+ *   before (webhook-matrix), so that setScheduledPaymentInitiationRequestAmount (USAGE_BASED /
  *   VARIABLE only, else 422; unknown notificationId 422; above maximumAmount 422) can set the amount; a
  *   missing amount rejects with AM12. SUSPENDED defers the announcement and the payment until released,
  *   CANCELLED drops the schedule. PayTo schedules emit no SCHEDULED_PAYMENT (webhook-matrix). Each due
@@ -96,8 +96,11 @@
  *   next tick without blocking the others.
  * - Validity: a mandate is cancelled (CTEX, MSCH, PLATFORM) once the UTC date passes validityEndDate;
  *   closing the creditor or debtor account cancels its mandates (AC04, docs:account-closure).
- * - Webhooks: spec property names (mandateEventDto ... , webhook-matrix C5), `description` = the trigger's
- *   meaning, the docs-table / mock triggers only (C27), one notification per customer behind the addressed
+ * - Webhooks: spec property names only (mandateEventDto / mandatePaymentEventDto / mandateDuePaymentEventDto,
+ *   webhook-matrix C5). The matrix's optional switch `webhooks.mandateKeys=docs` (the docs null-list names
+ *   mandateEvent / mandatePaymentEvent / mandateDuePaymentEvent) is not implemented: design spec §8 lists no
+ *   such flag and wh:NotificationDto declares the spec names. `description` = the trigger's meaning, the
+ *   docs-table / mock triggers only (C27), one notification per customer behind the addressed
  *   side's account (Initiator = creditor holders, Payer = debtor holders; a side with no local account
  *   falls back to the other side for mock-driven notifications); actionOwner CLIENT for API-driven changes,
  *   PLATFORM for mocks / scheduler / expiry / asynchronous hops. A mock call sends exactly one MANDATE, with

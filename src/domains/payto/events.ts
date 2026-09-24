@@ -1,6 +1,7 @@
 /**
  * Domain events emitted by PayToService and their webhook mappings (docs/map/webhooks.md §2.4,
- * docs/map/00-webhook-matrix.md C5): MANDATE (`mandateEventDto`), MANDATE_PAYMENT
+ * docs/map/00-webhook-matrix.md C5; the optional `webhooks.mandateKeys=docs` names are not implemented):
+ * MANDATE (`mandateEventDto`), MANDATE_PAYMENT
  * (`mandatePaymentEventDto`, final statuses only) and MANDATE_DUE_PAYMENT (`mandateDuePaymentEventDto`),
  * spec property names. One notification per customer behind the addressed side's local account —
  * the creditor's holders for the Initiator, the debtor's for the Payer.
