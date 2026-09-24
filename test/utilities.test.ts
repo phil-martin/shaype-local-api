@@ -651,6 +651,28 @@ describe('generateAtmTransaction (POST /v0/utils/generate-atm-transaction)', () 
     expect(await pendingHolds(a.accountHayId!)).toEqual([])
   })
 
+  it('non-AUD card mocks: hold + settlement, refund and ATM carry originalCurrencyAmount (signed like currencyAmount) and the _INTERNATIONAL channel', async () => {
+    const { account: a, card } = await setup()
+    await setPreferences(card.cardHayId!, { cashWithdrawalEnabled: true })
+    await post('/v0/utils/generate-card-transaction', { amount: -7, cardToken: card.cardToken, currency: 'USD' })
+    await flush()
+    await post('/v0/utils/generate-refund-transaction', { amount: -2, cardToken: card.cardToken, currency: 'NZD' })
+    await post('/v0/utils/generate-atm-transaction', { amount: -20, cardToken: card.cardToken, currency: 'GBP' })
+    await setPreferences(card.cardHayId!, { cashWithdrawalEnabled: false })
+    await post('/v0/utils/generate-atm-transaction', { amount: -3, cardToken: card.cardToken, currency: 'GBP' })
+    const events = (await txs(a.accountHayId!)).map((p) => p.transactionEvent)
+    expect(events.map((e) => [e.transactionType, e.outcome, e.currencyAmount.amount, e.originalCurrencyAmount])).toEqual([
+      ['CARD_TRANSACTION', 'ACCEPTED', -7, { currency: 'USD', amount: -7 }],
+      ['CARD_TRANSACTION_SETTLED', 'ACCEPTED', -7, { currency: 'USD', amount: -7 }],
+      ['CARD_TRANSACTION_REFUND', 'ACCEPTED', 2, { currency: 'NZD', amount: 2 }],
+      ['CARD_TRANSACTION', 'ACCEPTED', -20, { currency: 'GBP', amount: -20 }],
+      ['CARD_TRANSACTION', 'REFUSED_CARD_PREFERENCE', -3, { currency: 'GBP', amount: -3 }],
+    ])
+    const channels = await Promise.all([events[1], events[2], events[3]].map(async (e) => (await get(`/v1/transactions/${e.transactionHayId}`)).json().transactionChannel))
+    expect(channels).toEqual(['VISA_CARD_PRESENT_INTERNATIONAL', 'VISA_REFUND_INTERNATIONAL', 'VISA_ATM_INTERNATIONAL'])
+    expect(await balances(a.accountHayId!)).toEqual({ total: 75, held: 0, available: 75 })
+  })
+
   it('checks the ATM limit, account rules and funds, each refusal with its outcome', async () => {
     const { account: a, card } = await setup()
     await setPreferences(card.cardHayId!, { cashWithdrawalEnabled: true })
@@ -842,6 +864,53 @@ describe('generateInboundNppTransactionV2 (POST /v0/utils/generate-inbound-npp-t
     expect((await get(`/v1/transactions/${p.transactionEvent.transactionHayId}`)).json()).toMatchObject({ type: 'INTERBANK_TRANSFER_OUT', transactionChannel: 'NPP_RETURN_IN', originId: originalId })
     // the payment is returned once: nothing left to return
     expectError(await post('/v0/utils/generate-inbound-npp-transaction-v2', rapBody(a, { paymentReturnInformation: { returnReasonCode: 'AC04', returnAmount: '212.38' } })), 404, /^NOT_FOUND: /)
+  })
+
+  it('a return names its payment by originalTransactionIdentification (the I / N letter ignored) over the amount match; without it, the most recent of that amount', async () => {
+    const { account: creditor } = await newAccount()
+    const { account: debtor } = await newAccount({ fund: 50 })
+    const mandateId = await createMandate(creditor, debtor, true)
+    const older = nextInstructionId()
+    const newer = nextInstructionId()
+    await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
+    await payByRapain(mandateId, older, '10')
+    await payByRapain(mandateId, newer, '10')
+    const [first, second] = (await txs(debtor.accountHayId!)).map((p) => p.transactionEvent)
+    expect([first.mandatePaymentDetails.instructionId, second.mandatePaymentDetails.instructionId]).toEqual([older, newer])
+    await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
+    const ret = (extra: Record<string, unknown>) => post('/v0/utils/generate-inbound-npp-transaction-v2', rapBody(debtor, { paymentReturnInformation: { returnReasonCode: 'AC04', returnAmount: '10', ...extra } }))
+    expect((await ret({ originalTransactionIdentification: nppId(older) })).statusCode).toBe(200)
+    expect((await ret({})).statusCode).toBe(200)
+    expectError(await ret({}), 404, /^NOT_FOUND: /)
+    const returns = (await txs(debtor.accountHayId!)).map((p) => p.transactionEvent)
+    expect(returns.map((e) => [e.transactionType, e.outcome, e.currencyAmount.amount, e.originType, e.originId, e.mandatePaymentDetails.instructionId, e.returnReason.code])).toEqual([
+      ['INTERBANK_TRANSFER_OUT', 'ACCEPTED', 10, 'TRANSACTION', first.transactionHayId, older, 'ACCOUNT_CLOSED'],
+      ['INTERBANK_TRANSFER_OUT', 'ACCEPTED', 10, 'TRANSACTION', second.transactionHayId, newer, 'ACCOUNT_CLOSED'],
+    ])
+    expect(await balances(debtor.accountHayId!)).toEqual({ total: 50, held: 0, available: 50 })
+  })
+
+  it('a partial return credits the returned amount and closes the payment; a return larger than the payment is 422', async () => {
+    const { account: creditor } = await newAccount()
+    const { account: debtor } = await newAccount({ fund: 50 })
+    const mandateId = await createMandate(creditor, debtor, true)
+    const instructionId = nextInstructionId()
+    await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
+    await payByRapain(mandateId, instructionId, '10')
+    const [paid] = await txs(debtor.accountHayId!)
+    await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
+    const ret = (returnAmount: string, returnReasonCode = 'FOCR') => post('/v0/utils/generate-inbound-npp-transaction-v2', rapBody(debtor, { paymentReturnInformation: { returnReasonCode, returnAmount, originalTransactionIdentification: nppId(instructionId) } }))
+    expectError(await ret('10.01'), 422, /^INVALID_AMOUNT: .*exceeds the original payment of 10/)
+    expect((await ret('4', 'ZZZZ')).statusCode).toBe(200)
+    const [p] = await txs(debtor.accountHayId!)
+    expect(p.transactionEvent).toMatchObject({
+      transactionType: 'INTERBANK_TRANSFER_OUT', outcome: 'ACCEPTED', currencyAmount: { amount: 4 }, originId: paid.transactionEvent.transactionHayId,
+      returnReason: { code: 'OTHER', message: 'Payment returned with reason code ZZZZ' },
+    })
+    expect(await balances(debtor.accountHayId!)).toEqual({ total: 44, held: 0, available: 44 })
+    // each payment is returned once: the rest of it cannot follow
+    expectError(await ret('6'), 404, /^NOT_FOUND: /)
+    expect(await balances(debtor.accountHayId!)).toEqual({ total: 44, held: 0, available: 44 })
   })
 
   it('a refused return (LOCKED account) still carries returnReason, originType / originId and mandatePaymentDetails', async () => {
@@ -1097,6 +1166,29 @@ describe('generateMandateNotificationForInitiator / ForPayer', () => {
     expectError(await post('/v0/utils/generate-mandate-notification-payer', notificationBody(hex(mandateId), 'MAMR')), 400, /^BAD_REQUEST: trigger MAMR/)
     expectError(await post('/v0/utils/generate-mandate-notification-payer', notificationBody(hex(mandateId), 'MCRC')), 400, /^BAD_REQUEST/)
     expectError(await post('/v0/utils/generate-mandate-notification-initiator', notificationBody('1212c423262b11ee844d95ee6a0c000c', 'MSCH')), 404, /^NOT_FOUND: Mandate/)
+  })
+
+  it('Initiator MCRX cancels a CREATED mandate (authorisation timed out); MAMC applies the pending amendment; one MANDATE each, to the creditor', async () => {
+    const { customer: creditorCustomer, account: creditor } = await newAccount()
+    const { account: debtor } = await newAccount()
+    const created = await createMandate(creditor, debtor)
+    const active = await createMandate(creditor, debtor, true)
+    const proposal = await app.inject({ method: 'PATCH', url: `/v1/payto/initiator/mandates/${active}/payment_terms`, payload: { paymentTerms: { frequency: 'ADHOC', type: 'VARIABLE', maximumAmount: { currency: 'AUD', amount: 150 } } } })
+    expect(proposal.statusCode, proposal.body).toBe(200)
+    expect((await get(`/v1/payto/mandates/${active}`)).json().paymentTerms.maximumAmount).toEqual({ currency: 'AUD', amount: 900 })
+    await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
+
+    expect((await post('/v0/utils/generate-mandate-notification-initiator', notificationBody(hex(created), 'MCRX'))).statusCode).toBe(200)
+    expect((await get(`/v1/payto/mandates/${created}`)).json()).toMatchObject({ status: 'CANCELLED' })
+    expect((await post('/v0/utils/generate-mandate-notification-initiator', notificationBody(hex(active), 'MAMC'))).statusCode).toBe(200)
+    const after = (await get(`/v1/payto/mandates/${active}`)).json()
+    expect(after).toMatchObject({ status: 'ACTIVE', paymentTerms: { maximumAmount: { currency: 'AUD', amount: 150 } } })
+    const pending = await get(`/v1/payto/initiator/mandates/${active}/actions?pendingOnly=true`)
+    expect(pending.json().actions).toEqual([])
+    const ps = await payloads()
+    expect(ps.map((p) => [p.type, p.customerHayId, p.mandateEventDto.mandateId, p.mandateEventDto.trigger])).toEqual([
+      ['MANDATE', creditorCustomer, created, 'MCRX'], ['MANDATE', creditorCustomer, active, 'MAMC'],
+    ])
   })
 
   it('Payer MSCH on a known mandate goes to the debtor side', async () => {
