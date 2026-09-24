@@ -72,6 +72,23 @@ function sampleParam(op: { params?: unknown }, name: string): string {
   return 'sample'
 }
 
+describe('request bodies: JSON only', () => {
+  it('a form-encoded body on a B2B op is refused (400), not parsed and executed; unsupported and oversized bodies are 400 BAD_REQUEST too', async () => {
+    const form = new URLSearchParams({ idempotencyKey: randomUUID(), accountHayId: randomUUID(), amount: '5', counterpartName: 'x', description: 'form', transactionChannel: 'MANUAL_ADJUSTMENT' }).toString()
+    const cases: { headers: Record<string, string>; payload: string }[] = [
+      { headers: { 'content-type': 'application/x-www-form-urlencoded' }, payload: form },
+      { headers: { 'content-type': '' }, payload: '{}' },
+      { headers: { 'content-type': 'application/vnd.api+json' }, payload: '{}' },
+      { headers: { 'content-type': 'application/json' }, payload: JSON.stringify({ pad: 'x'.repeat(1_100_000) }) },
+    ]
+    for (const c of cases) {
+      const res = await built.app.inject({ method: 'POST', url: '/v1/transactions/credit', ...c })
+      expect(res.statusCode, `${c.headers['content-type']} -> ${res.body.slice(0, 120)}`).toBe(400)
+      expect(res.json()).toMatchObject({ status: '400', message: expect.stringMatching(/^BAD_REQUEST: /) })
+    }
+  })
+})
+
 describe('stubs', () => {
   it('stub ops whose body carries idempotencyKey replay the stored response and refuse the key with another body (422 IDEMPOTENCY_KEY_REUSED)', async () => {
     const key = randomUUID()

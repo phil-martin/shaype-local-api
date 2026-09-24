@@ -86,8 +86,10 @@ export async function buildServer(overrides: Partial<Config> = {}, deps: { fetch
     }
     const e = err as Error & { validation?: unknown; statusCode?: number; code?: string }
     if (e.validation) return reply.code(400).send(errorBody(400, `BAD_REQUEST: ${e.message}`))
+    // Every other client fault is malformed input (spec §4: 400), whatever status Fastify gives it: an
+    // unsupported media type (415) or an oversized body (413) is declared nowhere.
     if (e.code === 'FST_ERR_CTP_EMPTY_JSON_BODY' || e.code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE' || (e.statusCode && e.statusCode < 500)) {
-      return reply.code(e.statusCode ?? 400).send(errorBody(e.statusCode ?? 400, `BAD_REQUEST: ${e.message}`))
+      return reply.code(400).send(errorBody(400, `BAD_REQUEST: ${e.message}`))
     }
     req.log.error({ err }, 'unhandled error')
     return reply.code(500).send(errorBody(500, `INTERNAL_ERROR: ${e.message}`))

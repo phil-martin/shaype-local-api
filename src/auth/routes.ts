@@ -1,20 +1,26 @@
 /**
  * POST /oauth2/token — the Cognito client-credentials endpoint (form-encoded), accepting the client
- * either as HTTP Basic credentials or as client_id/client_secret body fields.
+ * either as HTTP Basic credentials or as client_id/client_secret body fields. The form parser lives in an
+ * encapsulated plugin holding only this route: the B2B operations take application/json only.
  */
 import type { FastifyInstance } from 'fastify'
 import type { AppContext } from '../context.js'
 import type { TokenService } from './token.js'
 
 export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext, tokens: TokenService): void {
-  app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_req, body, done) => {
-    try {
-      done(null, Object.fromEntries(new URLSearchParams(body as string)))
-    } catch (e) {
-      done(e as Error, undefined)
-    }
+  void app.register(async (scope) => {
+    scope.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_req, body, done) => {
+      try {
+        done(null, Object.fromEntries(new URLSearchParams(body as string)))
+      } catch (e) {
+        done(e as Error, undefined)
+      }
+    })
+    registerTokenRoute(scope, ctx, tokens)
   })
+}
 
+function registerTokenRoute(app: FastifyInstance, ctx: AppContext, tokens: TokenService): void {
   app.post('/oauth2/token', async (req, reply) => {
     const body = (req.body ?? {}) as Record<string, string>
     let clientId = body.client_id
