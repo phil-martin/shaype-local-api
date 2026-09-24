@@ -23,9 +23,10 @@
  *   LAST_GROUP_MEMBER. The cascade is synchronous: every non-INACTIVE card the customer holds on the
  *   group's accounts is voided (cards.cancelAllForAccount with { customerId }: CARD_STATUS_CHANGE
  *   {INACTIVE}, PLATFORM; cards registers before this domain), and the customer becomes INACTIVE
- *   (customers.markInactive, PLATFORM, no statusReason) when it is linked to at least one account and
- *   none of them — personal or through a remaining group — is open. A customer with no accounts at all
- *   keeps its status.
+ *   (customers.markInactive, PLATFORM, no statusReason) when no open account remains — personal or
+ *   through a remaining group — and it was linked to at least one account, counting the accounts of the
+ *   group just left (so the usual "one party leaves the joint account" case deactivates it; S18). A
+ *   customer that never had an account (e.g. leaving a group without one) keeps its status.
  * - Stacks: createStack / updateStack need a non-CLOSED account (422 ACCOUNT_CLOSED); names are unique
  *   (exact match) among the account's OPEN stacks and may not contain emojis (422 INVALID_ARGUMENT);
  *   targetAmount takes <= 2 dp (400) and at most the account's MAX_BALANCE limit (account override, else

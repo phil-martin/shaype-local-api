@@ -404,6 +404,16 @@ describe('removeCustomerFromGroup (POST /v0/groups/{groupHayId}/removeCustomer)'
     expect((await allPayloads()).length).toBe(before) // config.emitCustomerInactive is off
   })
 
+  it('a member whose only account link was the group it leaves (open group account, no personal account) becomes INACTIVE', async () => {
+    const [m1, m2] = [await newCustomer(), await newCustomer()]
+    const g = await newGroup([m1, m2])
+    const a = await newGroupAccount(g.groupHayId!)
+    expect((await post(`/v0/groups/${g.groupHayId}/removeCustomer`, { customerId: m2 })).statusCode).toBe(200)
+    expect(await customer(m2)).toMatchObject({ status: 'INACTIVE' })
+    expect((await customer(m1)).status).toBe('ACTIVE')
+    expect((await getAccount(a.accountHayId!)).status).toBe('APPROVED')
+  })
+
   it('a customer with no linked account at all keeps its status; a member of another group with an open account stays ACTIVE', async () => {
     const [m1, m2, m3] = [await newCustomer(), await newCustomer(), await newCustomer()]
     const g = await newGroup([m1, m2])

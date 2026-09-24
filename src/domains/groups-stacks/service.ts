@@ -201,8 +201,9 @@ export class GroupsService {
   /**
    * removeCustomerFromGroup: unknown customer -> 404; not a member -> 422 NOT_A_MEMBER; the final member
    * -> 422 LAST_GROUP_MEMBER. Synchronous cascade (00-open-questions T1/S18): the customer's cards on the
-   * group's accounts are voided (cards.cancelAllForAccount restricted to the cardholder) and the customer becomes INACTIVE when it
-   * is linked only to CLOSED accounts (its own and those of its remaining groups).
+   * group's accounts are voided (cards.cancelAllForAccount restricted to the cardholder) and the customer
+   * becomes INACTIVE when no open account remains (personal or through a remaining group) and it was
+   * linked to at least one account — including those of the group just left.
    */
   removeMember(id: string, customerId: string): Group {
     const g = this.get(id)
@@ -222,7 +223,9 @@ export class GroupsService {
     for (const a of groupAccounts) this.ctx.services.cards.cancelAllForAccount(a.id, 'Customer removed from group', { customerId })
     const accounts = this.ctx.services.accounts
     const c = customers.find(customerId)
-    if (c && c.status !== 'INACTIVE' && !accounts.hasOpenAccounts(customerId) && this.hasAnyAccount(customerId)) customers.markInactive(customerId)
+    // "linked" counts the accounts of the group just left, so leaving the only (joint) account deactivates the customer
+    const linked = groupAccounts.length > 0 || this.hasAnyAccount(customerId)
+    if (c && c.status !== 'INACTIVE' && linked && !accounts.hasOpenAccounts(customerId)) customers.markInactive(customerId)
     return g
   }
 
