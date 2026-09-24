@@ -262,8 +262,9 @@ export class StacksService {
     return this.repo.stackById(id)
   }
 
-  /** The stack, which must belong to the account. @throws 404 when unknown or on another account */
+  /** The stack, which must belong to the account. @throws 404 NOT_FOUND: Account for an unknown account, NOT_FOUND: Stack when the stack is unknown or on another account */
   get(accountId: string, stackId: string): Stack {
+    this.ctx.services.accounts.get(accountId)
     const s = this.repo.stackById(stackId)
     if (!s || s.accountId !== accountId) throw notFound(`NOT_FOUND: Stack ${stackId} not found`)
     return s

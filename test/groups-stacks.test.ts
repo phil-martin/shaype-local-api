@@ -641,6 +641,21 @@ describe('updateStack (PUT /v0/accounts/{accountId}/stacks/{stackId})', () => {
   })
 })
 
+describe('stack-scoped operations on an unknown account', () => {
+  it('answer 404 NOT_FOUND: Account (not Stack) like getAllStacks / createStack / the transaction lists', async () => {
+    const { holder, stackId } = await fundedWithStack(10)
+    const base = `/v0/accounts/${UNKNOWN_ID}/stacks`
+    const account404 = new RegExp(`^NOT_FOUND: Account ${UNKNOWN_ID}`)
+    expectError(await app.inject({ method: 'PUT', url: `${base}/${stackId}`, payload: { name: 'x' } }), 404, account404)
+    expectError(await post(`${base}/${stackId}/close`), 404, account404)
+    expectError(await transferIn(UNKNOWN_ID, stackId, { amount: 1, customerId: holder }), 404, account404)
+    expectError(await transferOut(UNKNOWN_ID, stackId, { amount: 1, customerId: holder }), 404, account404)
+    expectError(await post(`${base}/transactions`, { amount: 1, customerId: holder, withdrawalStackId: stackId, depositStackId: UNKNOWN_ID }), 404, account404)
+    expectError(await app.inject({ method: 'GET', url: `${base}/${stackId}/transactions?offset=0&limit=10` }), 404, account404)
+    expect(() => stacks.roundUp(UNKNOWN_ID, stackId, 1)).toThrow(account404)
+  })
+})
+
 describe('accountToStackTransfer (transfer-in)', () => {
   it('moves available funds into the stack (total unchanged), records a +amount STANDARD transaction and activates an APPROVED account', async () => {
     const { holder, accountId, stackId } = await fundedWithStack(100)
@@ -714,7 +729,7 @@ describe('accountToStackTransfer (transfer-in)', () => {
     const stranger = await newCustomer()
     expectError(await transferIn(accountId, stackId, { amount: 1, customerId: stranger }), 422, new RegExp(`^PERMISSION_DENIED: Customer ${stranger} does not hold account ${accountId}`))
     expectError(await transferIn(accountId, UNKNOWN_ID, { amount: 1, customerId: holder }), 404, /^NOT_FOUND: Stack/)
-    expectError(await transferIn(UNKNOWN_ID, stackId, { amount: 1, customerId: holder }), 404, /^NOT_FOUND: Stack/)
+    expectError(await transferIn(UNKNOWN_ID, stackId, { amount: 1, customerId: holder }), 404, new RegExp(`^NOT_FOUND: Account ${UNKNOWN_ID}`))
     expect((await post(`/v0/accounts/${accountId}/block`, { note: 'x', accountBlockStyle: 'ACCOUNT_ONLY' })).statusCode).toBe(200)
     expectError(await transferIn(accountId, stackId, { amount: 1, customerId: holder }), 422, new RegExp(`^ACCOUNT_BLOCKED: Account ${accountId} is LOCKED`))
     expect((await post(`/v0/accounts/${accountId}/unblock`, { note: 'x' })).statusCode).toBe(200)
