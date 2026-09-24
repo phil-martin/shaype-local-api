@@ -310,7 +310,7 @@ export class StacksService {
     })
   }
 
-  /** getAllStackTransactions / getTransactionsForStack: newest first, `type` filter, offset/limit (limit 1..1000, offset >= 0 -> 400). */
+  /** getAllStackTransactions / getTransactionsForStack: posting order (oldest first, spec §4), `type` filter, offset/limit (limit 1..1000, offset >= 0 -> 400). */
   listTransactions(accountId: string, page: { offset: number; limit: number; type?: StackTransactionType | null }, stackId?: string): HayStackTransaction[] {
     this.ctx.services.accounts.get(accountId)
     if (stackId) this.get(accountId, stackId)

@@ -42,8 +42,9 @@
  * - HayStackTransaction.amount is signed from the stack's perspective (deposit +, withdrawal −;
  *   00-transactions C12); stack-to-stack writes a withdrawal and a deposit cross-linked by
  *   counterpartTransactionId; closeStack sweeps a balance as an OPERATIONS withdrawal (customerId = the
- *   holder of a personal account, absent for a group account). Lists are newest first; limit 1..1000 and
- *   offset >= 0 (400). ROUND_UP records come only from StacksService.roundUp (no B2B operation).
+ *   holder of a personal account, absent for a group account). Lists are in posting order, oldest
+ *   first (spec §4: no sortBy, so creation time ascending; overrides 00-open-questions G2); limit 1..1000
+ *   and offset >= 0 (400). ROUND_UP records come only from StacksService.roundUp (no B2B operation).
  * - Account closure: the accounts domain refuses closure while stacksBalance != 0 (ACCOUNT_BALANCE_STACKS);
  *   once an account is CLOSED its remaining empty open stacks are closed by the platform.
  * - No webhook is emitted by this domain (none exists for groups or stacks); see events.ts.
