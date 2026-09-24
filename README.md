@@ -5,7 +5,7 @@
 
 **Full-fidelity operations: 144 / 144 (100%)**  `████████████████████`
 
-All 169 operations of the spec are routed and schema-validated; the 25 stub-only operations answer with deterministic spec-shaped data. Test files: 16. Updated 2026-09-24 at `1780416`.
+All 169 operations of the spec are routed and schema-validated; the 25 stub-only operations answer with deterministic spec-shaped data. Test files: 16. Updated 2026-09-24 at `9190838`.
 
 | Section | Implemented | Progress | Status |
 |---|---|---|---|
@@ -148,11 +148,11 @@ node -e "require('node:http').createServer((req, res) => { let b = ''; req.on('d
 | To get | Do |
 |---|---|
 | An onboarded customer | Create it with any email: onboarding runs asynchronously and ends `ACTIVE` with `ONBOARDING_PASSED` then `CUSTOMER_STATUS_UPDATED {ACTIVE}` (`PLATFORM`). |
-| A referred customer | Put `+referred` in the email's local part (`jane+referred@example.com`): `REFERRED`, `ONBOARDING_FAILED {state: KYC_AML_SCAN}`. Clear it with the KYC approval endpoints (`POST /v1/kyc/{customerId}/onboarding/{amlKycCheck,documentCheck,sanctionCheck}/approval`). |
-| A rejected customer | `+rejected` in the email: `REJECTED`, `ONBOARDING_FAILED {state: DOCUMENT_SCAN}`. |
+| A referred customer | Put `+referred` in the email's local part (`jane+referred@example.com`): `REFERRED`, `ONBOARDING_FAILED {state: KYC_AML_SCAN}`. Clear it with the KYC approval endpoints (`POST /v1/kyc/{customerId}/onboarding/{amlKycCheck,documentCheck,sanctionCheck}/approval`). Under Reduced KYC (`onlySanctionsCheck: true`) the state is `SANCTIONS_SCAN` and only the `sanctionCheck` approval clears it (the other two answer `422`). |
+| A rejected customer | `+rejected` in the email: `REJECTED`, `ONBOARDING_FAILED {state: DOCUMENT_SCAN}` (`SANCTIONS_SCAN` under Reduced KYC). |
 | A customer you drive yourself | `+pending` in the email: it stays `PENDING_APPROVAL` with no onboarding webhook; set the status with `PATCH /v0/customers/{id}/status`. |
 | Money movement on a new account | New accounts have risk level `HIGH`, which makes every limit 0 and refuses every movement (a credit answers `REFUSED_MAX_BALANCE_EXCEEDED`). Set `LOW` with `PATCH /v0/accounts/{id}/riskLevel` `{ "level": "LOW", "reason": "…" }`, or start the server with `--default-risk-level LOW`. |
-| An account with money | `POST /v1/transactions/credit` (a `GENERAL_CREDIT`; the first posting turns an `APPROVED` account `ACTIVE`). |
+| An account with money | `POST /v1/transactions/credit` (a `GENERAL_CREDIT`; the first posting turns an `APPROVED` account `ACTIVE`; inbound credits are capped at 100,000 a rolling day by `TOP_UP_PER_DAY`). |
 | A BSB that fails | `999999`: `verifyBranchIdentifier` answers `{ "enabled": false }`, `checkBsbIsSupportedByPayTo` `{ "supported": false }`, and a direct debit whose recipient BSB is `999999` is `REJECTED` at once. |
 | A biller that fails | Biller code `000000` is deactivated: `validateBpay` answers 422, `makeBpayPayment` `REFUSED_BPAY_INVALID_BILLER_CODE`. Any other 4–10 digit code is a valid biller; the five Shaype staging billers (`7773`, `93849`, `93880`, `600015`, and the deactivated `1016`) keep their documented rules. |
 | A declined card transaction | The card mock endpoints (`/v0/utils/generate-auth-hold`, `generate-card-transaction`, `generate-update-auth-hold`) take `declineReason`: `CARD_EXPIRED`, `WRONG_CVV`, `CVV_BLOCKED`, `INCORRECT_PIN`, `ALLOWED_PIN_RETRIES_EXCEEDED`, `INVALID_MERCHANT`, `CARD_IS_NOT_ACTIVE` or `RESTRICTED_CARD` force a processor decline: nothing is held and the `TRANSACTION` webhook carries the refused outcome. The card's own state declines too: a `BLOCKED` card, an expired one, a card awaiting activation, or a channel switched off in its payment preferences (card-not-present, contactless, magnetic stripe and ATM are off by default). |

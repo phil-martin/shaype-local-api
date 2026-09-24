@@ -111,7 +111,7 @@ Domains register singletons in `ctx.services` (typed via module augmentation of 
 ### 5.1 Customers
 
 - `createHayCustomer` → `PENDING_APPROVAL`, `creationDateTimeUtc = now`, `tier` mirrors `customerTier`, defaults `deviceId: "NOT_SPECIFIED"`. Uniqueness per `email`, `phoneNumber`, `(identityDocumentType, identityDocumentNumber)`, `(firstName, lastName, dateOfBirth)` among customers that are not `INACTIVE` with reason `CUSTOMER`/`OPERATIONAL` → 422 `DUPLICATE_CUSTOMER`.
-- Onboarding outcome is asynchronous (`scheduler.later`): default → `ACTIVE`, emit `ONBOARDING_PASSED` then `CUSTOMER_STATUS_UPDATED` (`actionOwner: PLATFORM`). Test steering `[decision]`: email local-part tag `+referred` → `REFERRED` + `ONBOARDING_FAILED` (`failedStage: KYC_AML_SCAN`), `+rejected` → `REJECTED` + `ONBOARDING_FAILED` (`DOCUMENT_SCAN`), `+pending` → stays `PENDING_APPROVAL` (client drives status via `changeHayCustomerStatus`).
+- Onboarding outcome is asynchronous (`scheduler.later`): default → `ACTIVE`, emit `ONBOARDING_PASSED` then `CUSTOMER_STATUS_UPDATED` (`actionOwner: PLATFORM`). Test steering `[decision]`: email local-part tag `+referred` → `REFERRED` + `ONBOARDING_FAILED` (`failedStage: KYC_AML_SCAN`), `+rejected` → `REJECTED` + `ONBOARDING_FAILED` (`DOCUMENT_SCAN`), `+pending` → stays `PENDING_APPROVAL` (client drives status via `changeHayCustomerStatus`). Under Reduced KYC (`onlySanctionsCheck: true`, sanctions screening only) both tags fail `SANCTIONS_SCAN`.
 - `changeHayCustomerStatus` accepts any enum value (spec) except leaving `INACTIVE` → 422 `INVALID_STATE`; emits `CUSTOMER_STATUS_UPDATED`.
 - `blockCustomer` → `BLOCKED` (`blockedBy: CLIENT`), `unblockCustomer` → `ACTIVE` (422 if not `BLOCKED`); both emit `CUSTOMER_STATUS_UPDATED`. Blocking a customer does not block accounts/cards `[docs]`.
 - `updateCustomer` → `CUSTOMER_DETAILS_CHANGE` with the four change booleans; propagates name to the customer's PayIDs unless `skipPayIdUpdate`.
@@ -175,7 +175,7 @@ Groups (`PERSONAL`/`BUSINESS`) with member customers; group accounts require all
 
 ### 5.10 KYC
 
-`createCase` stores a verification case (returns `caseId`); the three approval endpoints mark the corresponding check approved on a `REFERRED` customer and, once every failed check is approved, set the customer `ACTIVE` (`CUSTOMER_STATUS_UPDATED`, `ONBOARDING_PASSED`) `[decision]`. Approving on a non-`REFERRED` customer → 422 `INVALID_STATE`.
+`createCase` stores a verification case (returns `caseId`); the three approval endpoints mark the corresponding check approved on a `REFERRED` customer and, once every failed check is approved, set the customer `ACTIVE` (`CUSTOMER_STATUS_UPDATED`, `ONBOARDING_PASSED`) `[decision]`. Approving on a non-`REFERRED` customer → 422 `INVALID_STATE`. A customer onboarded under Reduced KYC (`onlySanctionsCheck: true`) has only the sanctions stage: `sanctionCheck` approval clears it, `amlKycCheck` / `documentCheck` → 422 `INVALID_STATE`.
 
 ### 5.11 PayTo
 
