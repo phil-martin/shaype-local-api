@@ -215,6 +215,11 @@ const CREDIT_EXTRA_LIMITS: Partial<Record<LedgerType, InternalLimitType[]>> = {
   INTERBANK_TRANSFER_IN: ['BANK_TRANSFER_TOP_UP_PER_DAY'],
 }
 
+/** Channels of the Australian domestic rails (NPP, Direct Entry, RTGS, BPAY and their returns), which FX child accounts are not on. */
+export function isDomesticRail(channel: TransactionChannel | undefined): boolean {
+  return channel !== undefined && /^(CUSCAL_|NPP_RETURN_|DE_DEBIT_RETURN_|BPAY_IN_REJECT)/.test(channel)
+}
+
 /** Limits a posting is checked against when the caller names none: credits MAX_BALANCE (+ top-up caps), debits the type's outbound caps. */
 export function defaultLimits(type: LedgerType, amountCents: Cents): InternalLimitType[] {
   if (amountCents >= 0) return ['MAX_BALANCE', ...(CREDIT_EXTRA_LIMITS[type] ?? [])]
@@ -326,7 +331,10 @@ export class TransactionsService {
     return { outcome, transaction: this.apply(input) }
   }
 
-  /** The checks of post() without the posting: status -> limits -> funds; 'ACCEPTED' when the movement fits. */
+  /**
+   * The checks of post() without the posting: status -> rails (an FX child is not on the domestic rails,
+   * 00-balance S4 / B6: REFUSED_CAPABILITY_NOT_ENABLED) -> limits -> funds; 'ACCEPTED' when the movement fits.
+   */
   evaluate(input: PostInput): LedgerOutcome {
     if (input.checks === false) {
       this.accounts.get(input.accountId)
@@ -334,6 +342,7 @@ export class TransactionsService {
     }
     const gate = this.accounts.requireOpenForMovement(input.accountId)
     if (typeof gate === 'string') return gate
+    if (gate.parentAccountId && isDomesticRail(input.channel)) return 'REFUSED_CAPABILITY_NOT_ENABLED'
     return this.checkLimits(input) ?? this.checkFunds(input) ?? 'ACCEPTED'
   }
 

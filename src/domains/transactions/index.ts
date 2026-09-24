@@ -43,6 +43,8 @@
  *   REFUSED_INVALID_PAY_ID; the deprecated per-object reference is honoured when the top-level one is
  *   absent; the reference is stored on every transfer kind. No FX (spec §4): an FX child account may
  *   only transfer INTERNAL and only between accounts of the same currency, else REFUSED_CAPABILITY_NOT_ENABLED.
+ *   The engine refuses any domestic-rail posting (CUSCAL_* / NPP and DE return channels) on an FX child the
+ *   same way (00-balance S4, B6), so inbound NPP / DE, direct debits and PayTo legs never credit AUD 1:1.
  * - Holds: card-only; retrievable in every state (currencyAmount negative, the last held amount);
  *   getPendingHolds lists AUTHORISED holds only; settlement bypasses status/limit checks (reserved at
  *   authorisation), releases the whole hold and posts the settled amount (default the hold amount) with

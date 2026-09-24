@@ -492,6 +492,68 @@ describe('makeTransferV1 / V0 (POST /v1/accounts/{accountId}/transfer)', () => {
     expect(svc.listForAccount(child.accountHayId!)).toEqual([])
   })
 
+  it('FX children are not on domestic rails: NPP / DE credits, a direct debit and PayTo legs on a child are refused (REFUSED_CAPABILITY_NOT_ENABLED), never posted 1:1 across currencies', async () => {
+    const holder = await newCustomer()
+    const parent = await fundedAccount(100, holder)
+    const created = await post('/v1/accounts', { idempotencyKey: randomUUID(), accountHolderId: holder, accountHolderType: 'CUSTOMER', productId: LOCAL_PRODUCT_ID, currency: 'USD', parentAccountId: parent.accountHayId })
+    expect(created.statusCode, created.body).toBe(200)
+    const child = created.json() as HayAccount
+    expect((await app.inject({ method: 'PATCH', url: `/v0/accounts/${child.accountHayId}/riskLevel`, payload: { level: 'LOW', reason: 'test' } })).statusCode).toBe(200)
+    expect((await credit(child.accountHayId!, 20)).outcome).toBe('ACCEPTED')
+    const ok = (res: { statusCode: number; body: string }) => expect(res.statusCode, res.body).toBe(200)
+
+    ok(await post('/v0/utils/generate-npp-inbound', {
+      idempotencyKey: randomUUID(), amount: 50, description: 'npp', receiverBsb: child.bsb, receiverAccountNumber: child.accountNumber, receiverName: 'Me',
+      senderBsb: '302227', senderAccountNumber: '112836327', senderName: 'Andy',
+    }))
+    ok(await post('/v0/utils/generate-inbound-npp-transaction-v2', {
+      creditorInformation: { accountIdentification: `${child.bsb}${child.accountNumber}`, accountIdentificationTypeCode: 'BBAN' },
+      debtorInformation: { accountIdentification: '63610079412687', accountIdentificationTypeCode: 'BBAN', partyName: 'Andy' },
+      initgPtyIdOrgId: 'NPBOAU21XXX', paymentId: 'ANNCAU22XXX20230718000000000077240',
+      paymentInformation: { endToEndIdentification: 'NET-1', instructedAmount: '5', originalMessageIdentification: 'ANNCAU22XXX20230718000000000077240', transactionIdentification: 'ANNCAU22XXXN20230718000000000077240' },
+    }))
+    ok(await post('/v0/utils/generate-de-inbound', {
+      recordType: 'DIRECT', transactionType: 'CREDIT', amount: 25, description: 'de', recipientAccountNumber: child.accountNumber, recipientBsb: child.bsb, recipientName: 'Me',
+      senderAccountNumber: '112836327', senderBsb: '302227', senderName: 'Darth',
+    }))
+    const dd = await post('/v1/direct-debits', {
+      idempotencyKey: randomUUID(), transactionId: randomUUID(), amount: 10, description: 'dd', senderBsb: child.bsb!, senderAccountNumber: child.accountNumber!, senderName: 'Me',
+      recipientBsb: '302227', recipientAccountNumber: '123456789', recipientName: 'Debtor',
+    })
+    ok(dd)
+    expect(dd.json().outcome).toBe('REJECTED')
+
+    // PayTo: the child as creditor (AC14) and as debtor (AC13); the parent pays / is paid nothing
+    const mandate = async (creditorAccountId: string, debtorAccountId: string) => {
+      const res = await post('/v1/payto/initiator/mandates', {
+        idempotencyKey: randomUUID(), creditorDetails: { accountId: creditorAccountId, partyType: 'ORGANISATION', ultimatePartyName: 'ACME' },
+        debtorDetails: { partyName: 'Me', partyType: 'PERSON', accountId: debtorAccountId }, description: 'Bills',
+        paymentTerms: { frequency: 'ADHOC', type: 'VARIABLE', maximumAmount: AUD(900) }, purposeCode: 'UTILITY', validityStartDate: '2020-10-06',
+      })
+      ok(res)
+      const id = res.json().mandateId as string
+      ok(await app.inject({ method: 'PATCH', url: `/v1/payto/payer/mandates/${id}/resolve?resolution=ACCEPT` }))
+      return id
+    }
+    const adhoc = async (mandateId: string) => {
+      const res = await post('/v1/payto/payments/adhoc', { idempotencyKey: randomUUID(), mandateId, amount: AUD(10) })
+      ok(res)
+      return [res.json().transactionStatus, (await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${mandateId}/instructions/${res.json().instructionId}/status` })).json().transactionStatusReasonCode]
+    }
+    expect(await adhoc(await mandate(child.accountHayId!, parent.accountHayId!))).toEqual(['REJECTED', 'AC14'])
+    expect(await adhoc(await mandate(parent.accountHayId!, child.accountHayId!))).toEqual(['REJECTED', 'AC13'])
+    await flush()
+
+    expect(await getAccount(child.accountHayId!)).toMatchObject({ currency: 'USD', totalBalance: 20 })
+    expect(await getAccount(parent.accountHayId!)).toMatchObject({ totalBalance: 100 })
+    const refused = (await txEvents(child.accountHayId!)).map((p) => p.transactionEvent).filter((e) => e.outcome !== 'ACCEPTED')
+    expect(refused.map((e) => [e.transactionType, e.outcome, e.currencyAmount.amount])).toEqual([
+      ['INTERBANK_TRANSFER_IN', 'REFUSED_CAPABILITY_NOT_ENABLED', 50],
+      ['INTERBANK_TRANSFER_IN', 'REFUSED_CAPABILITY_NOT_ENABLED', 5],
+      ['INTERBANK_TRANSFER_IN', 'REFUSED_CAPABILITY_NOT_ENABLED', 25],
+    ])
+  })
+
   it('400 when the transfer-type object is missing or malformed, 404 for unknown sender / customer / recipient, 422 PERMISSION_DENIED for a non-holder, 422 INVALID_RECIPIENT for a self transfer', async () => {
     const senderCustomer = await newCustomer()
     const sender = await fundedAccount(50, senderCustomer)

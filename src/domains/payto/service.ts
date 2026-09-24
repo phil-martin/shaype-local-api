@@ -1250,6 +1250,7 @@ function debtorReason(outcome: LedgerOutcome): string {
     case 'REFUSED_NOT_ENOUGH_FUNDS': return 'AM04'
     case 'REFUSED_ACCOUNT_BLOCKED': return 'AC06'
     case 'REFUSED_ACCOUNT_CLOSED': return 'AC05'
+    case 'REFUSED_CAPABILITY_NOT_ENABLED': return 'AC13'
     default: return 'AG07'
   }
 }

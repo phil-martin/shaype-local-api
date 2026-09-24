@@ -199,7 +199,7 @@ export class DirectEntryService {
    * (amount > 0 with <= 2 dp; anchored BSB / account-number patterns); a transactionId already used with
    * another idempotencyKey, or already the id of a ledger transaction (the COMPLETE credit is posted under
    * it), is 422 DUPLICATE_TRANSACTION_ID. The sender (credited) account must be a local
-   * account (BSB 636220 + account number) that is open, and the recipient BSB must not be the rejecting
+   * account (BSB 636220 + account number) that is open and not an FX child, and the recipient BSB must not be the rejecting
    * 999999, else the instruction is REJECTED (v1: 200 with the outcome; v0: 422 with the declared
    * DirectDebitResponse body). Otherwise RECEIVED and ACCEPTED are recorded and notified synchronously and
    * the SUBMITTED hop is scheduled.
@@ -240,6 +240,8 @@ export class DirectEntryService {
     else {
       const gate = this.accounts.requireOpenForMovement(sender.id)
       if (typeof gate === 'string') rejection = gate
+      // an FX child is not on the domestic rails (00-balance S4)
+      else if (gate.parentAccountId) rejection = 'REFUSED_CAPABILITY_NOT_ENABLED'
       else if (body.recipientBsb === REJECTING_BSB) rejection = `Invalid recipient BSB ${body.recipientBsb}`
     }
 
