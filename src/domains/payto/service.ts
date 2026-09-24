@@ -104,6 +104,7 @@ export const BIC = 'ANNCAU22XXX'
 /** Every 6-digit BSB supports PayTo except the staging fixture 000000 and the local "unsupported" BSB 999999 (spec §5.6). */
 export const UNSUPPORTED_BSBS: ReadonlySet<string> = new Set(['000000', '999999'])
 export const NOT_PROVIDED = 'Not provided'
+const SAME_ACCOUNT = 'INVALID_ARGUMENT: the debtor account must differ from the creditor account'
 const DAY_MS = 24 * 60 * 60 * 1000
 /** MMS authorisation window for bilateral actions (docs: 6 days). */
 export const ACTION_EXPIRY_MS = 6 * DAY_MS
@@ -367,7 +368,7 @@ export class PayToService {
       ultimatePartyName: body.creditorDetails.ultimatePartyName,
     })
     const debtor = this.resolveDebtor(body.debtorDetails)
-    if (debtor.accountId === creditor.accountId) throw unprocessable('INVALID_ARGUMENT: the debtor account must differ from the creditor account')
+    if (debtor.accountId === creditor.accountId) throw unprocessable(SAME_ACCOUNT)
     const paymentTerms = parseTerms(body.paymentTerms)
     if (body.validityEndDate && body.validityEndDate < body.validityStartDate) throw unprocessable('INVALID_ARGUMENT: validityEndDate must not precede validityStartDate')
     if (body.resolutionRequestedBy !== undefined && !ACTION_DATETIME_RE.test(body.resolutionRequestedBy)) throw badRequest(RESOLUTION_REQUESTED_BY_INVALID)
@@ -477,6 +478,7 @@ export class PayToService {
     this.requireStatus(m, ['ACTIVE', 'SUSPENDED'], 'amend')
     const current = m.creditor.accountId ? this.accounts.find(m.creditor.accountId) : undefined
     const next = this.requireAmendTarget(body.creditorAccountId, current, m, 'creditor')
+    if (next.id === m.debtor.accountId) throw unprocessable(SAME_ACCOUNT)
     m.creditor = compact({ ...m.creditor, accountId: next.id, accountNumber: next.bsb + next.accountNumber, ultimatePartyName: body.ultimatePartyName ?? m.creditor.ultimatePartyName })
     m.updatedAt = isoUtc(this.ctx.clock.now())
     const action = this.ctx.db.transaction(() => {
@@ -497,7 +499,8 @@ export class PayToService {
     this.requireStatus(m, ['ACTIVE', 'SUSPENDED'], 'amend')
     const current = this.accounts.find(m.debtor.accountId!)
     const next = this.requireAmendTarget(body.debtorAccountId, current, m, 'debtor')
-    m.debtor = { ...m.debtor, accountId: next.id, accountNumber: next.bsb + next.accountNumber }
+    if (next.id === m.creditor.accountId) throw unprocessable(SAME_ACCOUNT)
+    m.debtor ={ ...m.debtor, accountId: next.id, accountNumber: next.bsb + next.accountNumber }
     m.updatedAt = isoUtc(this.ctx.clock.now())
     const action = this.ctx.db.transaction(() => {
       this.repo.saveMandate(m)
@@ -802,7 +805,10 @@ export class PayToService {
       const current = this.repo.instructionById(i.id)
       const mandate = this.repo.mandateById(m.id)
       if (!current || !mandate || isFinalStatus(current.status)) return
-      this.finish(mandate, current, this.reach(mandate, current, trajectory.final ?? 'ACCEPTED_AND_SETTLED', 'PLATFORM'), 'PLATFORM')
+      const final = trajectory.final ?? 'ACCEPTED_AND_SETTLED'
+      // the mandate was cancelled / suspended while the payment was in flight: no settlement against it
+      const outcome: PaymentOutcome = final === 'ACCEPTED_AND_SETTLED' && mandate.status !== 'ACTIVE' ? { status: 'REJECTED', reasonCode: 'AG01' } : this.reach(mandate, current, final, 'PLATFORM')
+      this.finish(mandate, current, outcome, 'PLATFORM')
     }
     if (this.paymentProgressDelayMs === undefined) this.ctx.scheduler.later(hop)
     else this.ctx.scheduler.later(hop, this.paymentProgressDelayMs)

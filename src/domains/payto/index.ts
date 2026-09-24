@@ -49,8 +49,8 @@
  *   action's details until the Payer accepts (MAMC applies it — the proposed paymentTerms replace the old
  *   ones as a whole, fields left out are dropped — and re-schedules the next payment).
  *   amendMandateByInitiator / amendMandateByPayer need ACTIVE / SUSPENDED and a replacement account that
- *   exists (404), is ACTIVE (422 INVALID_ACCOUNT_STATUS) and has the same holder (422 PERMISSION_DENIED);
- *   the counterparty receives MAMN.
+ *   exists (404), is ACTIVE (422 INVALID_ACCOUNT_STATUS), has the same holder (422 PERMISSION_DENIED) and
+ *   is not the other party's account (422, as createMandate); the counterparty receives MAMN.
  * - Payments: only malformed amounts are HTTP errors (400); business refusals are 200 with transactionStatus
  *   REJECTED and a PaymentReasonCode (mandate not ACTIVE AG01, non-ADHOC mandate AG03, before validity DT04,
  *   zero AM01, non-AUD AM03, above maximumAmount AM21, missing amount with no paymentTerms.amount AM12,
@@ -68,7 +68,8 @@
  *   `paymentstatus:timeout_rjct` in the payment's description, else the mandate's, forces the outcome after
  *   the agreement checks: the first status is answered at once; a non-final one then moves asynchronously
  *   (scheduler.later; test knob paymentProgressDelayMs) to the second status, settlement by default; RJCT is
- *   reason AB01. Without a hint the outcome is final at once.
+ *   reason AB01. Without a hint the outcome is final at once. A hop that would settle on a mandate no
+ *   longer ACTIVE (cancelled / suspended meanwhile) rejects with AG01 instead.
  * - Inbound RAPAIN (receivePaymentInstruction): ACCP debits the local debtor only (the creditor leg is the
  *   RAP mock), RJCT rejects with the given reason (AB01 by default); MANDATE_PAYMENT either way. The
  *   documented flow sends it with a makeAdhocPayment instructionId: an id already on the mandate is

@@ -750,6 +750,22 @@ describe('amendMandateByInitiator', () => {
   })
 })
 
+describe('amendments never make the creditor and debtor account the same', () => {
+  it('refuses moving the creditor onto the debtor account and the debtor onto the creditor account (as createMandate does)', async () => {
+    const holder = await newCustomer()
+    const creditor = await newAccount({ holder, fund: 1 })
+    const debtor = await newAccount({ holder, fund: 1 })
+    const { id } = await activeMandate({ creditor, debtor })
+    const byInitiator = await app.inject({ method: 'PUT', url: `/v1/payto/initiator/mandates/${id}`, payload: { creditorAccountId: debtor.accountHayId } })
+    expect(byInitiator.statusCode).toBe(422)
+    expect(byInitiator.json().message).toBe('INVALID_ARGUMENT: the debtor account must differ from the creditor account')
+    const byPayer = await app.inject({ method: 'PUT', url: `/v1/payto/payer/mandates/${id}`, payload: { debtorAccountId: creditor.accountHayId } })
+    expect(byPayer.statusCode).toBe(422)
+    expect(byPayer.json().message).toBe('INVALID_ARGUMENT: the debtor account must differ from the creditor account')
+    expect(await getMandate(id)).toMatchObject({ creditorDetails: { accountId: creditor.accountHayId }, debtorDetails: { accountId: debtor.accountHayId } })
+  })
+})
+
 describe('amendMandateByPayer', () => {
   it('moves the debtor account to another ACTIVE account of the same holder (mandate ACTIVE or SUSPENDED) and notifies the Initiator with MAMN', async () => {
     const holder = await newCustomer()
@@ -1102,6 +1118,33 @@ describe('staging payment trajectories (paymentstatus: hints)', () => {
       expect(poor.json().transactionStatus).toBe('ACCEPTED_FOR_CLEARANCE')
       await advanceClock(DAY_MS)
       expect(await status(id, poor.json().instructionId)).toEqual({ transactionStatus: 'REJECTED', transactionStatusReasonCode: 'AM04' })
+    } finally {
+      svc.paymentProgressDelayMs = undefined
+      await app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
+    }
+  })
+
+  it('an in-flight payment never settles once its mandate is no longer ACTIVE (cancelled or suspended meanwhile): REJECTED AG01', async () => {
+    const debtor = await newAccount({ fund: 50 })
+    const cancelled = await activeMandate({ debtor })
+    const suspended = await activeMandate({ debtor })
+    await clearNotifications()
+    svc.paymentProgressDelayMs = DAY_MS
+    try {
+      const pay = async (mandateId: string) => {
+        const res = await app.inject({ method: 'POST', url: '/v1/payto/payments/adhoc', payload: { idempotencyKey: randomUUID(), mandateId, amount: AUD(5), description: 'paymentstatus:sent' } })
+        expect(res.json().transactionStatus).toBe('SENT')
+        return res.json().instructionId as string
+      }
+      const a = await pay(cancelled.id)
+      const b = await pay(suspended.id)
+      expect((await patch(`/v1/payto/initiator/mandates/${cancelled.id}/cancel`, {})).statusCode).toBe(200)
+      expect((await patch(`/v1/payto/payer/mandates/${suspended.id}/suspend`, {})).statusCode).toBe(200)
+      await advanceClock(DAY_MS)
+      expect(await status(cancelled.id, a)).toEqual({ transactionStatus: 'REJECTED', transactionStatusReasonCode: 'AG01' })
+      expect(await status(suspended.id, b)).toEqual({ transactionStatus: 'REJECTED', transactionStatusReasonCode: 'AG01' })
+      expect((await getAccount(debtor.accountHayId!)).availableBalance).toBe(50)
+      expect((await paymentEvents(cancelled.id)).map((e) => [e.mandatePaymentEventDto.paymentStatus, e.mandatePaymentEventDto.reasonCode])).toEqual([['MANDATE_PAYMENT_REJECTED', 'AG01']])
     } finally {
       svc.paymentProgressDelayMs = undefined
       await app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
