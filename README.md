@@ -133,7 +133,7 @@ node -e "require('node:http').createServer((req, res) => { let b = ''; req.on('d
 | `POST /_admin/flush` | Runs due work, then waits (up to 10 s) until no asynchronous work is pending and no notification is queued; answers `{ "status": "idle" }`. Call it after an action and before asserting. |
 | `GET /_admin/clock` | `{ now, frozen }`. |
 | `POST /_admin/clock` | Body `{ "advanceMs": n }`, `{ "set": "<ISO date-time>" }` (jump, keep ticking), `{ "freeze": "<ISO date-time>" }` (pin) or `{ "reset": true }` (back to real time). Runs whatever became due. |
-| `GET /_admin/notifications` | Stored notifications, oldest first: `{ id, version, type, payload, status, attempts, lastStatus, lastError, createdAt, nextAttemptAt, deliveredAt, seq }`. Filters: `type`, `status` (`queued`, `delivered`, `failed`, `stored`), `sinceSeq`, `limit` (default 1000). |
+| `GET /_admin/notifications` | Stored notifications, oldest first (`order=desc`: newest first): `{ id, version, type, payload, status, attempts, lastStatus, lastError, createdAt, nextAttemptAt, deliveredAt, seq }`. Filters: `type`, `status` (`queued`, `delivered`, `failed`, `stored`), `sinceSeq`, `limit` (default 1000). |
 | `GET /_admin/notifications/:id` | One notification (`id` = its `idempotencyKey`). |
 | `DELETE /_admin/notifications` | Forgets every stored notification: `{ deleted: n }`. |
 | `POST /_admin/notifications/:id/redeliver` | Queues it for delivery again. |

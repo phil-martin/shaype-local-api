@@ -80,13 +80,14 @@ export class WebhookDispatcher {
     return r ? rowToNotification(r) : undefined
   }
 
-  list(filter: { type?: string; status?: NotificationStatus; sinceSeq?: number; limit?: number } = {}): NotificationRow[] {
+  /** Oldest first unless `order` is 'desc'; at most `limit` rows (default 1000). */
+  list(filter: { type?: string; status?: NotificationStatus; sinceSeq?: number; limit?: number; order?: 'asc' | 'desc' } = {}): NotificationRow[] {
     const where: string[] = []
     const args: unknown[] = []
     if (filter.type) { where.push('type = ?'); args.push(filter.type) }
     if (filter.status) { where.push('status = ?'); args.push(filter.status) }
     if (filter.sinceSeq !== undefined) { where.push('seq > ?'); args.push(filter.sinceSeq) }
-    const sql = `SELECT * FROM notifications ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY seq ASC LIMIT ?`
+    const sql = `SELECT * FROM notifications ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY seq ${filter.order === 'desc' ? 'DESC' : 'ASC'} LIMIT ?`
     args.push(filter.limit ?? 1000)
     return (this.db.prepare(sql).all(...args) as Record<string, unknown>[]).map(rowToNotification)
   }

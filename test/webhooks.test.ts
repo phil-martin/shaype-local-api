@@ -62,6 +62,19 @@ describe('webhook dispatcher', () => {
     expect(del.json().deleted).toBe(3)
   })
 
+  it('order=desc lists the newest first, so limit=1 gives the last seq however many are stored', async () => {
+    const other = await startApp()
+    const ids = Array.from({ length: 5 }, () => other.ctx.webhooks.enqueue('v0', { type: 'TRANSACTION' }).id)
+    const oldest = await other.app.inject({ method: 'GET', url: '/_admin/notifications?limit=2' })
+    expect(oldest.json().map((n: any) => n.id)).toEqual(ids.slice(0, 2))
+    const newest = await other.app.inject({ method: 'GET', url: '/_admin/notifications?order=desc&limit=1' })
+    expect(newest.json().map((n: any) => [n.id, n.seq])).toEqual([[ids[4], other.ctx.webhooks.get(ids[4]!)!.seq]])
+    const since = await other.app.inject({ method: 'GET', url: `/_admin/notifications?order=desc&sinceSeq=${other.ctx.webhooks.get(ids[2]!)!.seq}` })
+    expect(since.json().map((n: any) => n.id)).toEqual([ids[4], ids[3]])
+    expect((await other.app.inject({ method: 'GET', url: '/_admin/notifications?order=sideways' })).statusCode).toBe(400)
+    await other.app.close()
+  })
+
   it('stores notifications without delivering when no webhook url is configured', async () => {
     const other = await startApp()
     const n = other.ctx.webhooks.enqueue('v0', { type: 'TRANSACTION' })

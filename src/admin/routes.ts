@@ -54,8 +54,8 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext, extra
     return { now: isoUtc(ctx.clock.now()), frozen: ctx.clock.isFrozen }
   })
 
-  app.get<{ Querystring: { type?: string; status?: NotificationStatus; sinceSeq?: number; limit?: number } }>('/_admin/notifications', {
-    schema: { querystring: { type: 'object', properties: { type: { type: 'string' }, status: { type: 'string', enum: ['queued', 'delivered', 'failed', 'stored'] }, sinceSeq: { type: 'integer' }, limit: { type: 'integer' } } } },
+  app.get<{ Querystring: { type?: string; status?: NotificationStatus; sinceSeq?: number; limit?: number; order?: 'asc' | 'desc' } }>('/_admin/notifications', {
+    schema: { querystring: { type: 'object', properties: { type: { type: 'string' }, status: { type: 'string', enum: ['queued', 'delivered', 'failed', 'stored'] }, sinceSeq: { type: 'integer' }, limit: { type: 'integer' }, order: { type: 'string', enum: ['asc', 'desc'] } } } },
   }, async (req) => ctx.webhooks.list(req.query))
   app.delete('/_admin/notifications', async () => ({ deleted: ctx.webhooks.clear() }))
   app.get<{ Params: { id: string } }>('/_admin/notifications/:id', async (req, reply) => ctx.webhooks.get(req.params.id) ?? reply.code(404).send({ message: 'notification not found' }))

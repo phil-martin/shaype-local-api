@@ -184,10 +184,11 @@ Configure the application under test the way you configure it for Shaype staging
 
 Every notification the server produces is stored, whether or not it was delivered, so there are two places to look.
 
-**What was sent** — `GET /_admin/notifications` after `POST /_admin/flush`. Filter with `type`, `status` (`queued`, `delivered`, `failed`, `stored`), `sinceSeq` and `limit`. To assert only what one action produced, remember the last `seq` before it:
+**What was sent** — `GET /_admin/notifications` after `POST /_admin/flush`. Filter with `type`, `status` (`queued`, `delivered`, `failed`, `stored`), `sinceSeq`, `limit` (default 1000) and `order` (`asc`, the default: oldest first; `desc`: newest first). To assert only what one action produced, remember the last `seq` before it. Ask for the newest row: the default listing is the oldest 1000, so on a server that is never reset its last row is not the latest one.
 
 ```ts
-const before = (await shaype('GET', '/_admin/notifications')).at(-1)?.seq ?? 0
+const [last] = await shaype('GET', '/_admin/notifications?order=desc&limit=1')
+const before = last?.seq ?? 0
 await shaype('POST', `/v1/accounts/${accountId}/transfer`, transfer, auth)
 const produced = await notifications(`sinceSeq=${before}`)
 // both accounts already ACTIVE (a first posting would add ACCOUNT_STATUS_CHANGE {ACTIVE})
@@ -231,7 +232,14 @@ expect(created.status).toBe('PENDING_APPROVAL')
 await step()                                                          // onboarding outcome
 expect((await shaype('GET', `/v0/customers/${created.customerHayId}`, undefined, auth)).status).toBe('ACTIVE')
 
-await shaype('POST', '/v1/direct-debits', { ...directDebit, transactionId }, auth)
+const account = await shaype('POST', '/v1/accounts', {
+  idempotencyKey: randomUUID(), accountHolderId: created.customerHayId, accountHolderType: 'CUSTOMER', productId: 'a1b2c3d4-0000-4000-8000-000000000001',
+}, auth)
+// New accounts have risk level HIGH, which refuses every movement: the collected funds would be refused and the
+// direct debit would end INCOMPLETE. Set LOW here, or start the server with --default-risk-level LOW.
+await shaype('PATCH', `/v0/accounts/${account.accountHayId}/riskLevel`, { level: 'LOW', reason: 'KYC complete' }, auth)
+
+await shaype('POST', '/v1/direct-debits', { ...directDebit, transactionId, senderBsb: account.bsb, senderAccountNumber: account.accountNumber }, auth)
 const status = async () => (await shaype('GET', `/v1/direct-entry/${transactionId}/status`, undefined, auth)).status
 expect(await status()).toBe('ACCEPTED')
 await step()

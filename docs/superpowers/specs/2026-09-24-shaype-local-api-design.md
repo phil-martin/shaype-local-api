@@ -183,7 +183,7 @@ Mandates (initiator and payer sides) with the statuses and transitions in `docs/
 
 ## 6. Admin API (`/_admin`, no auth)
 
-`GET /health`, `GET /operations` (handled vs stubbed), `POST /reset`, `GET|POST /clock` (`{ set | freeze | advanceMs | reset }`), `GET /notifications?type&status&sinceSeq&limit`, `DELETE /notifications`, `GET /notifications/:id`, `POST /notifications/:id/redeliver`, `POST /notifications/flush` (await idle), `POST /scheduled-payments`.
+`GET /health`, `GET /operations` (handled vs stubbed), `POST /reset`, `GET|POST /clock` (`{ set | freeze | advanceMs | reset }`), `GET /notifications?type&status&sinceSeq&limit&order`, `DELETE /notifications`, `GET /notifications/:id`, `POST /notifications/:id/redeliver`, `POST /notifications/flush` (await idle), `POST /scheduled-payments`.
 
 ## 7. Testing
 
