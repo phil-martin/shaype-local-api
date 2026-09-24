@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { operations } from '../src/contract/index.js'
 import { startApp } from './helpers.js'
 import type { BuiltServer } from '../src/server.js'
@@ -86,4 +86,60 @@ describe('response contract validation (validateResponses)', () => {
     expect(res.statusCode).toBe(400)
     expect(res.json().status).toBe('400')
   })
+
+  it('checks the handler object before the serializer coerces it (real getHayAccount route)', async () => {
+    // fast-json-stringify would answer 12.5 for '12.5' and "" for null; the object is checked before that.
+    const accounts = built.ctx.services.accounts
+    const get = vi.spyOn(accounts, 'get').mockReturnValue({} as ReturnType<typeof accounts.get>)
+    const view = vi.spyOn(accounts, 'toResponse').mockReturnValue({ accountHayId: '11111111-1111-4111-8111-111111111111', availableBalance: '12.5', bsb: null } as unknown as ReturnType<typeof accounts.toResponse>)
+    try {
+      const res = await built.app.inject({ method: 'GET', url: '/v0/accounts/11111111-1111-4111-8111-111111111111' })
+      expect(res.statusCode).toBe(500)
+      expect(res.json().message).toMatch(/^RESPONSE_CONTRACT_VIOLATION: getHayAccount \(GET \/v0\/accounts\/[0-9a-f-]+ -> 200\): /)
+      expect(res.json().message).toContain('response/availableBalance must be number')
+      expect(res.json().message).toContain('response/bsb must be string')
+    } finally {
+      get.mockRestore()
+      view.mockRestore()
+    }
+  })
+
+  it('checks undeclared error statuses against ErrorResponse (404 NOT_FOUND passes)', async () => {
+    const res = await built.app.inject({ method: 'GET', url: '/v0/accounts/11111111-1111-4111-8111-111111111111' })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toMatchObject({ status: '404', message: expect.stringMatching(/^NOT_FOUND/) })
+
+    const server = await buildProbe((app) =>
+      app.get('/v0/__probe', { config: { operationId: 'getHayAccount' } }, async (_req, reply) => reply.code(404).send({ status: 404, message: 'gone' })))
+    const bad = await server.app.inject({ method: 'GET', url: '/v0/__probe' })
+    await server.app.close()
+    expect(bad.statusCode).toBe(500)
+    expect(bad.json().message).toMatch(/^RESPONSE_CONTRACT_VIOLATION: getHayAccount \(GET \/v0\/__probe -> 404\): response\/status must be string/)
+  })
+
+  it('refuses a 2xx status the operation does not declare', async () => {
+    const server = await buildProbe((app) =>
+      app.get('/v0/__probe', { config: { operationId: 'getHayAccount' } }, async (_req, reply) => reply.code(201).send({ accountHayId: '11111111-1111-4111-8111-111111111111' })))
+    const res = await server.app.inject({ method: 'GET', url: '/v0/__probe' })
+    await server.app.close()
+    expect(res.statusCode).toBe(500)
+    expect(res.json().message).toBe('RESPONSE_CONTRACT_VIOLATION: getHayAccount (GET /v0/__probe -> 201): status 201 is not declared by the contract')
+  })
+
+  it('refuses an undeclared 2xx without a body too', async () => {
+    const server = await buildProbe((app) =>
+      app.get('/v0/__probe', { config: { operationId: 'getHayAccount' } }, async (_req, reply) => reply.code(204).send()))
+    const res = await server.app.inject({ method: 'GET', url: '/v0/__probe' })
+    await server.app.close()
+    expect(res.statusCode).toBe(500)
+    expect(res.json().message).toBe('RESPONSE_CONTRACT_VIOLATION: getHayAccount (GET /v0/__probe -> 204): status 204 is not declared by the contract')
+  })
 })
+
+async function buildProbe(route: (app: BuiltServer['app']) => unknown): Promise<BuiltServer> {
+  const { buildServer } = await import('../src/server.js')
+  const server = await buildServer({ logLevel: 'silent', auth: false, validateResponses: true })
+  route(server.app)
+  await server.app.ready()
+  return server
+}
