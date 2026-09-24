@@ -137,6 +137,22 @@ describe('createCase', () => {
     for (const absentField of ['consentObtained', 'consentObtainedAt', 'userIp', 'userLocationState']) expect(stored, absentField).not.toHaveProperty(absentField)
   })
 
+  it('treats an empty body sent with Content-Type: application/json like no body (clients that always set it)', async () => {
+    const json = { 'content-type': 'application/json' }
+    const res = await app.inject({ method: 'POST', url: CASES_URL, headers: json, payload: '' })
+    expect(res.statusCode, res.body).toBe(200)
+    expect(built.ctx.services.kyc.findCase((res.json() as CreateCaseResponse).scanCase!.id!)!.userLocationCountry).toBe('AUS')
+    // malformed JSON is still a 400, and a required body is still required
+    const malformed = await app.inject({ method: 'POST', url: CASES_URL, headers: json, payload: '{not json' })
+    expect(malformed.statusCode).toBe(400)
+    expect(malformed.json()).toMatchObject({ status: '400', message: expect.stringMatching(/^BAD_REQUEST: /) })
+    const c = await referred()
+    const noBody = await app.inject({ method: 'POST', url: `/v1/kyc/${c.customerHayId}/onboarding/amlKycCheck/approval`, headers: json, payload: '' })
+    expect(noBody.statusCode).toBe(400)
+    expect(noBody.json()).toMatchObject({ status: '400', message: 'BAD_REQUEST: body must be object' })
+    expect((await getCustomer(c.customerHayId!)).status).toBe('REFERRED')
+  })
+
   it('rejects a malformed consent body with 400 ErrorResponse', async () => {
     const cases: unknown[] = [
       { userLocationCountry: 42 },
