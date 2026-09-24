@@ -52,3 +52,38 @@ function sampleParam(op: { params?: unknown }, name: string): string {
   if (schema?.pattern?.includes('d{6}')) return '636220'
   return 'sample'
 }
+
+describe('response contract validation (validateResponses)', () => {
+  const probe = async (validateResponses?: boolean) => {
+    const { buildServer } = await import('../src/server.js')
+    const server = await buildServer({ logLevel: 'silent', auth: false, ...(validateResponses === undefined ? {} : { validateResponses }) })
+    // A route bound to getHayAccount that answers a body breaking the HayAccount schema (format and type).
+    server.app.get('/v0/__probe', { config: { operationId: 'getHayAccount' } }, async (_req, reply) =>
+      reply.type('application/json').send(JSON.stringify({ accountHayId: 'not-a-uuid', availableBalance: 'lots' })))
+    await server.app.ready()
+    const res = await server.app.inject({ method: 'GET', url: '/v0/__probe' })
+    await server.app.close()
+    return res
+  }
+
+  it('replaces a response that breaks the operation schema with a 500 naming the operation and the error', async () => {
+    const res = await probe(true)
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toMatchObject({ status: '500', message: expect.stringMatching(/^RESPONSE_CONTRACT_VIOLATION: getHayAccount \(GET \/v0\/__probe -> 200\): /) })
+    expect(res.json().message).toContain('response/accountHayId must match format "uuid"')
+    expect(res.json().message).toContain('response/availableBalance must be number')
+  })
+
+  it('is off by default', async () => {
+    const res = await probe()
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ accountHayId: 'not-a-uuid', availableBalance: 'lots' })
+  })
+
+  it('passes conforming bodies, error bodies of a declared status included', async () => {
+    // startApp() turns validation on: a declared 400 ErrorResponse goes through the validator untouched.
+    const res = await built.app.inject({ method: 'GET', url: '/v0/accounts/not-a-uuid' })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().status).toBe('400')
+  })
+})

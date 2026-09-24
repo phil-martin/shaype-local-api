@@ -2,7 +2,7 @@ import { buildServer, type BuiltServer } from '../src/server.js'
 import type { Config } from '../src/config.js'
 
 export async function startApp(overrides: Partial<Config> = {}, deps: { fetch?: typeof fetch } = {}): Promise<BuiltServer> {
-  const built = await buildServer({ logLevel: 'silent', auth: false, ...overrides }, deps)
+  const built = await buildServer({ logLevel: 'silent', auth: false, validateResponses: true, ...overrides }, deps)
   await built.app.ready()
   return built
 }

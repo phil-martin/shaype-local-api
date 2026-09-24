@@ -26,6 +26,12 @@ export interface Config {
    * says the customer's future notifications are cancelled. Client-driven INACTIVE always emits.
    */
   emitCustomerInactive: boolean
+  /**
+   * Validate every JSON response of a /v0 or /v1 route against the operation's response schema for its
+   * status code; a mismatch is logged and answered as a 500 ErrorResponse (src/contract/validate-responses.ts).
+   * Off by default; the test helpers turn it on.
+   */
+  validateResponses: boolean
 }
 
 export const defaultConfig: Config = {
@@ -43,6 +49,7 @@ export const defaultConfig: Config = {
   asyncDelayMs: 0,
   defaultRiskLevel: 'HIGH',
   emitCustomerInactive: false,
+  validateResponses: false,
 }
 
 export const CLI_OPTIONS = {
@@ -111,6 +118,7 @@ export function loadConfig(argv: string[] = [], env: NodeJS.ProcessEnv = {}): Co
     asyncDelayMs: num('async-delay-ms', 'SHAYPE_LOCAL_ASYNC_DELAY_MS', defaultConfig.asyncDelayMs),
     defaultRiskLevel: riskLevel(str('default-risk-level', 'SHAYPE_LOCAL_DEFAULT_RISK_LEVEL', defaultConfig.defaultRiskLevel)),
     emitCustomerInactive: values['emit-customer-inactive'] === true || envTrue(env.SHAYPE_LOCAL_EMIT_CUSTOMER_INACTIVE),
+    validateResponses: defaultConfig.validateResponses,
     help: values.help === true,
   }
 }
