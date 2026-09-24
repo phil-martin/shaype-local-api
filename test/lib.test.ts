@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { CLI_OPTIONS, HELP, loadConfig } from '../src/config.js'
 import { openDatabase } from '../src/db/index.js'
 import { withIdempotency } from '../src/lib/idempotency.js'
 import { hasAtMostTwoDecimals, toCents, toCentsStrict } from '../src/lib/money.js'
@@ -191,5 +192,20 @@ describe('scheduler: deferred platform steps survive a restart on a file databas
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('--help', () => {
+  it('prints the environment variable of every flag, and the variable is the one loadConfig reads', () => {
+    const lines = HELP.split('\n')
+    for (const [flag, opt] of Object.entries(CLI_OPTIONS)) {
+      if (flag === 'help') continue
+      const line = lines.find((l) => l.includes(`--${flag} `) || l.endsWith(`--${flag}`))
+      expect(line, flag).toBeDefined()
+      const env = /\((SHAYPE_LOCAL_[A-Z_]+)/.exec(line!)?.[1]
+      expect(env, `${flag}: ${line}`).toBeDefined()
+      if (opt.type === 'string') expect(line, flag).toMatch(new RegExp(`--${flag} <`))
+    }
+    expect(loadConfig([], { SHAYPE_LOCAL_WEBHOOK_MAX_ATTEMPTS: '7', SHAYPE_LOCAL_WEBHOOK_BACKOFF_MS: '9', SHAYPE_LOCAL_ASYNC_DELAY_MS: '11' })).toMatchObject({ webhookMaxAttempts: 7, webhookBackoffMs: 9, asyncDelayMs: 11 })
   })
 })

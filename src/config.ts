@@ -77,20 +77,20 @@ export const HELP = `shaype-local — local re-implementation of the Shaype B2B 
 
 Usage: shaype-local [options]
 
-  -p, --port <n>               listen port                     (SHAYPE_LOCAL_PORT, default 8080)
-      --host <host>            bind address                    (SHAYPE_LOCAL_HOST, default 127.0.0.1)
-      --db <path|:memory:>     sqlite database                 (SHAYPE_LOCAL_DB, default :memory:)
-  -w, --webhook-url <url>      base URL to POST notifications  (SHAYPE_LOCAL_WEBHOOK_URL)
-      --client-id <id>         accepted client_id              (SHAYPE_LOCAL_CLIENT_ID, default local-client)
-      --client-secret <s>      accepted client_secret          (SHAYPE_LOCAL_CLIENT_SECRET, default local-secret)
-      --no-auth                do not require a bearer token   (SHAYPE_LOCAL_AUTH=false)
-      --log-level <level>      pino level                      (SHAYPE_LOCAL_LOG_LEVEL, default info)
-      --webhook-max-attempts   delivery attempts before giving up (default 5)
-      --webhook-backoff-ms     first retry delay, doubling      (default 200)
-      --webhook-timeout-ms <ms> per-delivery request timeout  (SHAYPE_LOCAL_WEBHOOK_TIMEOUT_MS, default 10000)
-      --async-delay-ms         delay for simulated async events (default 0)
-      --default-risk-level     HIGH|LOW for new accounts       (SHAYPE_LOCAL_DEFAULT_RISK_LEVEL, default HIGH — Shaype's default; HIGH refuses all money movement until set LOW)
-      --emit-customer-inactive send CUSTOMER_STATUS_UPDATED {INACTIVE} for the platform closure cascade (SHAYPE_LOCAL_EMIT_CUSTOMER_INACTIVE, default off)
+  -p, --port <n>                listen port                       (SHAYPE_LOCAL_PORT, default 8080)
+      --host <host>             bind address                      (SHAYPE_LOCAL_HOST, default 127.0.0.1)
+      --db <path|:memory:>      sqlite database                   (SHAYPE_LOCAL_DB, default :memory:)
+  -w, --webhook-url <url>       base URL to POST notifications    (SHAYPE_LOCAL_WEBHOOK_URL)
+      --client-id <id>          accepted client_id                (SHAYPE_LOCAL_CLIENT_ID, default local-client)
+      --client-secret <s>       accepted client_secret            (SHAYPE_LOCAL_CLIENT_SECRET, default local-secret)
+      --no-auth                 do not require a bearer token     (SHAYPE_LOCAL_AUTH=false)
+      --log-level <level>       pino level                        (SHAYPE_LOCAL_LOG_LEVEL, default info)
+      --webhook-max-attempts <n> delivery attempts before giving up (SHAYPE_LOCAL_WEBHOOK_MAX_ATTEMPTS, default 5)
+      --webhook-backoff-ms <ms> first retry delay, doubling       (SHAYPE_LOCAL_WEBHOOK_BACKOFF_MS, default 200)
+      --webhook-timeout-ms <ms> per-delivery request timeout      (SHAYPE_LOCAL_WEBHOOK_TIMEOUT_MS, default 10000)
+      --async-delay-ms <ms>     delay for simulated async events  (SHAYPE_LOCAL_ASYNC_DELAY_MS, default 0)
+      --default-risk-level <HIGH|LOW> risk level of new accounts  (SHAYPE_LOCAL_DEFAULT_RISK_LEVEL, default HIGH — Shaype's default; HIGH refuses all money movement until set LOW)
+      --emit-customer-inactive  send CUSTOMER_STATUS_UPDATED {INACTIVE} for the platform closure cascade (SHAYPE_LOCAL_EMIT_CUSTOMER_INACTIVE, default off)
   -h, --help
 `
 
