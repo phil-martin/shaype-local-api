@@ -637,16 +637,16 @@ describe('cross-domain', () => {
     expect(await notificationCount()).toBe(notifications + 3)
   })
 
-  it('closing an account deregisters its PayIDs with the closure reason (DECEASED -> DECD) and records history', async () => {
+  it('closing an account deregisters its PayIDs with reason CUST whatever the closure reason (00-status B.4 decision) and records history', async () => {
     const account = await newAccount()
     const p1 = (await registered('EMAIL', account)).payId
     const p2 = (await registered('TELEPHONE', account)).payId
-    await mustSetStatus(p2, { payIdStatus: 'DISABLED', payIdType: 'TELEPHONE' })
+    await mustSetStatus(p2, { payIdStatus: 'DISABLED', payIdType: 'TELEPHONE', reason: 'FROD' })
     const res = await app.inject({ method: 'POST', url: `/v0/accounts/${account.accountHayId}/close`, payload: { reason: 'DECEASED' } })
     expect(res.statusCode, res.body).toBe(202)
     await flush()
-    expect((await listForAccount(account.accountHayId!)).map((p) => [p.status, p.reason])).toEqual([['DEREGISTERED', 'DECD'], ['DEREGISTERED', 'DECD']])
-    expect(await history(p1)).toEqual([expect.objectContaining({ reason: 'DECD' })])
+    expect((await listForAccount(account.accountHayId!)).map((p) => [p.status, p.reason])).toEqual([['DEREGISTERED', 'CUST'], ['DEREGISTERED', 'CUST']])
+    expect(await history(p1)).toEqual([expect.objectContaining({ reason: 'CUST' })])
     expect((await availability(p1)).json()).toMatchObject({ availability: true })
     expectError(await resolve(p1), 422, /^INVALID_STATE/)
 

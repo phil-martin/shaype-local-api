@@ -10,7 +10,7 @@ import { compact } from '../../events/notify.js'
 import { isoUtc } from '../../lib/clock.js'
 import { badRequest, notFound, unprocessable } from '../../lib/errors.js'
 import { uuid } from '../../lib/ids.js'
-import type { Account, CloseReason } from '../accounts/index.js'
+import type { Account } from '../accounts/index.js'
 import type { PayId, PayIdReason, PayIdRepo, PayIdStatus, PayIdType } from './repo.js'
 
 type S = components['schemas']
@@ -54,8 +54,8 @@ const TRANSITIONS: Record<PayIdStatus, readonly PayIdStatus[]> = {
 /** Account statuses that accept a registration (open for resource creation, S7 gate). */
 const OPEN_ACCOUNT = new Set(['APPROVED', 'ACTIVE', 'ACTIVE_IN_ARREARS', 'DORMANT'])
 
-/** Account closure reason -> PayID reason on the closure cascade. */
-const CLOSE_REASON: Record<CloseReason, PayIdReason> = { CUSTOMER: 'CUST', DECEASED: 'DECD', SUSPICIOUS: 'FROD', OPERATIONAL: 'PART' }
+/** PayID reason on the account-closure cascade, whatever the closure reason (docs/map/00-status.md B.4 `[decision] reason: CUST`). */
+const CLOSURE_REASON: PayIdReason = 'CUST'
 
 declare module '../../context.js' {
   interface ServiceMap {
@@ -249,13 +249,13 @@ export class PayIdService {
     return p
   }
 
-  /** Account-closure cascade: every live registration on the account is deregistered with the closure reason (docs:account-closure). */
-  deregisterAllForAccount(accountId: string, reason?: CloseReason): void {
+  /** Account-closure cascade: every live registration on the account is deregistered with reason CUST (docs:account-closure; 00-status B.4). */
+  deregisterAllForAccount(accountId: string): void {
     const now = this.now()
     const live = this.repo.byAccount(accountId).filter((p) => p.status !== 'DEREGISTERED')
     if (!live.length) return
     this.ctx.db.transaction(() => {
-      for (const p of live) this.deregister(p, reason ? CLOSE_REASON[reason] : 'CUST', now)
+      for (const p of live) this.deregister(p, CLOSURE_REASON, now)
     })()
   }
 

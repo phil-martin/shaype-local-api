@@ -41,8 +41,7 @@
  *   purged after 90 days (history kept), ACTIVE -> DISABLED (reason PART) after 10 years without activity.
  * - Cross-domain: updateCustomer name change sets ownerName ("<firstName> <lastName>") on the live PayIDs of
  *   the customer's own (not group) accounts unless skipPayIdUpdate; the account-closure cascade deregisters
- *   the account's PayIDs with the closure reason mapped CUSTOMER->CUST, DECEASED->DECD, SUSPICIOUS->FROD,
- *   OPERATIONAL->PART (CUST when none).
+ *   the account's PayIDs with reason CUST whatever the closure reason (docs/map/00-status.md B.4 decision).
  * - verifyBranchIdentifier: every 6-digit BSB is enabled except 999999.
  * - GenericMessage texts: "PayID registered successfully." / "PayID details updated successfully." /
  *   "PayID status updated successfully.".
