@@ -60,7 +60,6 @@ declare module '../../context.js' {
 export const REJECTING_BSB = '999999'
 const BSB_RE = /^\d{6}$/
 const ACCOUNT_NUMBER_RE = /^\d{5,9}$/
-const DAY_MS = 24 * 60 * 60 * 1000
 
 /** v1 -> v0 status rendering (docs/map/00-open-questions.md S14). */
 export const V0_STATUS: Record<DeStatus, DeStatusV0> = {
@@ -346,5 +345,3 @@ export class DirectEntryService {
     this.ctx.events.emit('directEntry.statusChanged', compact({ instruction: r, account, previousStatus, actionOwner }))
   }
 }
-
-export { DAY_MS }

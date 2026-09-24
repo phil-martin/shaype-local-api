@@ -37,6 +37,9 @@
  *   Monday–Friday after the creation date (UTC). Unknown ids are 404 (spec §4).
  * - Validation the schema misses is a 400: amount > 0 with <= 2 dp; BSB / account-number patterns
  *   anchored (the spec's are not).
+ * - Test knob: ctx.services.directEntry.progressDelayMs (default undefined = config.asyncDelayMs) is the
+ *   delay of each asynchronous hop; set it to e.g. a day and drive the hops with POST /_admin/clock to
+ *   observe ACCEPTED and SUBMITTED (avoid /_admin/flush while such a hop is pending).
  * - Scheduled payments (portal-only on Shaype) are seeded by POST /_admin/scheduled-payments, which also
  *   updates an ACTIVE schedule in place with `replaces` (the previous definition archived as REPLACED in
  *   previousVersions, counters reset, no webhook). SCHEDULED_PAYMENT { hayId } is emitted on creation only
