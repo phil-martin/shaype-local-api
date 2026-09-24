@@ -367,12 +367,12 @@ export class CardsService {
 
   /**
    * convertCard: an ACTIVE VIRTUAL card becomes PHYSICAL and AWAITING_ACTIVATION with the same PAN,
-   * token, expiry and design; wallet tokens survive. PHYSICAL -> 422 INVALID_CARD_TYPE; not ACTIVE ->
-   * 422 INVALID_CARD_STATUS. An explicit deliveryAddress replaces the stored one.
+   * token, expiry and design; wallet tokens survive. PHYSICAL or not ACTIVE -> 422 INVALID_CARD_STATUS
+   * (spec §5.4 "convert only VIRTUAL+ACTIVE"). An explicit deliveryAddress replaces the stored one.
    */
   convert(id: string, input: { deliveryAddress?: Address | null } = {}, opts: { actionOwner?: ActionOwner } = {}): Card {
     const c = this.get(id)
-    if (c.cardType !== 'VIRTUAL') throw unprocessable(`INVALID_CARD_TYPE: Card ${id} is already PHYSICAL`)
+    if (c.cardType !== 'VIRTUAL') throw unprocessable(`INVALID_CARD_STATUS: Card ${id} cannot be converted as it is already PHYSICAL`)
     if (c.status !== 'ACTIVE') throw this.invalidStatus(c, 'converted')
     return this.ctx.db.transaction(() => {
       c.cardType = 'PHYSICAL'

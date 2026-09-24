@@ -368,9 +368,9 @@ describe('convertCard', () => {
     expect(await status(id)).toBe('ACTIVE')
   })
 
-  it('422 INVALID_CARD_TYPE for a PHYSICAL card, 422 INVALID_CARD_STATUS for a non-ACTIVE virtual card, 400 for a malformed address; no body keeps the stored address', async () => {
+  it('422 INVALID_CARD_STATUS for a PHYSICAL card and for a non-ACTIVE virtual card, 400 for a malformed address; no body keeps the stored address', async () => {
     const physical = await setup()
-    expectError(await act(physical.card.cardHayId!, 'convert'), 422, /^INVALID_CARD_TYPE/)
+    expectError(await act(physical.card.cardHayId!, 'convert'), 422, /^INVALID_CARD_STATUS: Card .* cannot be converted as it is already PHYSICAL/)
     const virtual = await setup({ cardType: 'VIRTUAL' })
     expectError(await act(virtual.card.cardHayId!, 'convert', { deliveryAddress: { line1: 'x' } }), 400, /^BAD_REQUEST/)
     // the optional body gets the same Address checks a required body gets from the route schema
@@ -779,7 +779,7 @@ describe('transition table: every card operation from every status', () => {
       expect(await status(id), `${row.op} setup`).toBe(from)
       const res = await row.call(id)
       expect(res.statusCode, `${row.op} from ${from}: ${res.body}`).toBe(row.codes[i])
-      if (res.statusCode === 422) expect(res.body).toMatch(/INVALID_CARD_(STATUS|TYPE)|RENEWAL_WINDOW/)
+      if (res.statusCode === 422) expect(JSON.parse(res.body).message).toMatch(/^(INVALID_CARD_STATUS|RENEWAL_WINDOW): /)
       const after = row.after?.[i]
       if (after) expect(await status(id), `${row.op} from ${from}: status after`).toBe(after === 'SAME' ? from : after)
     }
