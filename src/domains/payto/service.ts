@@ -757,6 +757,27 @@ export class PayToService {
     return { instruction, transactionId: outcome.transactionId }
   }
 
+  /**
+   * Whether the RAP mock (utilities' generateInboundNppTransactionV2 with mandateInformation) still has to post
+   * the creditor leg of an instruction into `creditorAccountId`. An id this platform does not know (an external
+   * Initiator's payment, or the RAP ahead of its RAPAIN) is always due. A known instruction is reconciled like
+   * the RAPAIN reconciles it, never paid twice: settled with its creditor leg already posted (a settlement
+   * between two local accounts posts both legs; a RAP already credited it) → false, a no-op.
+   * @throws 422 DUPLICATE_INSTRUCTION for another mandate's id, INVALID_STATE for an instruction that was never
+   * paid (REJECTED / UNDELIVERED) or is still in flight (it settles itself, or through its RAPAIN)
+   */
+  creditorLegDue(m: Mandate, instructionId: string, creditorAccountId: string): boolean {
+    const i = this.repo.instructionById(instructionId)
+    if (!i || i.origin === 'STUB') return true
+    if (i.mandateId !== m.id) throw unprocessable(`DUPLICATE_INSTRUCTION: Payment instruction ${i.id} belongs to mandate ${i.mandateId}`)
+    if (i.status !== 'ACCEPTED_AND_SETTLED') {
+      throw unprocessable(isFinalStatus(i.status)
+        ? `INVALID_STATE: Payment instruction ${i.id} is ${i.status}; nothing was paid, so there is no creditor leg to post`
+        : `INVALID_STATE: Payment instruction ${i.id} is ${i.status}; it has not settled yet`)
+    }
+    return !this.transactions.listForAccount(creditorAccountId).some((t) => t.type === 'INTERBANK_TRANSFER_IN' && t.amount > 0 && t.mandatePayment?.instructionId === i.id)
+  }
+
   private newInstruction(m: Mandate, origin: InstructionOrigin, amount: Money, endToEndId: string, description?: string, id?: string): PaymentInstruction {
     const now = this.ctx.clock.now()
     const i: PaymentInstruction = compact({

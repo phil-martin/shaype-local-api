@@ -839,6 +839,51 @@ describe('generateInboundNppTransactionV2 (POST /v0/utils/generate-inbound-npp-t
     expect(await balances(creditor.accountHayId!)).toEqual({ total: 2, held: 0, available: 2 })
   })
 
+  it('a mandate payment for an instruction the platform settled with both local legs is a no-op; for a REJECTED one 422 (never credited twice / from nowhere)', async () => {
+    const { account: creditor } = await newAccount()
+    const { account: debtor } = await newAccount({ fund: 100 })
+    const mandateId = await createMandate(creditor, debtor, true)
+    const adhoc = async (amount: number) => {
+      const res = await post('/v1/payto/payments/adhoc', { idempotencyKey: randomUUID(), mandateId, amount: { currency: 'AUD', amount } })
+      expect(res.statusCode, res.body).toBe(200)
+      return res.json() as { instructionId: string; transactionStatus: string }
+    }
+    const rap = (instructionId: string, amount: string) => {
+      const body = rapBody(creditor, { mandateInformation: { initiatingPartyName: 'ACME Utilities', instructionIdentification: instructionId, mandateIdentification: hex(mandateId) } })
+      body.paymentInformation.instructedAmount = amount
+      return post('/v0/utils/generate-inbound-npp-transaction-v2', body)
+    }
+    const settled = await adhoc(10)
+    expect(settled.transactionStatus).toBe('ACCEPTED_AND_SETTLED')
+    await payByRapain(mandateId, settled.instructionId, '10')
+    await flush()
+    await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
+    expect((await rap(settled.instructionId, '10')).statusCode).toBe(200)
+    expect(await balances(creditor.accountHayId!)).toEqual({ total: 10, held: 0, available: 10 })
+    expect(await balances(debtor.accountHayId!)).toEqual({ total: 90, held: 0, available: 90 })
+    expect(await txs(creditor.accountHayId!)).toEqual([])
+
+    const rejected = await adhoc(500)
+    expect(rejected.transactionStatus).toBe('REJECTED')
+    expectError(await rap(rejected.instructionId, '500'), 422, /^INVALID_STATE: Payment instruction .* is REJECTED/)
+    expect(await balances(creditor.accountHayId!)).toEqual({ total: 10, held: 0, available: 10 })
+    expect(await txs(creditor.accountHayId!)).toEqual([])
+  })
+
+  it('a mandate payment after a RAPAIN (debtor leg only) posts the creditor leg once; an unknown instruction id is an external payment', async () => {
+    const { account: creditor } = await newAccount()
+    const { account: debtor } = await newAccount({ fund: 50 })
+    const mandateId = await createMandate(creditor, debtor, true)
+    const instructionId = nextInstructionId()
+    await payByRapain(mandateId, instructionId, '2')
+    const mi = (id: string) => ({ mandateInformation: { initiatingPartyName: 'ACME Utilities', instructionIdentification: id, mandateIdentification: hex(mandateId) } })
+    expect((await post('/v0/utils/generate-inbound-npp-transaction-v2', rapBody(creditor, mi(instructionId)))).statusCode).toBe(200)
+    expect((await post('/v0/utils/generate-inbound-npp-transaction-v2', rapBody(creditor, mi(instructionId)))).statusCode).toBe(200)
+    expect(await balances(creditor.accountHayId!)).toEqual({ total: 2, held: 0, available: 2 })
+    expect((await post('/v0/utils/generate-inbound-npp-transaction-v2', rapBody(creditor, mi(nextInstructionId())))).statusCode).toBe(200)
+    expect(await balances(creditor.accountHayId!)).toEqual({ total: 4, held: 0, available: 4 })
+  })
+
   it('a payment return (returnReasonCode) credits back the matched outbound NPP payment as INTERBANK_TRANSFER_OUT with returnReason', async () => {
     const { customer, account: a } = await newAccount({ fund: 480 })
     const transfer = await post(`/v1/accounts/${a.accountHayId}/transfer`, {

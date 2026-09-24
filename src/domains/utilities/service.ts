@@ -377,7 +377,9 @@ export class UtilitiesService {
    * as reference. With mandateInformation it is the PayTo creditor leg: the mandate must exist (404), the
    * instruction id and initiating party must be given (400), the creditor account must be the mandate's and
    * the mandate ACTIVE (422), and the posting carries mandatePaymentDetails,
-   * originType MANDATE_PAYMENT, originId = mandate id (no MANDATE_PAYMENT: the RAPAIN owns it). With
+   * originType MANDATE_PAYMENT, originId = mandate id (no MANDATE_PAYMENT: the RAPAIN owns it). An instruction
+   * this platform knows is reconciled (payto.creditorLegDue): its creditor leg is posted once (a no-op when a
+   * local settlement or an earlier RAP posted it), never for a REJECTED or in-flight one (422). With
    * paymentReturnInformation.returnReasonCode it is an inbound return (returnInbound()).
    */
   receivePayment(body: GenerateRapRequestBody): GenericMessage {
@@ -400,6 +402,7 @@ export class UtilitiesService {
       const m = this.payto.get(mi.mandateIdentification)
       if (m.creditor.accountId !== creditor.id) throw unprocessable(`INVALID_ARGUMENT: Account ${creditor.id} is not the creditor account of mandate ${m.id}`)
       if (m.status !== 'ACTIVE') throw unprocessable(`INVALID_STATE: Mandate ${m.id} is ${m.status}; a mandate payment needs an ACTIVE mandate`)
+      if (!this.payto.creditorLegDue(m, mi.instructionIdentification, creditor.id)) return { message: MESSAGES.generateInboundNppTransactionV2 }
       mandate = { mandatePayment: { mandateId: m.id, instructionId: mi.instructionIdentification, initiatingPartyName: mi.initiatingPartyName }, originType: 'MANDATE_PAYMENT', originId: m.id }
     }
     this.ledger.post(compact({
