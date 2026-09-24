@@ -784,6 +784,23 @@ describe('generateInboundNppTransactionV2 (POST /v0/utils/generate-inbound-npp-t
     expectError(await post('/v0/utils/generate-inbound-npp-transaction-v2', rapBody(creditor, { mandateInformation: { mandateIdentification: hex(mandateId) } })), 400, /^BAD_REQUEST: mandateInformation/)
   })
 
+  it('a mandate payment must credit the mandate creditor account of an ACTIVE mandate (422 otherwise, nothing credited)', async () => {
+    const { account: creditor } = await newAccount()
+    const { account: other } = await newAccount()
+    const { account: debtor } = await newAccount()
+    const created = await createMandate(creditor, debtor)
+    const active = await createMandate(creditor, debtor, true)
+    await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
+    const mi = (mandateId: string) => ({ mandateInformation: { initiatingPartyName: 'ACME Utilities', instructionIdentification: nextInstructionId(), mandateIdentification: hex(mandateId) } })
+    expectError(await post('/v0/utils/generate-inbound-npp-transaction-v2', rapBody(other, mi(active))), 422, /^INVALID_ARGUMENT: .*not the creditor account of mandate/)
+    expectError(await post('/v0/utils/generate-inbound-npp-transaction-v2', rapBody(creditor, mi(created))), 422, /^INVALID_STATE: .*CREATED/)
+    expect(await balances(creditor.accountHayId!)).toEqual({ total: 0, held: 0, available: 0 })
+    expect(await balances(other.accountHayId!)).toEqual({ total: 0, held: 0, available: 0 })
+    expect(await payloads()).toEqual([])
+    expect((await post('/v0/utils/generate-inbound-npp-transaction-v2', rapBody(creditor, mi(active)))).statusCode).toBe(200)
+    expect(await balances(creditor.accountHayId!)).toEqual({ total: 2, held: 0, available: 2 })
+  })
+
   it('a payment return (returnReasonCode) credits back the matched outbound NPP payment as INTERBANK_TRANSFER_OUT with returnReason', async () => {
     const { customer, account: a } = await newAccount({ fund: 480 })
     const transfer = await post(`/v1/accounts/${a.accountHayId}/transfer`, {

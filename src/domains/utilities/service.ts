@@ -375,7 +375,8 @@ export class UtilitiesService {
    * generateInboundNppTransactionV2 (Receive A Payment): credits the creditor account (BBAN = BSB + account
    * number) with instructedAmount, INTERBANK_TRANSFER_IN with the debtor as counterpart and the end-to-end id
    * as reference. With mandateInformation it is the PayTo creditor leg: the mandate must exist (404), the
-   * instruction id and initiating party must be given (400), and the posting carries mandatePaymentDetails,
+   * instruction id and initiating party must be given (400), the creditor account must be the mandate's and
+   * the mandate ACTIVE (422), and the posting carries mandatePaymentDetails,
    * originType MANDATE_PAYMENT, originId = mandate id (no MANDATE_PAYMENT: the RAPAIN owns it). With
    * paymentReturnInformation.returnReasonCode it is an inbound return (returnInbound()).
    */
@@ -397,6 +398,8 @@ export class UtilitiesService {
         throw badRequest('BAD_REQUEST: mandateInformation.instructionIdentification and mandateInformation.initiatingPartyName must be populated for mandate payments')
       }
       const m = this.payto.get(mi.mandateIdentification)
+      if (m.creditor.accountId !== creditor.id) throw unprocessable(`INVALID_ARGUMENT: Account ${creditor.id} is not the creditor account of mandate ${m.id}`)
+      if (m.status !== 'ACTIVE') throw unprocessable(`INVALID_STATE: Mandate ${m.id} is ${m.status}; a mandate payment needs an ACTIVE mandate`)
       mandate = { mandatePayment: { mandateId: m.id, instructionId: mi.instructionIdentification, initiatingPartyName: mi.initiatingPartyName }, originType: 'MANDATE_PAYMENT', originId: m.id }
     }
     this.ledger.post(compact({

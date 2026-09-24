@@ -56,7 +56,9 @@
  * - NPP v2 (RAP): creditor / debtor accountIdentification = BSB + account number. Plain: the same credit, the
  *   debtor as counterpart, endToEndIdentification as reference, remittance information as description.
  *   With mandateInformation (PayTo creditor leg): the mandate must exist (404) and instructionIdentification
- *   + initiatingPartyName are required ("must be populated for mandate payments", 400); the posting carries
+ *   + initiatingPartyName are required ("must be populated for mandate payments", 400); the creditor account
+ *   must be the mandate's creditor account (422 INVALID_ARGUMENT) and the mandate ACTIVE (422 INVALID_STATE:
+ *   no TransactionEventDto outcome says "no valid mandate"); the posting carries
  *   mandatePaymentDetails, originType MANDATE_PAYMENT, originId = mandate id (webhook originId is a uuid);
  *   no MANDATE_PAYMENT (the matrix: the RAPAIN owns it). With paymentReturnInformation.returnReasonCode:
  *   an inbound return of the creditor account's outbound NPP payment — matched by
