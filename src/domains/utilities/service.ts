@@ -427,6 +427,8 @@ export class UtilitiesService {
    * one of the returned amount, not returned yet (404 when none; a return larger than the payment is 422)
    * comes back as a positive INTERBANK_TRANSFER_OUT / NPP_RETURN_IN posting, originType TRANSACTION,
    * originId = the original posting, with the webhook's returnReason (00-transactions C4, docs return sample).
+   * A PayTo payment whose creditor leg went into a local account never left the platform: 422, since
+   * refunding only the debtor would create money.
    */
   private returnInbound(account: Account, cents: Cents, reasonCode: string, originalId: string | undefined, extra: Pick<PostInput, 'counterpart' | 'description' | 'reference'>): void {
     const postings = this.ledger.listForAccount(account.id)
@@ -438,6 +440,9 @@ export class UtilitiesService {
       outbound.find((t) => -t.amount === cents)
     if (!original) throw notFound(`NOT_FOUND: No outbound NPP payment of ${fromCents(cents)} on account ${account.id} to return`)
     if (cents > -original.amount) throw unprocessable(`INVALID_AMOUNT: The return of ${fromCents(cents)} exceeds the original payment of ${fromCents(-original.amount)}`)
+    if (this.creditedOnUs(original)) {
+      throw unprocessable(`INVALID_ARGUMENT: Payment ${original.id} was settled between two local accounts; an inbound NPP return cannot come back for it`)
+    }
     this.ledger.post(compact({
       accountId: account.id,
       amountCents: cents,
@@ -455,6 +460,14 @@ export class UtilitiesService {
       actionOwner: 'PLATFORM' as const,
       notifyRefusal: true,
     }))
+  }
+
+  /** A PayTo debtor leg whose creditor leg was posted into a local account (an on-us settlement: both sides here). */
+  private creditedOnUs(original: LedgerTransaction): boolean {
+    const creditorId = original.counterpart?.accountId
+    const instructionId = original.mandatePayment?.instructionId
+    if (!creditorId || !instructionId) return false
+    return this.ledger.listForAccount(creditorId).some((t) => t.type === 'INTERBANK_TRANSFER_IN' && t.amount > 0 && t.mandatePayment?.instructionId === instructionId)
   }
 
   /**

@@ -935,6 +935,19 @@ describe('generateInboundNppTransactionV2 (POST /v0/utils/generate-inbound-npp-t
     expect(await balances(debtor.accountHayId!)).toEqual({ total: 50, held: 0, available: 50 })
   })
 
+  it('a return of a PayTo payment settled between two local accounts (both legs on-us) is 422: nothing is refunded while the local creditor keeps the funds', async () => {
+    const { account: creditor } = await newAccount()
+    const { account: debtor } = await newAccount({ fund: 100 })
+    const mandateId = await createMandate(creditor, debtor, true)
+    const paid = await post('/v1/payto/payments/adhoc', { idempotencyKey: randomUUID(), mandateId, amount: { currency: 'AUD', amount: 10 } })
+    expect(paid.json().transactionStatus, paid.body).toBe('ACCEPTED_AND_SETTLED')
+    await flush()
+    const ret = await post('/v0/utils/generate-inbound-npp-transaction-v2', rapBody(debtor, { paymentReturnInformation: { returnReasonCode: 'CUST', returnAmount: '10', originalTransactionIdentification: nppId(paid.json().instructionId) } }))
+    expectError(ret, 422, /^INVALID_ARGUMENT: .*settled between two local accounts/)
+    expect(await balances(debtor.accountHayId!)).toEqual({ total: 90, held: 0, available: 90 })
+    expect(await balances(creditor.accountHayId!)).toEqual({ total: 10, held: 0, available: 10 })
+  })
+
   it('a partial return credits the returned amount and closes the payment; a return larger than the payment is 422', async () => {
     const { account: creditor } = await newAccount()
     const { account: debtor } = await newAccount({ fund: 50 })
