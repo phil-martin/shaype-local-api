@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { components } from '../src/contract/generated/b2b-types.js'
 import { startApp } from './helpers.js'
 import { assertValidNotification } from './webhook-schema.js'
@@ -31,8 +31,6 @@ beforeAll(async () => {
   stacks = built.ctx.services.stacks
 })
 afterAll(async () => { await built.app.close() })
-
-const services = () => built.ctx.services as unknown as Record<string, unknown>
 
 let n = 0
 async function flush(): Promise<void> {
@@ -142,6 +140,20 @@ async function transferOut(accountId: string, stackId: string, body: object) {
 async function stackTransactions(accountId: string, query = 'offset=0&limit=100', stackId?: string): Promise<HayStackTransaction[]> {
   const url = stackId ? `/v0/accounts/${accountId}/stacks/${stackId}/transactions?${query}` : `/v0/accounts/${accountId}/stacks/transactions?${query}`
   const res = await app.inject({ method: 'GET', url })
+  expect(res.statusCode, res.body).toBe(200)
+  return res.json()
+}
+async function newCard(accountId: string, customerHayId: string): Promise<S['HayCard']> {
+  const res = await post('/v0/cards/create', {
+    idempotencyKey: randomUUID(), accountId, customerHayId, cardType: 'VIRTUAL', firstName: 'Grp', lastName: 'Member', email: 'grp@example.com',
+    phoneNumber: { countryCodePrefix: '61', numberAfterPrefix: '412345678' }, pin: '1234',
+    deliveryAddress: { line1: '1 Test St', townOrCity: 'Sydney', administrativeRegion: 'NSW', postcode: '2000', countryCodeIso: 'AUS' },
+  })
+  expect(res.statusCode, res.body).toBe(200)
+  return res.json()
+}
+async function getCard(id: string): Promise<S['HayCard']> {
+  const res = await app.inject({ method: 'GET', url: `/v0/cards/${id}` })
   expect(res.statusCode, res.body).toBe(200)
   return res.json()
 }
@@ -404,21 +416,29 @@ describe('removeCustomerFromGroup (POST /v0/groups/{groupHayId}/removeCustomer)'
     expect((await customer(m1)).status).toBe('ACTIVE')
   })
 
-  it('cancels the cards the customer holds on the group accounts through the cards service when it offers the cascade', async () => {
+  it("voids the removed member's cards on the group accounts (CARD_STATUS_CHANGE {INACTIVE}, PLATFORM); other members' cards and its own personal cards stay ACTIVE", async () => {
     const [m1, m2] = [await newCustomer(), await newCustomer()]
+    const personal = await newAccount(m2, { lowRisk: false })
     const g = await newGroup([m1, m2])
     const a1 = await newGroupAccount(g.groupHayId!)
-    const a2 = (await post(`/v0/groups/${g.groupHayId}/account`, { idempotencyKey: randomUUID() })).json().hayAccount as HayAccount
-    const cancelForCustomerOnAccount = vi.fn()
-    const previous = services().cards
-    services().cards = { ...(previous as object | undefined), cancelForCustomerOnAccount }
-    try {
-      expect((await post(`/v0/groups/${g.groupHayId}/removeCustomer`, { customerId: m2 })).statusCode).toBe(200)
-    } finally {
-      if (previous === undefined) delete services().cards
-      else services().cards = previous
+    const a2 = await newGroupAccount(g.groupHayId!)
+    const c1 = await newCard(a1.accountHayId!, m1)
+    const c2 = await newCard(a1.accountHayId!, m2)
+    const c3 = await newCard(a2.accountHayId!, m2)
+    const own = await newCard(personal.accountHayId!, m2)
+    for (const c of [c1, c2, c3, own]) expect(c.cardStatus).toBe('ACTIVE')
+    const before = new Set((await allPayloads()).map((p) => p.idempotencyKey))
+    expect((await post(`/v0/groups/${g.groupHayId}/removeCustomer`, { customerId: m2 })).statusCode).toBe(200)
+    expect((await getCard(c2.cardHayId!)).cardStatus).toBe('INACTIVE')
+    expect((await getCard(c3.cardHayId!)).cardStatus).toBe('INACTIVE')
+    expect((await getCard(c1.cardHayId!)).cardStatus).toBe('ACTIVE')
+    expect((await getCard(own.cardHayId!)).cardStatus).toBe('ACTIVE')
+    const fresh = (await allPayloads()).filter((p) => !before.has(p.idempotencyKey) && p.type === 'CARD_STATUS_CHANGE')
+    expect(fresh.map((p) => p.cardHayId).sort()).toEqual([c2.cardHayId, c3.cardHayId].sort())
+    for (const p of fresh) {
+      expect(p).toMatchObject({ customerHayId: m2, actionOwner: 'PLATFORM', cardStatusChangeEvent: { cardStatus: 'INACTIVE' } })
+      assertValidNotification(p)
     }
-    expect(cancelForCustomerOnAccount.mock.calls).toEqual([[m2, a1.accountHayId, expect.any(String)], [m2, a2.accountHayId, expect.any(String)]])
   })
 
   it('emits CUSTOMER_STATUS_UPDATED {INACTIVE} (PLATFORM) for the cascade when config.emitCustomerInactive is on', async () => {
@@ -879,6 +899,6 @@ describe('webhooks emitted around this domain', () => {
     const payloads = await allPayloads()
     expect(payloads.length).toBeGreaterThan(10)
     for (const p of payloads) assertValidNotification(p)
-    expect(new Set(payloads.map((p) => p.type))).toEqual(new Set(['ACCOUNT_STATUS_CHANGE', 'CUSTOMER_STATUS_UPDATED', 'ONBOARDING_PASSED', 'ONBOARDING_FAILED', 'TRANSACTION']))
+    expect(new Set(payloads.map((p) => p.type))).toEqual(new Set(['ACCOUNT_STATUS_CHANGE', 'CARD_STATUS_CHANGE', 'CUSTOMER_STATUS_UPDATED', 'ONBOARDING_PASSED', 'ONBOARDING_FAILED', 'TRANSACTION']))
   })
 })

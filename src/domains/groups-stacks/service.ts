@@ -12,7 +12,6 @@ import { badRequest, notFound, unprocessable } from '../../lib/errors.js'
 import { uuid } from '../../lib/ids.js'
 import { fromCents, hasAtMostTwoDecimals, toCents, type Cents } from '../../lib/money.js'
 import type { Account } from '../accounts/index.js'
-import { deps } from './deps.js'
 import type { BusinessIdentifiers, Group, GroupType, GroupsStacksRepo, Stack, StackOriginType, StackTransaction, StackTransactionType } from './repo.js'
 
 type S = components['schemas']
@@ -202,7 +201,7 @@ export class GroupsService {
   /**
    * removeCustomerFromGroup: unknown customer -> 404; not a member -> 422 NOT_A_MEMBER; the final member
    * -> 422 LAST_GROUP_MEMBER. Synchronous cascade (00-open-questions T1/S18): the customer's cards on the
-   * group's accounts are cancelled (cards dep, when present) and the customer becomes INACTIVE when it
+   * group's accounts are voided (cards.cancelAllForAccount restricted to the cardholder) and the customer becomes INACTIVE when it
    * is linked only to CLOSED accounts (its own and those of its remaining groups).
    */
   removeMember(id: string, customerId: string): Group {
@@ -220,14 +219,7 @@ export class GroupsService {
     this.ctx.events.emit('group.membershipChanged', { group: structuredClone(g), added: [], removed: [customerId] })
 
     const groupAccounts = this.accounts(g.id)
-    const cards = deps(this.ctx).cards
-    if (cards) {
-      if (typeof cards.cancelForCustomerOnAccount === 'function') {
-        for (const a of groupAccounts) cards.cancelForCustomerOnAccount(customerId, a.id, 'Customer removed from group')
-      } else {
-        this.ctx.log.warn({ groupId: g.id, customerId }, 'groups: cards.cancelForCustomerOnAccount is not implemented; cards on the group accounts were not cancelled')
-      }
-    }
+    for (const a of groupAccounts) this.ctx.services.cards.cancelAllForAccount(a.id, 'Customer removed from group', { customerId })
     const accounts = this.ctx.services.accounts
     const c = customers.find(customerId)
     if (c && c.status !== 'INACTIVE' && !accounts.hasOpenAccounts(customerId) && this.hasAnyAccount(customerId)) customers.markInactive(customerId)

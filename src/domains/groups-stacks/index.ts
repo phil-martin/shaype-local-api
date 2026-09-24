@@ -20,11 +20,12 @@
  *   is omitted while the group has none. createHayAccountForGroup is createAccount with the default
  *   product / AUD and its own idempotency scope.
  * - removeCustomerFromGroup: unknown customer 404; not a member 422 NOT_A_MEMBER; final member 422
- *   LAST_GROUP_MEMBER. The cascade is synchronous: cards the customer holds on the group's accounts are
- *   cancelled through cards.cancelForCustomerOnAccount when the cards service provides it (deps.ts;
- *   otherwise a warning is logged), and the customer becomes INACTIVE (customers.markInactive, PLATFORM,
- *   no statusReason) when it is linked to at least one account and none of them — personal or through a
- *   remaining group — is open. A customer with no accounts at all keeps its status.
+ *   LAST_GROUP_MEMBER. The cascade is synchronous: every non-INACTIVE card the customer holds on the
+ *   group's accounts is voided (cards.cancelAllForAccount with { customerId }: CARD_STATUS_CHANGE
+ *   {INACTIVE}, PLATFORM; cards registers before this domain), and the customer becomes INACTIVE
+ *   (customers.markInactive, PLATFORM, no statusReason) when it is linked to at least one account and
+ *   none of them — personal or through a remaining group — is open. A customer with no accounts at all
+ *   keeps its status.
  * - Stacks: createStack / updateStack need a non-CLOSED account (422 ACCOUNT_CLOSED); names are unique
  *   (exact match) among the account's OPEN stacks and may not contain emojis (422 INVALID_ARGUMENT);
  *   targetAmount takes <= 2 dp (400) and at most the account's MAX_BALANCE limit (account override, else
@@ -58,7 +59,6 @@ import { registerRoutes } from './routes.js'
 export { GroupsService, StacksService } from './service.js'
 export type { CreateGroupInput, UpdateGroupInput, CreateStackInput, UpdateStackInput, StackMoveInput, StackMoveResult, StackToStackResult, StackOutcome, HayGroup, HayJointAccount, HayStack, HayStackTransaction } from './service.js'
 export type { Group, GroupType, BusinessIdentifiers, Stack, StackStatus, StackTransaction, StackTransactionType, StackOriginType } from './repo.js'
-export type { CardsDep } from './deps.js'
 
 export function register(app: FastifyInstance, ctx: AppContext): void {
   const repo = new GroupsStacksRepo(ctx.db)
