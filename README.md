@@ -3,9 +3,9 @@
 <!-- progress:start -->
 ## Implementation progress
 
-**Full-fidelity operations: 108 / 143 (76%)**  `███████████████░░░░░`
+**Full-fidelity operations: 130 / 143 (91%)**  `██████████████████░░`
 
-All 169 operations of the spec are routed and schema-validated; the 26 stub-only operations answer with deterministic spec-shaped data. Test files: 13. Updated 2026-09-24 at `5a17f06`.
+All 169 operations of the spec are routed and schema-validated; the 26 stub-only operations answer with deterministic spec-shaped data. Test files: 14. Updated 2026-09-24 at `70f3c10`.
 
 | Section | Implemented | Progress | Status |
 |---|---|---|---|
@@ -20,7 +20,7 @@ All 169 operations of the spec are routed and schema-validated; the 26 stub-only
 | KYC API | 4 / 4 | `████████████████████` 100% | ✅ complete |
 | NPP API | 1 / 1 | `████████████████████` 100% | ✅ complete |
 | PayID API | 8 / 8 | `████████████████████` 100% | ✅ complete |
-| PayTo API | 0 / 22 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
+| PayTo API | 22 / 22 | `████████████████████` 100% | ✅ complete |
 | Products API | 1 / 1 | `████████████████████` 100% | ✅ complete |
 | Scheduled Payments API | 3 / 3 | `████████████████████` 100% | ✅ complete |
 | Stacks API | 9 / 9 | `████████████████████` 100% | ✅ complete |
