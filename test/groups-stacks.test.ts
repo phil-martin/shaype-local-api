@@ -571,6 +571,14 @@ describe('createStack / getAllStacks', () => {
     expect((await listStacks(id, true)).map((s) => s.status)).toEqual(['CLOSED', 'OPEN'])
   })
 
+  it('refuses only characters that render as emoji: text symbols (© ® ™ ‼ ↔ ❤) are accepted, emoji and VS16 emoji sequences are not', async () => {
+    const id = (await newAccount()).accountHayId!
+    for (const name of ['Rent ©', 'Brand® ™', 'Now‼ ↔', 'Love ❤']) expect((await post(`/v0/accounts/${id}/stacks`, { name })).statusCode, name).toBe(200)
+    for (const name of ['Party 🎉', 'Love ❤\uFE0F', 'Trip 🇦🇺', '©\uFE0F']) {
+      expectError(await post(`/v0/accounts/${id}/stacks`, { name }), 422, /^INVALID_ARGUMENT: Stack names cannot contain emojis/)
+    }
+  })
+
   it('validates targetAmount: negative 400 (schema), > 2 dp 400, above the MAX_BALANCE limit 422', async () => {
     const a = await newAccount()
     const id = a.accountHayId!

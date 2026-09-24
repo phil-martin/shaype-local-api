@@ -58,7 +58,8 @@ declare module '../../context.js' {
 
 /** Customer statuses that can never join a group: closed or rejected records. */
 const UNJOINABLE: ReadonlySet<string> = new Set(['INACTIVE', 'REJECTED'])
-const EMOJI_RE = /\p{Extended_Pictographic}/u
+/** Characters that render as emoji: default-emoji code points, or a pictograph forced to emoji style by VS16 (text symbols such as © ™ ↔ pass). */
+const EMOJI_RE = /\p{Emoji_Presentation}|\p{Extended_Pictographic}\uFE0F/u
 
 /** Request amount -> cents; more than two decimal places or a non-positive value is a 400, never rounded. */
 function requestCents(amount: number, field: string, opts: { allowZero?: boolean } = {}): Cents {
