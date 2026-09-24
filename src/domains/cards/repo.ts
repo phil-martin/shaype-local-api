@@ -128,11 +128,15 @@ export class CardRepo {
     return r ? fromRow(r) : undefined
   }
 
-  /** Cards in one of `statuses` expiring on or before `expiringOnOrBefore` (YYYY-MM-DD), creation order — the expiry tick's working set. */
-  byStatuses(statuses: CardStatus[], expiringOnOrBefore: string): Card[] {
+  /**
+   * The expiry tick's working set, creation order: ACTIVE / AWAITING_ACTIVATION cards expiring on or before
+   * `horizon` (they may expire or be due a reminder) and BLOCKED cards expiring between `today` and `horizon`
+   * (reminders only — a BLOCKED card past its expiry date has nothing left to do). Dates are YYYY-MM-DD.
+   */
+  expiryCandidates(today: string, horizon: string): Card[] {
     return (this.db
-      .prepare(`SELECT * FROM cards WHERE status IN (${statuses.map(() => '?').join(',')}) AND expiry_date <= ? ORDER BY seq ASC`)
-      .all(...statuses, expiringOnOrBefore) as Row[]).map(fromRow)
+      .prepare(`SELECT * FROM cards WHERE expiry_date <= ? AND (status IN ('ACTIVE', 'AWAITING_ACTIVATION') OR (status = 'BLOCKED' AND expiry_date >= ?)) ORDER BY seq ASC`)
+      .all(horizon, today) as Row[]).map(fromRow)
   }
 
   // ---------------------------------------------------------------- wallets

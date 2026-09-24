@@ -246,12 +246,12 @@ export class CardsService {
   }
 
   /** @throws 404 unknown account; 422 ACCOUNT_BLOCKED / ACCOUNT_CLOSED; 422 PERMISSION_DENIED when the customer does not hold it */
-  private requireOpenAccountHeldBy(accountId: string, customerHayId: string): void {
+  private requireOpenAccountHeldBy(accountId: string, customerHayId: string, action = 'created'): void {
     const accounts = this.ctx.services.accounts
     const a = accounts.get(accountId)
-    if (a.status === 'LOCKED') throw unprocessable(`ACCOUNT_BLOCKED: Card cannot be created for account ${accountId} as its status is currently LOCKED`)
-    if (a.status === 'CLOSED') throw unprocessable(`ACCOUNT_CLOSED: Card cannot be created for account ${accountId} as its status is currently CLOSED`)
-    if (!OPEN_ACCOUNT_STATUSES.has(a.status)) throw unprocessable(`PERMISSION_DENIED: Card cannot be created for account ${accountId} as its status is currently ${a.status}`)
+    if (a.status === 'LOCKED') throw unprocessable(`ACCOUNT_BLOCKED: Card cannot be ${action} for account ${accountId} as its status is currently LOCKED`)
+    if (a.status === 'CLOSED') throw unprocessable(`ACCOUNT_CLOSED: Card cannot be ${action} for account ${accountId} as its status is currently CLOSED`)
+    if (!OPEN_ACCOUNT_STATUSES.has(a.status)) throw unprocessable(`PERMISSION_DENIED: Card cannot be ${action} for account ${accountId} as its status is currently ${a.status}`)
     if (!accounts.holderCustomerIds(a).includes(customerHayId)) {
       throw unprocessable(`PERMISSION_DENIED: Customer ${customerHayId} does not hold account ${accountId}`)
     }
@@ -260,17 +260,28 @@ export class CardsService {
   // ---------------------------------------------------------------- status machine
 
   /**
-   * activateCard: AWAITING_ACTIVATION -> ACTIVE (422 INVALID_CARD_STATUS otherwise). Activating a
-   * renewal card retires the card it renewed (INACTIVE, voided).
+   * activateCard: AWAITING_ACTIVATION -> ACTIVE (422 INVALID_CARD_STATUS otherwise). The same cardholder /
+   * account gate as issuance (00-open-questions S7): customer ACTIVE (422 PERMISSION_DENIED), account open
+   * (422 ACCOUNT_BLOCKED / ACCOUNT_CLOSED). Activating a renewal card retires the card it renewed
+   * (INACTIVE, voided).
    */
   activate(id: string, opts: { actionOwner?: ActionOwner } = {}): Card {
     const actionOwner = opts.actionOwner ?? 'CLIENT'
     return this.ctx.db.transaction(() => {
       const c = this.get(id)
       if (c.status !== 'AWAITING_ACTIVATION') throw this.invalidStatus(c, 'activated')
+      const holder = this.ctx.services.customers.get(c.customerId)
+      if (holder.status !== 'ACTIVE') {
+        throw unprocessable(`PERMISSION_DENIED: Card cannot be activated for customer with id ${c.customerId} as their status is currently ${holder.status}`)
+      }
+      this.requireOpenAccountHeldBy(c.accountId, c.customerId, 'activated')
       this.transition(c, 'ACTIVE', { actionOwner })
       const old = this.repo.renewedInto(c.id)
-      if (old && !TERMINAL.has(old.status)) this.transition(old, 'INACTIVE', { actionOwner })
+      if (old && !TERMINAL.has(old.status)) {
+        // wallet tokens added to the old card while the renewal was in transit follow it too
+        this.moveWallets(old, c)
+        this.transition(old, 'INACTIVE', { actionOwner })
+      }
       return c
     })()
   }
@@ -325,6 +336,14 @@ export class CardsService {
     }
   }
 
+  /**
+   * Group-member removal cascade (groups-stacks/deps.ts CardsDep): the cards the customer holds on the
+   * group account that are not INACTIVE are voided with CARD_STATUS_CHANGE {INACTIVE} (PLATFORM).
+   */
+  cancelForCustomerOnAccount(customerHayId: string, accountId: string, reason?: string): void {
+    this.cancelAllForAccount(accountId, reason, { customerId: customerHayId })
+  }
+
   private transition(c: Card, to: CardStatus, opts: StatusOptions): Card {
     if (c.status === to) return c
     const from = c.status
@@ -355,12 +374,12 @@ export class CardsService {
 
   /**
    * convertCard: an ACTIVE VIRTUAL card becomes PHYSICAL and AWAITING_ACTIVATION with the same PAN,
-   * token, expiry and design; wallet tokens survive. PHYSICAL -> 422 INVALID_CARD_TYPE; not ACTIVE ->
-   * 422 INVALID_CARD_STATUS. An explicit deliveryAddress replaces the stored one.
+   * token, expiry and design; wallet tokens survive. PHYSICAL or not ACTIVE -> 422 INVALID_CARD_STATUS
+   * (spec §5.4 "convert only VIRTUAL+ACTIVE"). An explicit deliveryAddress replaces the stored one.
    */
   convert(id: string, input: { deliveryAddress?: Address | null } = {}, opts: { actionOwner?: ActionOwner } = {}): Card {
     const c = this.get(id)
-    if (c.cardType !== 'VIRTUAL') throw unprocessable(`INVALID_CARD_TYPE: Card ${id} is already PHYSICAL`)
+    if (c.cardType !== 'VIRTUAL') throw unprocessable(`INVALID_CARD_STATUS: Card ${id} cannot be converted as it is already PHYSICAL`)
     if (c.status !== 'ACTIVE') throw this.invalidStatus(c, 'converted')
     return this.ctx.db.transaction(() => {
       c.cardType = 'PHYSICAL'
@@ -418,6 +437,9 @@ export class CardsService {
       old.replacedByCardId = id2
       this.repo.save(old)
       this.transition(old, 'INACTIVE', { actionOwner })
+      // a renewal still in transit shares the lost / stolen PAN and token: it is voided with the old card
+      const renewal = old.renewedIntoCardId ? this.repo.byId(old.renewedIntoCardId) : undefined
+      if (renewal && !TERMINAL.has(renewal.status)) this.transition(renewal, 'INACTIVE', { actionOwner })
       this.ctx.events.emit('card.created', { card: structuredClone(card), actionOwner })
       return card
     })()
@@ -470,12 +492,7 @@ export class CardsService {
       delete card.replacedByCardId
       delete card.updatedAt
       this.repo.insert(card)
-      for (const w of this.repo.walletsFor(old.id)) {
-        if (w.status !== 'ACTIVE_TOKEN') continue
-        w.cardId = card.id
-        w.expiresAt = card.expiryDate
-        this.repo.saveWallet(w)
-      }
+      this.moveWallets(old, card)
       old.renewedIntoCardId = id2
       old.updatedAt = isoUtc(now)
       this.repo.save(old)
@@ -630,6 +647,16 @@ export class CardsService {
     return w
   }
 
+  /** Active wallet tokens of `from` move to `to` (renewal: same PAN), taking its expiry date. */
+  private moveWallets(from: Card, to: Card): void {
+    for (const w of this.repo.walletsFor(from.id)) {
+      if (w.status !== 'ACTIVE_TOKEN') continue
+      w.cardId = to.id
+      w.expiresAt = to.expiryDate
+      this.repo.saveWallet(w)
+    }
+  }
+
   private disableWallets(cardId: string): void {
     for (const w of this.repo.walletsFor(cardId)) {
       if (w.status === 'INACTIVE_TOKEN') continue
@@ -657,6 +684,12 @@ export class CardsService {
     c.expiryDate = isoDate(monthEnd(parsed))
     c.remindersSent = []
     this.touch(c)
+    // ApiDigitalWallet.expiresAt is "the card expiry date"
+    for (const w of this.repo.walletsFor(c.id)) {
+      if (w.expiresAt === c.expiryDate) continue
+      w.expiresAt = c.expiryDate
+      this.repo.saveWallet(w)
+    }
     this.expireCard(c)
     return c
   }
@@ -671,9 +704,10 @@ export class CardsService {
     const today = isoDate(now)
     // Only cards inside the earliest reminder window can have anything due (a few days of slack for the calendar-month clamp).
     const horizon = isoDate(addDays(addMonthsClamped(now, 1), 3))
-    for (const c of this.repo.byStatuses(['ACTIVE', 'AWAITING_ACTIVATION', 'BLOCKED'], horizon)) {
+    for (const c of this.repo.expiryCandidates(today, horizon)) {
       if (this.expireCard(c, today)) continue
-      if (c.renewedIntoCardId) continue
+      // a BLOCKED card keeps its status past the expiry date, but "about to expire" reminders stop there
+      if (c.renewedIntoCardId || today > c.expiryDate) continue
       const expiry = parseDate(c.expiryDate)!
       const due: [ExpiryReminderType, Date][] = [
         ['CARD_EXPIRY_MONTH_REMINDER', addMonthsClamped(expiry, -1)],
@@ -783,10 +817,13 @@ export class CardsService {
 
 // ---------------------------------------------------------------- helpers
 
-/** docs:card-creation — "first last" when shorter than 23 characters, else "F last". */
+/**
+ * docs:card-creation — "first last" when shorter than 23 characters, else "F last". A last name too long
+ * even for that is cut at the 23-character limit rather than failing a request that never sent nameOnCard.
+ */
 export function defaultNameOnCard(firstName: string, lastName: string): string {
   const full = `${firstName} ${lastName}`
-  return full.length < NAME_ON_CARD_MAX ? full : `${firstName.charAt(0)} ${lastName}`
+  return full.length < NAME_ON_CARD_MAX ? full : `${firstName.charAt(0)} ${lastName}`.slice(0, NAME_ON_CARD_MAX).trimEnd()
 }
 
 /** Last day of the month EXPIRY_YEARS after `issued` (YYYY-MM-DD). */
