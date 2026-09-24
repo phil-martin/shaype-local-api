@@ -1,4 +1,6 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { startApp } from './helpers.js'
 import type { BuiltServer } from '../src/server.js'
 
@@ -65,5 +67,111 @@ describe('webhook dispatcher', () => {
     const n = other.ctx.webhooks.enqueue('v0', { type: 'TRANSACTION' })
     expect(n.status).toBe('stored')
     await other.app.close()
+  })
+})
+
+/** A receiver that holds every request open until release() (then answers 200 at once). */
+class SlowReceiver {
+  /** Notification types, in arrival order. */
+  readonly received: string[] = []
+  private readonly held: http.ServerResponse[] = []
+  private released = false
+  private arrivals: (() => void)[] = []
+  private readonly server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (c: Buffer) => chunks.push(c))
+    req.on('end', () => {
+      this.received.push((JSON.parse(Buffer.concat(chunks).toString('utf8')) as { type: string }).type)
+      if (this.released) res.writeHead(200).end()
+      else this.held.push(res)
+      const a = this.arrivals
+      this.arrivals = []
+      a.forEach((f) => f())
+    })
+  })
+  url = ''
+
+  async start(): Promise<this> {
+    await new Promise<void>((resolve) => this.server.listen(0, '127.0.0.1', resolve))
+    this.url = `http://127.0.0.1:${(this.server.address() as AddressInfo).port}`
+    return this
+  }
+  /** Resolves once `count` requests have arrived. */
+  async arrived(count: number): Promise<void> {
+    while (this.received.length < count) await new Promise<void>((resolve) => this.arrivals.push(resolve))
+  }
+  release(): void {
+    this.released = true
+    for (const res of this.held.splice(0)) if (!res.destroyed) res.writeHead(200).end()
+  }
+  async close(): Promise<void> {
+    const closed = new Promise<void>((resolve) => this.server.close(() => resolve()))
+    this.server.closeAllConnections()
+    await closed
+  }
+}
+
+describe('webhook dispatcher shutdown and reset with a delivery in flight', () => {
+  let receiver: SlowReceiver
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
+  beforeEach(async () => {
+    receiver = await new SlowReceiver().start()
+    unhandled.length = 0
+    process.on('unhandledRejection', onUnhandled)
+  })
+  afterEach(async () => {
+    process.off('unhandledRejection', onUnhandled)
+    await receiver.close()
+  })
+  /** Lets a delivery that outlived close/reset run to completion (and fail, if it touches the database). */
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 50))
+  /** Real fetch, recording each request's abort signal. */
+  const signals: AbortSignal[] = []
+  const recording = ((url: any, init: any) => { signals.push(init.signal); return fetch(url, init) }) as typeof fetch
+  beforeEach(() => { signals.length = 0 })
+
+  it('app.close() stops the in-flight delivery before closing the database', async () => {
+    const built = await startApp({ webhookUrl: receiver.url }, { fetch: recording })
+    built.ctx.webhooks.enqueue('v0', { type: 'TRANSACTION' })
+    await receiver.arrived(1)
+    await built.app.close()
+    expect(signals.map((s) => s.aborted)).toEqual([true])
+    receiver.release()
+    await settle()
+    expect(unhandled).toEqual([])
+    expect(receiver.received).toEqual(['TRANSACTION'])
+  })
+
+  it('a delivery that ignores the abort does not touch the rows once the dispatcher is closed', async () => {
+    let finish!: () => void
+    const hanging = (async () => { await new Promise<void>((resolve) => { finish = resolve }); return new Response(null, { status: 200 }) }) as typeof fetch
+    const built = await startApp({ webhookUrl: 'http://sut.local' }, { fetch: hanging })
+    const n = built.ctx.webhooks.enqueue('v0', { type: 'TRANSACTION' })
+    await built.ctx.webhooks.waitForIdle(20).catch(() => {}) // the delivery is now in flight
+    await built.ctx.webhooks.close(20) // bounded: the fetch never settles on its own
+    finish()
+    await settle()
+    expect(built.ctx.webhooks.get(n.id)).toMatchObject({ status: 'queued', attempts: 0, deliveredAt: null })
+    await built.app.close()
+    expect(unhandled).toEqual([])
+  })
+
+  it('/_admin/reset drops the in-flight delivery and everything queued behind it; later notifications are delivered', async () => {
+    const built = await startApp({ webhookUrl: receiver.url }, { fetch: recording })
+    built.ctx.webhooks.enqueue('v0', { type: 'BEFORE_RESET_1' })
+    built.ctx.webhooks.enqueue('v0', { type: 'BEFORE_RESET_2' })
+    await receiver.arrived(1)
+    expect((await built.app.inject({ method: 'POST', url: '/_admin/reset' })).statusCode).toBe(200)
+    expect(signals.map((s) => s.aborted)).toEqual([true])
+    receiver.release()
+    await settle()
+    const after = built.ctx.webhooks.enqueue('v0', { type: 'AFTER_RESET' })
+    await built.ctx.webhooks.waitForIdle()
+    expect(receiver.received).toEqual(['BEFORE_RESET_1', 'AFTER_RESET'])
+    expect(built.ctx.webhooks.list().map((r) => [r.type, r.status])).toEqual([['AFTER_RESET', 'delivered']])
+    expect(after.id).toBe(built.ctx.webhooks.list()[0]!.id)
+    await built.app.close()
+    expect(unhandled).toEqual([])
   })
 })

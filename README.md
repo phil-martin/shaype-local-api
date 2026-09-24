@@ -129,7 +129,7 @@ node -e "require('node:http').createServer((req, res) => { let b = ''; req.on('d
 |---|---|
 | `GET /_admin/health` | `{ status: "ok", version, now, clockFrozen, db, auth, webhookUrl, operations, stubbed }`. |
 | `GET /_admin/operations` | `{ handled: [...], stubbed: [...] }`: which operationIds a domain implements and which answer from the stub. |
-| `POST /_admin/reset` | Deletes every row (customers, accounts, cards, transactions, notifications, …), cancels pending asynchronous work and resets the clock. Sequences restart (the first account number is `10000001` again). |
+| `POST /_admin/reset` | Deletes every row (customers, accounts, cards, transactions, notifications, …), cancels pending asynchronous work and webhook deliveries (the one in flight is aborted: nothing enqueued before the reset is sent after it) and resets the clock. Sequences restart (the first account number is `10000001` again). |
 | `POST /_admin/flush` | Runs due work, then waits (up to 10 s) until no asynchronous work is pending and no notification is queued; answers `{ "status": "idle" }`. Call it after an action and before asserting. |
 | `GET /_admin/clock` | `{ now, frozen }`. |
 | `POST /_admin/clock` | Body `{ "advanceMs": n }`, `{ "set": "<ISO date-time>" }` (jump, keep ticking), `{ "freeze": "<ISO date-time>" }` (pin) or `{ "reset": true }` (back to real time). Runs whatever became due. |

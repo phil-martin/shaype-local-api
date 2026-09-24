@@ -27,7 +27,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext, extra
 
   app.post('/_admin/reset', async () => {
     ctx.scheduler.cancelAll()
-    ctx.webhooks.close()
+    await ctx.webhooks.reset() // nothing enqueued before the reset is delivered after it
     resetDatabase(ctx.db)
     ctx.clock.reset()
     return { status: 'ok' }

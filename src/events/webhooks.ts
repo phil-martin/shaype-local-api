@@ -2,6 +2,11 @@
  * Outbound webhook delivery. Persists every notification, POSTs it to the configured client base URL
  * at the spec paths, and retries with exponential backoff on 401/403/429/5xx or network failure —
  * the same trigger set Shaype documents (18 attempts over 48h there; a handful over seconds here).
+ *
+ * close() (app shutdown) and reset() (/_admin/reset) abort the delivery in flight and wait, bounded, for
+ * the delivery loop to stop. Every step of the loop re-checks after each await that the dispatcher was
+ * neither closed nor reset meanwhile, so a delivery that outlives either never touches the database (closed,
+ * or holding other rows by then) and nothing queued before a reset is sent after it.
  */
 import { randomUUID } from 'node:crypto'
 import type { FastifyBaseLogger } from 'fastify'
@@ -31,9 +36,14 @@ const RETRYABLE = (status: number) => status === 401 || status === 403 || status
 
 export class WebhookDispatcher {
   private timer: NodeJS.Timeout | null = null
-  private pumping = false
+  /** The running delivery loop, if any. */
+  private pumping: Promise<void> | null = null
   private idleWaiters: (() => void)[] = []
-  private inflight = 0
+  /** Abort handles of the requests in flight. */
+  private readonly inflight = new Set<AbortController>()
+  private closed = false
+  /** Bumped by reset(): a loop started under an older epoch stops at its next step. */
+  private epoch = 0
 
   constructor(
     private readonly db: Db,
@@ -103,63 +113,104 @@ export class WebhookDispatcher {
     })
   }
 
-  close(): void {
+  /** App shutdown: no further delivery; resolves once the loop has stopped (at most `timeoutMs`). */
+  async close(timeoutMs = 2000): Promise<void> {
+    this.closed = true
+    await this.stop(timeoutMs)
+    const w = this.idleWaiters
+    this.idleWaiters = []
+    w.forEach((f) => f())
+  }
+
+  /**
+   * /_admin/reset, before the tables are emptied: drops the delivery in flight and whatever the running
+   * loop still meant to send. Deliveries of notifications enqueued afterwards proceed as usual.
+   */
+  async reset(timeoutMs = 2000): Promise<void> {
+    this.epoch++
+    await this.stop(timeoutMs)
+  }
+
+  private async stop(timeoutMs: number): Promise<void> {
     if (this.timer) clearTimeout(this.timer)
     this.timer = null
+    for (const a of this.inflight) a.abort()
+    if (!this.pumping) return
+    let t: NodeJS.Timeout | undefined
+    await Promise.race([this.pumping, new Promise<void>((resolve) => { t = setTimeout(resolve, timeoutMs) })])
+    clearTimeout(t)
+  }
+
+  /** True when the loop started under `epoch` must stop: the dispatcher was closed or reset since. */
+  private stale(epoch: number): boolean {
+    return this.closed || epoch !== this.epoch
   }
 
   private isIdle(): boolean {
-    if (this.inflight > 0 || this.pumping) return false
+    if (this.closed) return true
+    if (this.inflight.size > 0 || this.pumping) return false
     const row = this.db.prepare(`SELECT COUNT(*) AS n FROM notifications WHERE status='queued'`).get() as { n: number }
     return row.n === 0
   }
 
   private schedule(delayMs: number): void {
-    if (this.timer) return
+    if (this.timer || this.closed) return
     this.timer = setTimeout(() => { this.timer = null; void this.pump() }, delayMs)
     this.timer.unref()
   }
 
-  private async pump(): Promise<void> {
-    if (this.pumping) return
-    this.pumping = true
+  private pump(): Promise<void> {
+    if (this.pumping || this.closed) return this.pumping ?? Promise.resolve()
+    const run = this.pumpLoop(this.epoch).finally(() => {
+      this.pumping = null
+      if (this.isIdle()) { const w = this.idleWaiters; this.idleWaiters = []; w.forEach((f) => f()) }
+    })
+    this.pumping = run
+    return run
+  }
+
+  private async pumpLoop(epoch: number): Promise<void> {
     try {
       for (;;) {
         const now = isoUtc(this.clock.now())
         const due = (this.db.prepare(`SELECT * FROM notifications WHERE status='queued' AND next_attempt_at <= ? ORDER BY seq ASC LIMIT 50`).all(now) as Record<string, unknown>[]).map(rowToNotification)
         if (!due.length) break
-        for (const n of due) await this.deliver(n)
-      }
-      const next = this.db.prepare(`SELECT MIN(next_attempt_at) AS at FROM notifications WHERE status='queued'`).get() as { at: string | null }
-      if (next.at) {
-        const wait = Math.max(0, new Date(next.at).getTime() - this.clock.now().getTime())
-        this.schedule(wait)
+        for (const n of due) {
+          await this.deliver(n, epoch)
+          if (this.stale(epoch)) return
+        }
       }
     } finally {
-      this.pumping = false
-      if (this.isIdle()) { const w = this.idleWaiters; this.idleWaiters = []; w.forEach((f) => f()) }
+      // Wake up for the next retry, or for rows enqueued after a reset while this loop was winding down.
+      if (!this.closed) {
+        const next = this.db.prepare(`SELECT MIN(next_attempt_at) AS at FROM notifications WHERE status='queued'`).get() as { at: string | null }
+        if (next.at) this.schedule(Math.max(0, new Date(next.at).getTime() - this.clock.now().getTime()))
+      }
     }
   }
 
-  private async deliver(n: NotificationRow): Promise<void> {
+  private async deliver(n: NotificationRow, epoch: number): Promise<void> {
     const url = this.urlFor(n.version)
     if (!url) return
-    this.inflight++
+    const abort = new AbortController()
+    this.inflight.add(abort)
     let status: number | null = null
     let error: string | null = null
     try {
-      const res = await this.fetchImpl(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(n.payload) })
+      const res = await this.fetchImpl(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(n.payload), signal: abort.signal })
       status = res.status
-      if (res.ok) {
-        this.db.prepare(`UPDATE notifications SET status='delivered', attempts=attempts+1, last_status=?, last_error=NULL, delivered_at=?, next_attempt_at=NULL WHERE id=?`).run(status, isoUtc(this.clock.now()), n.id)
-        this.log.info({ id: n.id, type: n.type, status }, 'webhook delivered')
-        return
-      }
-      error = `HTTP ${status}`
+      if (!res.ok) error = `HTTP ${status}`
     } catch (e) {
       error = (e as Error).message
     } finally {
-      this.inflight--
+      this.inflight.delete(abort)
+    }
+    // Closed (the database may be gone) or reset (the row is gone) while the request was in flight.
+    if (this.stale(epoch)) return
+    if (status !== null && error === null) {
+      this.db.prepare(`UPDATE notifications SET status='delivered', attempts=attempts+1, last_status=?, last_error=NULL, delivered_at=?, next_attempt_at=NULL WHERE id=?`).run(status, isoUtc(this.clock.now()), n.id)
+      this.log.info({ id: n.id, type: n.type, status }, 'webhook delivered')
+      return
     }
     const attempts = n.attempts + 1
     const retry = (status === null || RETRYABLE(status)) && attempts < this.config.webhookMaxAttempts

@@ -103,7 +103,7 @@ export async function buildServer(overrides: Partial<Config> = {}, deps: { fetch
 
   app.addHook('onClose', async () => {
     scheduler.cancelAll()
-    webhooks.close()
+    await webhooks.close() // aborts the delivery in flight and waits for the loop to stop: it must not outlive the database
     db.close()
   })
   return { app, ctx, stubbed }

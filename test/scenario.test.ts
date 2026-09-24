@@ -153,8 +153,6 @@ async function startEnv(overrides: Partial<Config> = {}): Promise<Env> {
 }
 async function stopEnv(env: Env | undefined): Promise<void> {
   if (!env) return
-  // Let in-flight deliveries finish first: a delivery still running when the app closes touches the closed database.
-  await env.built.ctx.webhooks.waitForIdle().catch(() => {})
   await env.built.app.close()
   await env.receiver.close()
 }
