@@ -351,9 +351,9 @@ export class MandateRepo {
     return r ? instructionFromRow(r) : undefined
   }
 
-  /** Newest first (docs/map/00-open-questions.md G2: payment-instruction lists are newest first). */
+  /** Creation order, oldest first: design §4 ("ordered by creation time ascending unless the op defines sortBy") wins over 00-open-questions G2. */
   instructionsForMandate(mandateId: string): PaymentInstruction[] {
-    return (this.stmt('SELECT * FROM mandate_instructions WHERE mandate_id = ? ORDER BY seq DESC').all(mandateId) as Row[]).map(instructionFromRow)
+    return (this.stmt('SELECT * FROM mandate_instructions WHERE mandate_id = ? ORDER BY seq ASC').all(mandateId) as Row[]).map(instructionFromRow)
   }
 
   setStub(instructionId: string, stub: StubView): void {

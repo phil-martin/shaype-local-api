@@ -64,7 +64,7 @@
  *   is final (MANDATE_PAYMENT_ACCEPTED / _REJECTED / _UNDELIVERED), transactionHayId omitted on rejection.
  *   The `message` is always "Adhoc payment executed successfully." (the documented literal). Instruction ids
  *   follow the NPP pattern with BIC ANNCAU22XXX; endToEndId defaults to "Not provided"; instruction lists
- *   are newest first and never archived (G2, G8). getMandatePaymentStatus omits transactionStatusReasonCode
+ *   are in creation order, oldest first (design §4 over G2), and never archived (G8). getMandatePaymentStatus omits transactionStatusReasonCode
  *   when there is none (as every documented response does).
  * - Staging trajectories (F21, docs:payto-staging-testing-suite): `paymentstatus:<mms>[&<mms>]` or
  *   `paymentstatus:timeout_rjct` in the payment's description, else the mandate's, forces the outcome after

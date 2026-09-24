@@ -710,7 +710,7 @@ describe('remaining status-machine rows', () => {
     }
     // a suspended mandate is not payable
     expect((await adhoc(id, { amount: AUD(1) })).transactionStatus).toBe('REJECTED')
-    expect(svc.instructions(id)[0]!.reasonCode).toBe('AG01')
+    expect(svc.instructions(id).at(-1)!.reasonCode).toBe('AG01')
     expect((await patch(`/v1/payto/initiator/mandates/${id}/cancel`, {})).statusCode).toBe(200)
   })
 
@@ -1033,37 +1033,37 @@ describe('makeAdhocPayment', () => {
     expect((await allPayloads()).filter((p) => p.type === 'TRANSACTION')).toEqual([])
     const status = await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${id}/instructions/${funds.instructionId}/status` })
     expect(status.json()).toEqual({ transactionStatus: 'REJECTED', transactionStatusReasonCode: 'AM04' })
-    expect((await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${id}/search` })).json().paymentInstructions[0]).toMatchObject({ endToEndId: 'Not provided', transactionStatusReasonCode: 'AM04' })
+    expect((await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${id}/search` })).json().paymentInstructions.at(-1)).toMatchObject({ endToEndId: 'Not provided', transactionStatusReasonCode: 'AM04' })
 
     expect((await adhoc(id, { amount: AUD(1000) })).transactionStatus).toBe('REJECTED')
-    expect(svc.instructions(id)[0]!.reasonCode).toBe('AM21')
+    expect(svc.instructions(id).at(-1)!.reasonCode).toBe('AM21')
     expect((await adhoc(id, { amount: undefined })).transactionStatus).toBe('REJECTED')
-    expect(svc.instructions(id)[0]!.reasonCode).toBe('AM12')
+    expect(svc.instructions(id).at(-1)!.reasonCode).toBe('AM12')
 
     const external = await createMandate(creditor, { accountNumber: EXTERNAL_DEBTOR })
     svc.emitMandateNotification('INITIATOR', external, 'MCRC')
     const staging = await adhoc(external, { amount: AUD(2.1) })
     expect(staging).toMatchObject({ transactionStatus: 'REJECTED', statusIsFinal: true })
-    expect(svc.instructions(external)[0]!.reasonCode).toBe('AB01')
+    expect(svc.instructions(external).at(-1)!.reasonCode).toBe('AB01')
 
     const created = await createMandate(creditor, { accountId: poor.accountHayId! })
     expect((await adhoc(created)).transactionStatus).toBe('REJECTED')
-    expect(svc.instructions(created)[0]!.reasonCode).toBe('AG01')
+    expect(svc.instructions(created).at(-1)!.reasonCode).toBe('AG01')
 
     const monthly = await activeMandate({ creditor, debtor: poor, terms: { frequency: 'MONTHLY', type: 'FIXED', amount: AUD(1), firstPayment: { date: '2035-01-01' } } })
     expect((await adhoc(monthly.id, { amount: AUD(1) })).transactionStatus).toBe('REJECTED')
-    expect(svc.instructions(monthly.id)[0]!.reasonCode).toBe('AG03')
+    expect(svc.instructions(monthly.id).at(-1)!.reasonCode).toBe('AG03')
 
     const blocked = await newAccount({ fund: 50 })
     const { id: blockedMandate } = await activeMandate({ creditor, debtor: blocked })
     await app.inject({ method: 'POST', url: `/v0/accounts/${blocked.accountHayId}/block`, payload: { note: 'x', accountBlockStyle: 'ACCOUNT_ONLY' } })
     expect((await adhoc(blockedMandate)).transactionStatus).toBe('REJECTED')
-    expect(svc.instructions(blockedMandate)[0]!.reasonCode).toBe('AC06')
+    expect(svc.instructions(blockedMandate).at(-1)!.reasonCode).toBe('AC06')
 
     expect((await adhoc(id, { amount: { currency: 'NZD', amount: 1 } })).transactionStatus).toBe('REJECTED')
-    expect(svc.instructions(id)[0]!.reasonCode).toBe('AM03')
+    expect(svc.instructions(id).at(-1)!.reasonCode).toBe('AM03')
     expect((await adhoc(id, { amount: AUD(0) })).transactionStatus).toBe('REJECTED')
-    expect(svc.instructions(id)[0]!.reasonCode).toBe('AM01')
+    expect(svc.instructions(id).at(-1)!.reasonCode).toBe('AM01')
 
     expect((await app.inject({ method: 'POST', url: '/v1/payto/payments/adhoc', payload: { idempotencyKey: randomUUID(), mandateId: UNKNOWN_ID, amount: AUD(1) } })).statusCode).toBe(404)
     for (const payload of [{ amount: AUD(1.005) }, { amount: AUD(-1) }, { endToEndId: '' }, { endToEndId: 'x'.repeat(36) }, { mandateId: 'nope' }, { idempotencyKey: undefined }]) {
@@ -1080,7 +1080,7 @@ describe('makeAdhocPayment', () => {
     const debtor = await newAccount({ risk: 'HIGH' })
     const { id } = await activeMandate({ debtor })
     expect((await adhoc(id, { amount: AUD(1) })).transactionStatus).toBe('REJECTED')
-    expect(svc.instructions(id)[0]!.reasonCode).toBe('AG07')
+    expect(svc.instructions(id).at(-1)!.reasonCode).toBe('AG07')
   })
 })
 
@@ -1112,7 +1112,7 @@ describe('staging payment trajectories (paymentstatus: hints)', () => {
       expect(res.json()).toMatchObject({ transactionStatus: 'SENT', transactionStatusDisplay: 'Sent', statusIsFinal: false, message: 'Adhoc payment executed successfully.' })
       const { instructionId } = res.json() as AdhocResponse
       expect(await status(id, instructionId)).toEqual({ transactionStatus: 'SENT' })
-      expect((await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${id}/search` })).json().paymentInstructions[0]).toMatchObject({ id: instructionId, transactionStatus: 'SENT' })
+      expect((await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${id}/search` })).json().paymentInstructions.at(-1)).toMatchObject({ id: instructionId, transactionStatus: 'SENT' })
       await advanceClock(DAY_MS)
       expect(await status(id, instructionId)).toEqual({ transactionStatus: 'UNDELIVERED' })
       const events = await paymentEvents(id)
@@ -1153,7 +1153,7 @@ describe('staging payment trajectories (paymentstatus: hints)', () => {
       // the agreement checks run first: a hint does not rescue a payment above maximumAmount
       const tooMuch = await adhoc(id, { amount: AUD(1000), description: 'paymentstatus:sent&acsc' })
       expect(tooMuch).toMatchObject({ transactionStatus: 'REJECTED', statusIsFinal: true })
-      expect(svc.instructions(id)[0]!.reasonCode).toBe('AM21')
+      expect(svc.instructions(id).at(-1)!.reasonCode).toBe('AM21')
       // a settlement the ledger refuses after the hint is still a rejection with the ledger's reason
       const poor = await app.inject({ method: 'POST', url: '/v1/payto/payments/adhoc', payload: { idempotencyKey: randomUUID(), mandateId: id, amount: AUD(100), description: 'paymentstatus:accp' } })
       expect(poor.json().transactionStatus).toBe('ACCEPTED_FOR_CLEARANCE')
@@ -1209,7 +1209,16 @@ describe('staging payment trajectories (paymentstatus: hints)', () => {
 })
 
 describe('searchPaymentsInstructions with stubbed instructions', () => {
-  it('serves stubbed MMS summaries (utilities createStubForMandateSearchPaymentInstructions) newest first, replacing earlier stubs', async () => {
+  it('lists a mandate\'s payment instructions in creation order, oldest first (design §4: no sortBy)', async () => {
+    const debtor = await newAccount({ fund: 20 })
+    const { id } = await activeMandate({ debtor })
+    await adhoc(id, { amount: AUD(1), endToEndId: 'FIRST' })
+    await adhoc(id, { amount: AUD(1), endToEndId: 'SECOND' })
+    const res = await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${id}/search` })
+    expect(res.json().paymentInstructions.map((i: { endToEndId: string }) => i.endToEndId)).toEqual(['FIRST', 'SECOND'])
+  })
+
+  it('serves stubbed MMS summaries (utilities createStubForMandateSearchPaymentInstructions) in creation order, replacing earlier stubs', async () => {
     const debtor = await newAccount({ fund: 20 })
     const { id } = await activeMandate({ debtor })
     const paid = await adhoc(id, { amount: AUD(3) })
@@ -1219,14 +1228,14 @@ describe('searchPaymentsInstructions with stubbed instructions', () => {
     svc.addStubInstructions(mmsId(id), [stub('410', 'RECV', 'AB01'), stub('411', 'ACSC')])
     const res = await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${id}/search` })
     expect(res.json().paymentInstructions).toEqual([
-      { id: `${BIC}I20231129000000000093411`, amount: 1.28, creationDateTime: '2023-11-29T12:33:59.833000Z', endToEndId: 'Not provided', transactionStatus: 'ACCEPTED_AND_SETTLED' },
-      { id: `${BIC}I20231129000000000093410`, amount: 1.28, creationDateTime: '2023-11-29T12:33:59.833000Z', endToEndId: 'Not provided', transactionStatus: 'RECEIVED', transactionStatusReasonCode: 'AB01' },
       expect.objectContaining({ id: paid.instructionId }),
+      { id: `${BIC}I20231129000000000093410`, amount: 1.28, creationDateTime: '2023-11-29T12:33:59.833000Z', endToEndId: 'Not provided', transactionStatus: 'RECEIVED', transactionStatusReasonCode: 'AB01' },
+      { id: `${BIC}I20231129000000000093411`, amount: 1.28, creationDateTime: '2023-11-29T12:33:59.833000Z', endToEndId: 'Not provided', transactionStatus: 'ACCEPTED_AND_SETTLED' },
     ])
     const status = await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${id}/instructions/${BIC}I20231129000000000093410/status` })
     expect(status.json()).toEqual({ transactionStatus: 'RECEIVED', transactionStatusReasonCode: 'AB01' })
     svc.addStubInstructions(id, [stub('412', 'UNDV')])
-    expect((await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${id}/search` })).json().paymentInstructions.map((i: { id: string }) => i.id)).toEqual([`${BIC}I20231129000000000093412`, paid.instructionId])
+    expect((await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${id}/search` })).json().paymentInstructions.map((i: { id: string }) => i.id)).toEqual([paid.instructionId, `${BIC}I20231129000000000093412`])
     expect(() => svc.addStubInstructions(UNKNOWN_ID, [stub('413', 'SENT')])).toThrow(expect.objectContaining({ status: 404 }))
     expect((await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${UNKNOWN_ID}/search` })).statusCode).toBe(404)
   })
@@ -1244,8 +1253,8 @@ describe('searchPaymentsInstructions with stubbed instructions', () => {
     expect(status.json()).toEqual({ transactionStatus: 'ACCEPTED_AND_SETTLED' })
     // the next stub replaces the earlier one: the real instruction is reported as it is again, not deleted
     svc.addStubInstructions(id, [{ instructionIdentification: `${BIC}I20231129000000000093420`, instructedAmount: 2, creationDateTime: '2023-11-29T12:33:59.833Z', transactionStatus: 'ACSC' }])
-    expect((await search()).map((i: { id: string }) => i.id)).toEqual([`${BIC}I20231129000000000093420`, paid.instructionId])
-    expect((await search())[1]).toEqual(real)
+    expect((await search()).map((i: { id: string }) => i.id)).toEqual([paid.instructionId, `${BIC}I20231129000000000093420`])
+    expect((await search())[0]).toEqual(real)
   })
 })
 
@@ -1427,7 +1436,7 @@ describe('scheduled payments and setScheduledPaymentInitiationRequestAmount', ()
     await clearNotifications()
     expect((await patch(`/v1/payto/initiator/mandates/${id}/release`)).statusCode).toBe(200)
     await flush()
-    expect(svc.instructions(id)[0]).toMatchObject({ origin: 'SCHEDULED', status: 'REJECTED', reasonCode: 'AM12' })
+    expect(svc.instructions(id).at(-1)).toMatchObject({ origin: 'SCHEDULED', status: 'REJECTED', reasonCode: 'AM12' })
     const afterRelease = await allPayloads()
     expect(afterRelease.map((p) => p.type)).toEqual(['MANDATE', 'MANDATE', 'MANDATE_DUE_PAYMENT', 'MANDATE_PAYMENT'])
     expect(afterRelease[2].mandateDuePaymentEventDto.notificationId).toBe(next.notificationId)
@@ -1453,7 +1462,7 @@ describe('scheduled payments and setScheduledPaymentInitiationRequestAmount', ()
     await advanceClock(3 * DAY_MS)
     expect(svc.instructions(id).map((i) => i.amountCents)).toEqual([1500])
     await advanceClock(7 * DAY_MS)
-    expect(svc.instructions(id).map((i) => i.amountCents)).toEqual([500, 1500])
+    expect(svc.instructions(id).map((i) => i.amountCents)).toEqual([1500, 500])
     expect(svc.schedule(id)).toBeUndefined()
     expect((await getAccount(debtor.accountHayId!)).availableBalance).toBe(480)
     expect((await allPayloads()).filter((p) => p.type === 'MANDATE_DUE_PAYMENT')).toEqual([])
