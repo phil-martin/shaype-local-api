@@ -317,6 +317,8 @@ export class TransactionsService {
           reference: input.reference,
           originType: input.originType,
           originId: input.originId,
+          mandatePayment: input.mandatePayment,
+          returnReason: input.returnReason,
         }))
       }
       return { outcome }

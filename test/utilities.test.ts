@@ -828,6 +828,27 @@ describe('generateInboundNppTransactionV2 (POST /v0/utils/generate-inbound-npp-t
     expectError(await post('/v0/utils/generate-inbound-npp-transaction-v2', rapBody(a, { paymentReturnInformation: { returnReasonCode: 'AC04', returnAmount: '212.38' } })), 404, /^NOT_FOUND: /)
   })
 
+  it('a refused return (LOCKED account) still carries returnReason, originType / originId and mandatePaymentDetails', async () => {
+    const { account: creditor } = await newAccount()
+    const { account: debtor } = await newAccount({ fund: 50 })
+    const mandateId = await createMandate(creditor, debtor, true)
+    const instructionId = nextInstructionId()
+    await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
+    await payByRapain(mandateId, instructionId, '10')
+    const [paid] = await txs(debtor.accountHayId!)
+    await blockAccount(debtor.accountHayId!)
+    await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
+    const res = await post('/v0/utils/generate-inbound-npp-transaction-v2', rapBody(debtor, { paymentReturnInformation: { returnReasonCode: 'MD06', returnAmount: '10', originalTransactionIdentification: nppId(instructionId) } }))
+    expect(res.statusCode, res.body).toBe(200)
+    const [p] = await txs(debtor.accountHayId!)
+    expect(p.transactionEvent).toMatchObject({
+      transactionType: 'INTERBANK_TRANSFER_OUT', outcome: 'REFUSED_ACCOUNT_BLOCKED', isPending: false, currencyAmount: { amount: 10 },
+      returnReason: { code: 'CUSTOMER_REQUEST', message: 'Return of funds requested by end customer' }, originType: 'TRANSACTION', originId: paid.transactionEvent.transactionHayId,
+      mandatePaymentDetails: { mandateId, instructionId, initiatingPartyName: 'ACME Utilities' },
+    })
+    expect(await balances(debtor.accountHayId!)).toEqual({ total: 40, held: 0, available: 40 })
+  })
+
   it('an unknown / non-local creditor is 404; a non-positive instructedAmount 400', async () => {
     const { account: a } = await newAccount()
     expectError(await post('/v0/utils/generate-inbound-npp-transaction-v2', rapBody(a, { creditorInformation: { accountIdentification: '63610027487941', accountIdentificationTypeCode: 'BBAN' } })), 404, /^NOT_FOUND: /)
@@ -1000,6 +1021,19 @@ async function createMandate(creditor: HayAccount, debtor: HayAccount, activate 
   await flush()
   return id
 }
+/** An accepted RAPAIN: the debtor's outbound NPP mandate payment (INTERBANK_TRANSFER_OUT with mandatePaymentDetails). */
+async function payByRapain(mandateId: string, instructionId: string, amount: string): Promise<void> {
+  const res = await post('/v0/utils/generate-receive-a-payment-instruction', {
+    creditorInformation: { accountIdentification: '63610027487941', partyName: 'JOE BLOGGS' },
+    debtorInformation: { accountIdentification: '63610079412687', partyName: 'JOHN MAXIMILLIAN DOE' },
+    mandateInformation: { initiatingPartyName: 'ACME Utilities', mandateIdentification: hex(mandateId) },
+    paymentInformation: { instructedAmount: amount, instructionIdentification: instructionId, remittanceInformationUnstructured: 'Electricity' },
+    transactionStatusInformation: { transactionStatus: 'ACCP' },
+  })
+  expect(res.statusCode, res.body).toBe(200)
+}
+/** The NPP transaction id of a PayTo instruction id: the same 35 characters with the I letter swapped for N. */
+const nppId = (instructionId: string): string => `${instructionId.slice(0, 11)}N${instructionId.slice(12)}`
 async function mandateStatus(id: string): Promise<string> {
   const res = await get(`/v1/payto/mandates/${id}`)
   expect(res.statusCode, res.body).toBe(200)

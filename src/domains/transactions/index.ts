@@ -29,7 +29,8 @@
  * - Refused general credits/debits and transfers post nothing and emit no webhook; refused card
  *   authorisations, increments and settlements (and postings that opt in with notifyRefusal) emit
  *   TRANSACTION with the refused outcome, isPending false, unchanged balances and a fresh transactionHayId
- *   (the hold id for a refused increment / settlement).
+ *   (the hold id for a refused increment / settlement); a refused posting's origin, returnReason and
+ *   mandatePaymentDetails ride along (a refused NPP return still says what it returns).
  * - Request amounts are positive magnitudes with <= 2 dp (400 otherwise); the endpoint fixes the direction.
  *   A general credit/debit carries originType CUSTOMER only when the client sends it; transfers are stamped
  *   originType CUSTOMER. counterpartName is mirrored into counterpartDetails.name.

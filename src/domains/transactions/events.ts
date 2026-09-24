@@ -12,7 +12,7 @@ import { uuid } from '../../lib/ids.js'
 import { fromCents, type Cents } from '../../lib/money.js'
 import type { Account } from '../accounts/repo.js'
 import type { Balances } from '../accounts/service.js'
-import type { CardUsageDetails, CounterpartDetails, ExternalMerchantDetails, Hold, LedgerTransaction, OriginType, WebhookOutcome, WebhookTransactionType } from './repo.js'
+import type { CardUsageDetails, CounterpartDetails, ExternalMerchantDetails, Hold, LedgerTransaction, MandatePaymentDetails, OriginType, ReturnReason, WebhookOutcome, WebhookTransactionType } from './repo.js'
 import type { Money } from './service.js'
 
 type TransactionEventDto = whComponents['schemas']['TransactionEventDto']
@@ -44,6 +44,9 @@ export interface RefusedAttempt {
   reference?: string
   originType?: OriginType
   originId?: string
+  /** the payment an NPP return refers to (a refused return still names it) */
+  mandatePayment?: MandatePaymentDetails
+  returnReason?: ReturnReason
   ruleDetails?: { ruleId: string }
   cardPreferenceOutcome?: TransactionEventDto['cardPreferenceOutcome']
   cardProcessorResponse?: TransactionEventDto['cardProcessorResponse']
@@ -132,6 +135,8 @@ export function registerEvents(ctx: AppContext): void {
       category: r.category,
       merchantId: r.merchant?.merchantId ?? undefined,
       description: r.description,
+      mandatePaymentDetails: r.mandatePayment,
+      returnReason: r.returnReason,
       reference: r.reference,
     })
   })
