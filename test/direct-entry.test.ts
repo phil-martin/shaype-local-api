@@ -310,6 +310,23 @@ describe('createDirectDebitV1: lifecycle', () => {
     expect((await getAccount(sender.accountHayId!)).totalBalance).toBe(250.5)
   })
 
+  it('anchors each hop to when the previous one was due: a clock jump past both runs SUBMITTED and COMPLETE together', async () => {
+    const sender = await newAccount()
+    svc.progressDelayMs = DAY_MS
+    try {
+      const { transactionId } = await acceptedDd(sender, { amount: 7 })
+      await advanceClock(DAY_MS / 2)
+      expect(await deStatus(transactionId)).toBe('ACCEPTED')
+      await advanceClock(2 * DAY_MS)
+      expect(await deStatus(transactionId)).toBe('COMPLETE')
+      expect((await deEvents(transactionId)).map((e) => e.directEntryEvent.status)).toEqual(['RECEIVED', 'ACCEPTED', 'SUBMITTED', 'COMPLETE'])
+    } finally {
+      svc.progressDelayMs = undefined
+      await resetClock()
+    }
+    expect((await getAccount(sender.accountHayId!)).totalBalance).toBe(7)
+  })
+
   it('replays the same idempotencyKey + body without new webhooks; a different body is 422; a reused transactionId is 422 DUPLICATE_TRANSACTION_ID', async () => {
     const sender = await newAccount()
     const body = ddBody(sender)
