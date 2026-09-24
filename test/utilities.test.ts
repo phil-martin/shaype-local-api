@@ -391,6 +391,19 @@ describe('generateAuthHold (POST /v0/utils/generate-auth-hold)', () => {
 })
 
 describe('generateCardTransaction (POST /v0/utils/generate-card-transaction)', () => {
+  it('a refused increment of a non-AUD hold carries originalCurrencyAmount (the increment at the hold\'s rate), like its hold and settlement', async () => {
+    const { account: a, card } = await setup(30)
+    const res = await post('/v0/utils/generate-update-auth-hold', { amount: -20, currency: 'USD', updateHoldAmount: -20, cardToken: card.cardToken, merchantDetails: MERCHANT })
+    expect(res.statusCode, res.body).toBe(200)
+    await flush()
+    const events = (await txs(a.accountHayId!)).map((p) => p.transactionEvent)
+    expect(events.map((e) => [e.transactionType, e.outcome, e.currencyAmount, e.originalCurrencyAmount])).toEqual([
+      ['CARD_TRANSACTION', 'ACCEPTED', { currency: 'AUD', amount: -20 }, { currency: 'USD', amount: -20 }],
+      ['CARD_TRANSACTION', 'REFUSED_NOT_ENOUGH_FUNDS', { currency: 'AUD', amount: -20 }, { currency: 'USD', amount: -20 }],
+      ['CARD_TRANSACTION_SETTLED', 'ACCEPTED', { currency: 'AUD', amount: -20 }, { currency: 'USD', amount: -20 }],
+    ])
+  })
+
   it('hold, then settlement (asyncDelayMs when settlementDelayInSeconds is omitted): two TRANSACTION webhooks tied by holdHayId', async () => {
     const { customer, account: a, card } = await setup(11.13)
     const res = await post('/v0/utils/generate-card-transaction', { amount: -8.4, cardToken: card.cardToken, merchantDetails: MERCHANT })

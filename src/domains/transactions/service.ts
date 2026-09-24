@@ -956,10 +956,18 @@ export class HoldsService {
   }
 }
 
-/** Refusal webhook details for a movement on an existing hold (increment, settlement): the hold id, card and merchant ride along. */
+/**
+ * Refusal webhook details for a movement on an existing hold (increment, settlement): the hold id, card and
+ * merchant ride along, and an FX hold's original-currency amount for the movement at the hold's rate (signed
+ * like amountCents), as its accepted hold and settlement webhooks carry it.
+ */
 function holdRefusalDetails(hold: Hold, amountCents: Cents, webhookType: WebhookTransactionType): RefusalDetails {
+  const originalAmount = hold.originalAmount !== undefined && hold.originalCurrency && hold.amount > 0
+    ? { amountCents: Math.round((hold.originalAmount * amountCents) / hold.amount), currency: hold.originalCurrency }
+    : undefined
   return compact({
     amountCents,
+    originalAmount,
     webhookType,
     transactionTime: hold.authorisedAt,
     isPending: false,
