@@ -1316,6 +1316,26 @@ describe('generateReceiveAPaymentInstruction (POST /v0/utils/generate-receive-a-
     for (const e of mp) expect(e.transactionHayId).toBeUndefined()
   })
 
+  it('ACCP on a mandate that is not ACTIVE (CREATED, CANCELLED) debits nothing: MANDATE_PAYMENT_REJECTED AG01', async () => {
+    const { account: creditor } = await newAccount()
+    const { account: debtor } = await newAccount({ fund: 50 })
+    const created = await createMandate(creditor, debtor)
+    const cancelled = await createMandate(creditor, debtor, true)
+    const cancel = await app.inject({ method: 'PATCH', url: `/v1/payto/initiator/mandates/${cancelled}/cancel`, payload: { reasonCode: 'MD17' } })
+    expect(cancel.statusCode, cancel.body).toBe(200)
+    await flush()
+    await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
+    for (const mandateId of [created, cancelled]) {
+      expect((await post('/v0/utils/generate-receive-a-payment-instruction', rapainBody(mandateId, nextInstructionId()))).statusCode).toBe(200)
+    }
+    expect(await balances(debtor.accountHayId!)).toEqual({ total: 50, held: 0, available: 50 })
+    const ps = await payloads()
+    expect(ps.filter((p) => p.type === 'TRANSACTION')).toEqual([])
+    expect(ps.filter((p) => p.type === 'MANDATE_PAYMENT').map((p) => [p.mandatePaymentEventDto.paymentStatus, p.mandatePaymentEventDto.reasonCode])).toEqual([
+      ['MANDATE_PAYMENT_REJECTED', 'AG01'], ['MANDATE_PAYMENT_REJECTED', 'AG01'],
+    ])
+  })
+
   it('an unknown mandate is 404; a non-positive amount 400', async () => {
     expectError(await post('/v0/utils/generate-receive-a-payment-instruction', rapainBody('1212c23a-255c-11ee-9a8e-5d3239591cd9', nextInstructionId())), 404, /^NOT_FOUND: Mandate/)
     const { account: creditor } = await newAccount()

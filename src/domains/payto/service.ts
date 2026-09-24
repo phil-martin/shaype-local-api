@@ -727,8 +727,9 @@ export class PayToService {
   /**
    * The Payer side receives a payment instruction (RAPAIN, utilities' generateReceiveAPaymentInstruction):
    * ACCP debits the local debtor account only (INTERBANK_TRANSFER_OUT with mandatePaymentDetails; the creditor
-   * leg is the RAP mock's generateInboundNppTransactionV2) and answers MANDATE_PAYMENT_ACCEPTED; RJCT (or a
-   * refused debit) answers MANDATE_PAYMENT_REJECTED with the reason.
+   * leg is the RAP mock's generateInboundNppTransactionV2) and answers MANDATE_PAYMENT_ACCEPTED; RJCT, a
+   * mandate that is not ACTIVE (AG01, as checkAgreement) or a refused debit answers MANDATE_PAYMENT_REJECTED
+   * with the reason.
    *
    * The documented staging flow is makeAdhocPayment, then the RAPAIN with its instructionId: an instruction id
    * already known on this mandate is reconciled, never paid twice. A final one is a no-op (no debit, no
@@ -751,6 +752,7 @@ export class PayToService {
       : this.newInstruction(m, 'INBOUND', { amountCents: input.amountCents, currency: input.currency ?? 'AUD' }, input.endToEndId ?? NOT_PROVIDED, input.description, input.instructionId)
     let outcome: PaymentOutcome
     if (input.status === 'RJCT') outcome = { status: 'REJECTED', reasonCode: input.reasonCode ?? 'AB01' }
+    else if (m.status !== 'ACTIVE') outcome = { status: 'REJECTED', reasonCode: 'AG01' }
     else if (!m.debtor.accountId) outcome = { status: 'REJECTED', reasonCode: 'AC02' }
     else outcome = this.debit(m, instruction, input.initiatingPartyName, actionOwner, { creditorLeg: false })
     this.finish(m, instruction, outcome, actionOwner)
