@@ -929,10 +929,12 @@ describe('scheduled payments and setScheduledPaymentInitiationRequestAmount', ()
     expect(instruction).toMatchObject({ origin: 'SCHEDULED', amountCents: 4000, status: 'ACCEPTED_AND_SETTLED', endToEndId: 'NET-1724' })
     expect((await getAccount(debtor.accountHayId!)).availableBalance).toBe(460)
     const payloads = await allPayloads()
-    expect(payloads.map((p) => p.type)).toEqual(['TRANSACTION', 'TRANSACTION', 'MANDATE_PAYMENT', 'MANDATE_DUE_PAYMENT'])
-    expect(payloads[2]).toMatchObject({ actionOwner: 'PLATFORM', mandatePaymentEventDto: { instructionId: instruction!.id, paymentStatus: 'MANDATE_PAYMENT_ACCEPTED', isFinal: true } })
-    expect(payloads[3].mandateDuePaymentEventDto).toMatchObject({ mandateId: id, paymentDateTimeUtc: `${stepDate(plusDays(now, 3), 'MONTHLY')}T00:00:00.000000Z` })
-    expect(payloads[3].mandateDuePaymentEventDto.notificationId).not.toBe(notificationId)
+    // the creditor account's first posting also flips it APPROVED -> ACTIVE (accounts domain)
+    expect(payloads.map((p) => p.type)).toEqual(['TRANSACTION', 'ACCOUNT_STATUS_CHANGE', 'TRANSACTION', 'MANDATE_PAYMENT', 'MANDATE_DUE_PAYMENT'])
+    expect(payloads[1]).toMatchObject({ customerHayId: creditor.accountHolderId, accountStatusChangeEvent: { accountStatus: 'ACTIVE' } })
+    expect(payloads[3]).toMatchObject({ actionOwner: 'PLATFORM', mandatePaymentEventDto: { instructionId: instruction!.id, paymentStatus: 'MANDATE_PAYMENT_ACCEPTED', isFinal: true } })
+    expect(payloads[4].mandateDuePaymentEventDto).toMatchObject({ mandateId: id, paymentDateTimeUtc: `${stepDate(plusDays(now, 3), 'MONTHLY')}T00:00:00.000000Z` })
+    expect(payloads[4].mandateDuePaymentEventDto.notificationId).not.toBe(notificationId)
     for (const p of payloads) assertValidNotification(p, 'v0')
 
     // without an amount the next scheduled PIR is rejected with AM12; a suspended mandate defers
@@ -1121,7 +1123,8 @@ describe('webhook contract', () => {
     await flush()
     const res = await app.inject({ method: 'GET', url: '/_admin/notifications?limit=1000' })
     const rows = res.json() as { version: string; type: string; payload: unknown }[]
-    expect([...new Set(rows.map((r) => r.type))].sort()).toEqual(['MANDATE', 'MANDATE_DUE_PAYMENT', 'MANDATE_PAYMENT', 'TRANSACTION'])
+    // account / customer set-up and the creditor's first posting add their own (other domains') notifications
+    expect([...new Set(rows.map((r) => r.type))]).toEqual(expect.arrayContaining(['MANDATE', 'MANDATE_DUE_PAYMENT', 'MANDATE_PAYMENT', 'TRANSACTION']))
     for (const r of rows) {
       expect(r.version).toBe('v0')
       assertValidNotification(r.payload, 'v0')

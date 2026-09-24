@@ -606,7 +606,8 @@ export class PayToService {
         cxEventNameCreation: `Payment agreement ${verb}`, cxEventNameResolution: `Payment agreement ${verb}`,
       })
     })()
-    if (to === 'ACTIVE') this.scheduleNext(m)
+    // a payment that fell due while SUSPENDED stays scheduled and is initiated on the next tick
+    if (to === 'ACTIVE' && !this.repo.scheduleForMandate(m.id)) this.scheduleNext(m)
     this.notify(m, 'BOTH', 'MSCH', action, actionOwner)
     return m
   }
@@ -649,8 +650,9 @@ export class PayToService {
 
   /**
    * The Payer side receives a payment instruction (RAPAIN, utilities' generateReceiveAPaymentInstruction):
-   * ACCP debits the local debtor account (INTERBANK_TRANSFER_OUT with mandatePaymentDetails) and answers
-   * MANDATE_PAYMENT_ACCEPTED; RJCT (or a refused debit) answers MANDATE_PAYMENT_REJECTED with the reason.
+   * ACCP debits the local debtor account only (INTERBANK_TRANSFER_OUT with mandatePaymentDetails; the creditor
+   * leg is the RAP mock's generateInboundNppTransactionV2) and answers MANDATE_PAYMENT_ACCEPTED; RJCT (or a
+   * refused debit) answers MANDATE_PAYMENT_REJECTED with the reason.
    */
   receivePaymentInstruction(input: ReceivePaymentInput): { instruction: PaymentInstruction; transactionId?: string } {
     const m = this.get(input.mandateId)
@@ -660,7 +662,7 @@ export class PayToService {
     let outcome: PaymentOutcome
     if (input.status === 'RJCT') outcome = { status: 'REJECTED', reasonCode: input.reasonCode ?? 'AB01' }
     else if (!m.debtor.accountId) outcome = { status: 'REJECTED', reasonCode: 'AC02' }
-    else outcome = this.debit(m, instruction, input.initiatingPartyName, actionOwner)
+    else outcome = this.debit(m, instruction, input.initiatingPartyName, actionOwner, { creditorLeg: false })
     this.finish(m, instruction, outcome, actionOwner)
     return { instruction, transactionId: outcome.transactionId }
   }
@@ -715,7 +717,8 @@ export class PayToService {
     return this.debit(m, i, undefined, actionOwner)
   }
 
-  private debit(m: Mandate, i: PaymentInstruction, initiatingPartyName: string | undefined, actionOwner: ActionOwner): PaymentOutcome {
+  /** Settles the instruction: the debtor leg and, unless `creditorLeg` is false, the leg into a local creditor account. */
+  private debit(m: Mandate, i: PaymentInstruction, initiatingPartyName: string | undefined, actionOwner: ActionOwner, opts: { creditorLeg?: boolean } = {}): PaymentOutcome {
     const debtor = this.accounts.find(m.debtor.accountId!)
     if (!debtor) return { status: 'REJECTED', reasonCode: 'AC02' }
     const creditor = m.creditor.accountId ? this.accounts.find(m.creditor.accountId) : undefined
@@ -731,7 +734,7 @@ export class PayToService {
       channel: 'CUSCAL_NPP_TRANSFER_OUT' as const,
       counterpart: compact({ accountId: creditor?.id, customerId: creditor ? this.primaryCustomer(creditor) : undefined, name: creditorName, basicAccountNumber: basicAccountNumber(m.creditor.accountNumber) }),
     })
-    const into: PostInput | undefined = creditor
+    const into: PostInput | undefined = creditor && opts.creditorLeg !== false
       ? compact({
         ...common,
         accountId: creditor.id,

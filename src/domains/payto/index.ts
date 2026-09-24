@@ -72,7 +72,7 @@ import { PayToService } from './service.js'
 import { registerEvents } from './events.js'
 import { registerRoutes } from './routes.js'
 
-export { PayToService, normaliseMandateId, mmsId, v1Uuid, stepDate, TRIGGER_DESCRIPTION, MANDATE_TRIGGERS, STATUS_DISPLAY, MMS_STATUS, PAYMENT_STATUS, SUCCESS_MESSAGE, UNSUPPORTED_BSBS, BIC, NOT_PROVIDED, ACTION_EXPIRY_MS, DUE_PAYMENT_LEAD_MS } from './service.js'
+export { PayToService, ACCOUNT_DETAILS_INCORRECT, normaliseMandateId, mmsId, v1Uuid, stepDate, TRIGGER_DESCRIPTION, MANDATE_TRIGGERS, STATUS_DISPLAY, MMS_STATUS, PAYMENT_STATUS, SUCCESS_MESSAGE, UNSUPPORTED_BSBS, BIC, NOT_PROVIDED, ACTION_EXPIRY_MS, DUE_PAYMENT_LEAD_MS } from './service.js'
 export type { MandateTrigger, NotificationDetails, ReceivePaymentInput, PaymentOutcome, MandateDetailsDto, PaymentInstructionSummary, Resolution } from './service.js'
 export type { Mandate, MandateStatus, MandateSide, MandateAction, ActionType, ActionStatus, PaymentInstruction, InstructionStatus, ScheduledPayment, PaymentTerms, PartyDetails, Money, CxMandateStatus } from './repo.js'
 
