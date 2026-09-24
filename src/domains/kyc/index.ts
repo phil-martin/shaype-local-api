@@ -7,9 +7,11 @@
  * Contract deviations: none — every response follows the declared schema.
  *
  * Decisions beyond the spec (all covered in test/kyc.test.ts):
- * - createCase accepts an absent or empty body (the docs sample sends none); userLocationCountry defaults to
- *   AUS. A present body is validated by hand (optional bodies get no route schema): consentObtained must be
- *   'yes' | 'no' | 'na' (prose-only enum), consentObtainedAt RFC 3339, strings or null elsewhere -> 400.
+ * - createCase accepts an absent body, JSON null or a literal {} (the docs sample sends none; an empty body
+ *   with Content-Type: application/json counts as absent); userLocationCountry defaults to AUS. Any other
+ *   body is validated against UserConsentRequestBody with the app's ajv (routes.ts; optional bodies get no
+ *   route schema), so userLocationCountry is required, then the prose-only rules: userLocationCountry
+ *   ^[A-Z]{3}$ (ISO 3166-1 alpha-3), consentObtained 'yes' | 'no' | 'na' -> 400.
  *   scanCase.timestamp uses the docs sample's millisecond form. webLink is an unserved local URL in the shape
  *   of the sample (…?authorizationToken=<mobileToken>&locale=en-US); mobileToken is a JWS-shaped opaque
  *   string (HS512 header, gzip payload). No webhook is emitted for case creation.

@@ -49,8 +49,8 @@ export class KycService {
 
   /**
    * createCase: a NOT_EXECUTED case with the end-user hand-off credentials. The body is optional (docs
-   * sample sends none): absent -> userLocationCountry AUS. Consent values are validated here (400) because
-   * the route cannot attach a schema to an optional body.
+   * sample sends none): absent -> userLocationCountry AUS. The route has schema-validated a present body;
+   * the prose-only rules are checked here (validateConsent, 400).
    */
   createCase(input: UserConsentInput | undefined | null): KycCase {
     const consent = validateConsent(input)
@@ -163,30 +163,22 @@ interface Consent {
   userLocationState?: string
 }
 
-/** Handler-side validation of the optional UserConsentRequestBody: schema types, the prose-only consent enum, RFC 3339 consentObtainedAt. */
-export function validateConsent(input: unknown): Consent {
-  if (input === undefined || input === null) return { userLocationCountry: 'AUS' }
-  if (typeof input !== 'object' || Array.isArray(input)) throw badRequest('BAD_REQUEST: body must be object')
-  const b = input as Record<string, unknown>
-  const optionalString = (field: string): string | undefined => {
-    const v = b[field]
-    if (v === undefined || v === null) return undefined
-    if (typeof v !== 'string') throw badRequest(`BAD_REQUEST: body/${field} must be string,null`)
-    return v
-  }
-  if (b.userLocationCountry !== undefined && typeof b.userLocationCountry !== 'string') throw badRequest('BAD_REQUEST: body/userLocationCountry must be string')
-  const consentObtained = optionalString('consentObtained')
-  if (consentObtained !== undefined && !CONSENT_VALUES.includes(consentObtained as ConsentObtained)) throw badRequest(`BAD_REQUEST: body/consentObtained must be one of 'yes', 'no', 'na'`)
-  const consentObtainedAt = optionalString('consentObtainedAt')
-  if (consentObtainedAt !== undefined && (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(consentObtainedAt) || Number.isNaN(Date.parse(consentObtainedAt)))) {
-    throw badRequest('BAD_REQUEST: body/consentObtainedAt must match format "date-time"')
-  }
+/**
+ * The rules UserConsentRequestBody states only in prose, applied after the route's schema validation:
+ * consentObtained is 'yes' | 'no' | 'na' and userLocationCountry an ISO 3166-1 alpha-3 code (docs/map/kyc.md
+ * §4). An absent body or a literal {} (the docs sample sends none) defaults userLocationCountry to AUS.
+ */
+export function validateConsent(input: UserConsentInput | undefined | null): Consent {
+  if (input === undefined || input === null || Object.keys(input).length === 0) return { userLocationCountry: 'AUS' }
+  const { consentObtained, consentObtainedAt, userIp, userLocationCountry, userLocationState } = input
+  if (!/^[A-Z]{3}$/.test(userLocationCountry)) throw badRequest('BAD_REQUEST: body/userLocationCountry must be an ISO 3166-1 alpha-3 country code (e.g. AUS)')
+  if (consentObtained != null && !CONSENT_VALUES.includes(consentObtained as ConsentObtained)) throw badRequest(`BAD_REQUEST: body/consentObtained must be one of 'yes', 'no', 'na'`)
   return compact({
-    consentObtained: consentObtained as ConsentObtained | undefined,
-    consentObtainedAt,
-    userIp: optionalString('userIp'),
-    userLocationCountry: (b.userLocationCountry as string | undefined) ?? 'AUS',
-    userLocationState: optionalString('userLocationState'),
+    consentObtained: (consentObtained ?? undefined) as ConsentObtained | undefined,
+    consentObtainedAt: consentObtainedAt ?? undefined,
+    userIp: userIp ?? undefined,
+    userLocationCountry,
+    userLocationState: userLocationState ?? undefined,
   })
 }
 

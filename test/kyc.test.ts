@@ -153,23 +153,48 @@ describe('createCase', () => {
     expect((await getCustomer(c.customerHayId!)).status).toBe('REFERRED')
   })
 
+  it('a present consent body must carry userLocationCountry (schema required) as an ISO 3166-1 alpha-3 code', async () => {
+    const missing = await app.inject({ method: 'POST', url: CASES_URL, payload: { consentObtained: 'yes' } })
+    expect(missing.statusCode, missing.body).toBe(400)
+    expect(missing.json()).toMatchObject({ status: '400', message: "BAD_REQUEST: body must have required property 'userLocationCountry'", traceId: expect.any(String) })
+    for (const userLocationCountry of ['', 'australia', 'aus', 'AU', 'AUSX', 42]) {
+      const res = await app.inject({ method: 'POST', url: CASES_URL, payload: { userLocationCountry } })
+      expect(res.statusCode, JSON.stringify(userLocationCountry)).toBe(400)
+      expect(res.json().message).toBe('BAD_REQUEST: body/userLocationCountry must be an ISO 3166-1 alpha-3 country code (e.g. AUS)')
+    }
+    const notString = await app.inject({ method: 'POST', url: CASES_URL, payload: { userLocationCountry: { code: 'AUS' } } })
+    expect(notString.statusCode).toBe(400)
+    expect(notString.json().message).toBe('BAD_REQUEST: body/userLocationCountry must be string')
+    const nzl = await createCase({ userLocationCountry: 'NZL' })
+    expect(built.ctx.services.kyc.findCase(nzl.scanCase!.id!)!.userLocationCountry).toBe('NZL')
+  })
+
   it('rejects a malformed consent body with 400 ErrorResponse', async () => {
-    const cases: unknown[] = [
-      { userLocationCountry: 42 },
-      { userLocationCountry: 'AUS', consentObtained: 'maybe' },
-      { userLocationCountry: 'AUS', consentObtained: 'YES' },
-      { userLocationCountry: 'AUS', consentObtainedAt: 'yesterday' },
-      { userLocationCountry: 'AUS', userIp: 7 },
-      { userLocationCountry: 'AUS', userLocationState: {} },
-      [],
+    const cases: [unknown, string][] = [
+      [{ userLocationCountry: 'AUS', consentObtained: 'maybe' }, "body/consentObtained must be one of 'yes', 'no', 'na'"],
+      [{ userLocationCountry: 'AUS', consentObtained: 'YES' }, "body/consentObtained must be one of 'yes', 'no', 'na'"],
+      [{ userLocationCountry: 'AUS', consentObtained: {} }, 'body/consentObtained must be string,null'],
+      [{ userLocationCountry: 'AUS', consentObtainedAt: 'yesterday' }, 'body/consentObtainedAt must match format "date-time"'],
+      [{ userLocationCountry: 'AUS', consentObtainedAt: '2026-09-24' }, 'body/consentObtainedAt must match format "date-time"'],
+      [{ userLocationCountry: 'AUS', userIp: { v4: '203.0.113.7' } }, 'body/userIp must be string,null'],
+      [{ userLocationCountry: 'AUS', userLocationState: {} }, 'body/userLocationState must be string,null'],
+      [[], 'body must be object'],
+      ['AUS', 'body must be object'],
     ]
-    for (const payload of cases) {
-      const res = await app.inject({ method: 'POST', url: CASES_URL, payload: payload as Record<string, unknown> })
+    for (const [payload, message] of cases) {
+      const res = await app.inject({ method: 'POST', url: CASES_URL, headers: { 'content-type': 'application/json' }, payload: JSON.stringify(payload) })
       expect(res.statusCode, JSON.stringify(payload)).toBe(400)
-      expect(res.json()).toMatchObject({ status: '400', message: expect.stringMatching(/^BAD_REQUEST: /), traceId: expect.any(String) })
+      expect(res.json(), JSON.stringify(payload)).toMatchObject({ status: '400', message: `BAD_REQUEST: ${message}`, traceId: expect.any(String) })
     }
     const valid = await createCase({ userLocationCountry: 'AUS', consentObtained: 'na' })
     expect(built.ctx.services.kyc.findCase(valid.scanCase!.id!)!.consentObtained).toBe('na')
+  })
+
+  it('judges consentObtainedAt like every schema-validated date-time (RFC 3339 forms ajv-formats accepts)', async () => {
+    for (const consentObtainedAt of ['2026-09-24T01:02:03Z', '2026-09-24t01:02:03z', '2026-09-24T01:02:03+10:00', '2026-09-24T01:02:03.123+1000', '2026-09-24 01:02:03Z']) {
+      const c = await createCase({ userLocationCountry: 'AUS', consentObtainedAt })
+      expect(built.ctx.services.kyc.findCase(c.scanCase!.id!)!.consentObtainedAt, consentObtainedAt).toBe(consentObtainedAt)
+    }
   })
 
   it('emits no webhook', async () => {
