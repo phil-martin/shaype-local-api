@@ -67,7 +67,7 @@ export class KycService {
       userLocationCountry: consent.userLocationCountry,
       userLocationState: consent.userLocationState,
       mobileToken,
-      webLink: `http://${this.ctx.config.host}:${this.ctx.config.port}/_kyc/web/v4/app/${id}?authorizationToken=${mobileToken}&locale=en-US`,
+      webLink: `http://${linkHost(this.ctx.config.host)}:${this.ctx.config.port}/_kyc/web/v4/app/${id}?authorizationToken=${mobileToken}&locale=en-US`,
     })
     this.repo.insertCase(c)
     this.ctx.events.emit('kyc.caseCreated', { case: structuredClone(c) })
@@ -188,6 +188,11 @@ export function validateConsent(input: unknown): Consent {
     userLocationCountry: (b.userLocationCountry as string | undefined) ?? 'AUS',
     userLocationState: optionalString('userLocationState'),
   })
+}
+
+/** Host for the hand-off link: a wildcard bind address (--host 0.0.0.0 / ::) is not a reachable URL host. */
+function linkHost(bind: string): string {
+  return bind === '0.0.0.0' || bind === '::' ? 'localhost' : bind
 }
 
 const b64u = (b: Buffer | string): string => Buffer.from(b).toString('base64url')

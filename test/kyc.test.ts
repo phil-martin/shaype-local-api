@@ -96,6 +96,7 @@ describe('createCase', () => {
     expect(c.mobileToken).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/)
     expect(JSON.parse(Buffer.from(c.mobileToken!.split('.')[0]!, 'base64url').toString())).toEqual({ alg: 'HS512', zip: 'GZIP' })
     const link = new URL(c.webLink!)
+    expect(link.host).toBe('127.0.0.1:8080')
     expect(link.searchParams.get('authorizationToken')).toBe(c.mobileToken)
     expect(link.searchParams.get('locale')).toBe('en-US')
     expect(link.pathname).toContain(c.scanCase!.id)
@@ -103,6 +104,19 @@ describe('createCase', () => {
     const stored = built.ctx.services.kyc.findCase(c.scanCase!.id!)!
     expect(stored).toMatchObject({ id: c.scanCase!.id, outcome: 'NOT_EXECUTED', consentObtained: 'yes', consentObtainedAt: body.consentObtainedAt, userIp: body.userIp, userLocationCountry: 'AUS', userLocationState: 'VIC', mobileToken: c.mobileToken, webLink: c.webLink })
     expect(stored).not.toHaveProperty('customerId')
+  })
+
+  it('webLink names localhost when the server binds a wildcard address (0.0.0.0 / ::)', async () => {
+    for (const host of ['0.0.0.0', '::']) {
+      const wildcard = await startApp({ host, port: 9090 })
+      try {
+        const res = await wildcard.app.inject({ method: 'POST', url: CASES_URL, payload: { userLocationCountry: 'AUS' } })
+        expect(res.statusCode, res.body).toBe(200)
+        expect(new URL((res.json() as CreateCaseResponse).webLink!).host, host).toBe('localhost:9090')
+      } finally {
+        await wildcard.app.close()
+      }
+    }
   })
 
   it('is not idempotent: every call creates a distinct case', async () => {
