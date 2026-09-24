@@ -809,6 +809,40 @@ describe('scheduled payments', () => {
     expect(rejected[0]?.transactionEvent).toMatchObject({ outcome: 'REFUSED_RECIPIENT_ACCOUNT_CLOSED', transactionType: 'INTRABANK_TRANSFER_OUT' })
   })
 
+  it('an ACCOUNT occurrence refuses in makeTransferV1 order (recipient status, recipient MAX_BALANCE before sender funds) and an FX child cannot pay an account', async () => {
+    const day = await today()
+    const broke = await newAccount()
+    const blockedPayee = await newAccount()
+    await blockAccount(blockedPayee.accountHayId!)
+    const cappedPayee = await newAccount({ risk: 'HIGH' }) // MAX_BALANCE 0
+    const parent = await newAccount()
+    const childRes = await app.inject({ method: 'POST', url: '/v1/accounts', payload: { idempotencyKey: randomUUID(), accountHolderId: parent.accountHolderId, accountHolderType: 'CUSTOMER', productId: LOCAL_PRODUCT_ID, currency: 'USD', parentAccountId: parent.accountHayId } })
+    expect(childRes.statusCode, childRes.body).toBe(200)
+    const child = childRes.json() as HayAccount
+    await flush()
+
+    const local = (payee: HayAccount): CreateScheduleInput['recipient'] => ({ recipientType: 'ACCOUNT', recipientName: 'Payee', recipientAccountNumber: { branchNumber: LOCAL_BSB, accountNumber: payee.accountNumber! } })
+    const cases: [HayAccount, CreateScheduleInput['recipient'], string, string][] = [
+      [broke, local(blockedPayee), 'REFUSED_RECIPIENT_ACCOUNT_BLOCKED', 'REFUSED_RECIPIENT_ACCOUNT_BLOCKED'],
+      [broke, local(cappedPayee), 'REFUSED_MAX_BALANCE_EXCEEDED', 'REFUSED_MAX_BALANCE_EXCEEDED'],
+      [child, externalRecipient(), 'REFUSED_CAPABILITY_NOT_ENABLED', 'REFUSED_CAPABILITY_NOT_ENABLED'],
+    ]
+    for (const [payer, recipient, expected, rest] of cases) {
+      const target = recipient!.recipientAccountNumber!
+      const transfer = await app.inject({
+        method: 'POST', url: `/v1/accounts/${payer.accountHayId}/transfer`,
+        payload: { idempotencyKey: randomUUID(), senderCustomerHayId: payer.accountHolderId, amount: 100, description: 'Rent', transferType: 'ACCOUNT', accountTransfer: { bsb: target.branchNumber, accountNumber: target.accountNumber, recipientName: 'Payee' } },
+      })
+      expect(transfer.json().outcome, expected).toBe(rest)
+
+      const s = await createSchedule(scheduleInput(payer, { startDate: day, recipient }))
+      await flush()
+      const refused = (await txEvents(payer.accountHayId!)).filter((p) => p.transactionEvent.originId === s.hayId)
+      expect(refused.map((p) => p.transactionEvent.outcome), expected).toEqual([expected])
+      assertValidNotification(refused[0])
+    }
+  })
+
   it('cancelScheduledPayment: ACTIVE -> CANCELLED (no further occurrences, no webhook), idempotent on CANCELLED, 422 on other terminal statuses, 404 on unknown or foreign ids', async () => {
     const account = await fundedAccount(500)
     const start = addDays(await today(), 1)

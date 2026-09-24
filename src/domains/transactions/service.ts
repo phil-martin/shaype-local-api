@@ -660,7 +660,7 @@ function transferSpec(body: TransferOutRequestBody): TransferSpec {
 }
 
 /** The sending customer's name, used as the recipient leg's counterpart when the request names no senderName. */
-function customerName(c: Customer): string {
+export function customerName(c: Customer): string {
   return [c.customerDetails.firstName, c.customerDetails.lastName].filter(Boolean).join(' ')
 }
 

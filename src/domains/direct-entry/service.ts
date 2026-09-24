@@ -12,13 +12,13 @@ import type { AppContext } from '../../context.js'
 import { compact, type ActionOwner } from '../../events/notify.js'
 import { isoDate, isoUtc } from '../../lib/clock.js'
 import { badRequest, notFound, unprocessable } from '../../lib/errors.js'
-import { LOCAL_BSB } from '../../lib/ids.js'
 import { fromCents, type Cents } from '../../lib/money.js'
 import type { Account } from '../accounts/repo.js'
 import type { ClosureCheckerError } from '../accounts/service.js'
 import type { LedgerOutcome, PostInput } from '../transactions/service.js'
 import { requestCents } from '../transactions/service.js'
 import { isIsoDate, nextBusinessDay } from './dates.js'
+import { ACCOUNT_NUMBER_RE, BSB_RE, resolveLocalAccount } from './local.js'
 import { DE_TERMINAL, type DeInstruction, type DeStatus, type DeStatusV0, type DirectEntryRepo } from './repo.js'
 import { ScheduledPaymentsService } from './schedules.js'
 
@@ -59,8 +59,6 @@ declare module '../../context.js' {
 
 /** A recipient BSB that always rejects (docs/superpowers spec §5.6 uses the same value for verifyBranchIdentifier). */
 export const REJECTING_BSB = '999999'
-const BSB_RE = /^\d{6}$/
-const ACCOUNT_NUMBER_RE = /^\d{5,9}$/
 
 /** v1 -> v0 status rendering (docs/map/00-open-questions.md S14). */
 export const V0_STATUS: Record<DeStatus, DeStatusV0> = {
@@ -253,9 +251,7 @@ export class DirectEntryService {
 
   /** The local account a BSB + account number denote, if any. */
   resolveSender(bsb: string, accountNumber: string): Account | undefined {
-    if (bsb !== LOCAL_BSB) return undefined
-    const hit = this.accounts.search(accountNumber)[0]
-    return hit?.accountHayId ? this.accounts.find(hit.accountHayId) : undefined
+    return resolveLocalAccount(this.ctx, bsb, accountNumber)
   }
 
   // ---------------------------------------------------------------- platform progression

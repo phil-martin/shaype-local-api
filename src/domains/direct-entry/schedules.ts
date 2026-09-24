@@ -12,10 +12,10 @@ import { LOCAL_BSB, isUuid, uuid } from '../../lib/ids.js'
 import { fromCents } from '../../lib/money.js'
 import type { Account } from '../accounts/repo.js'
 import type { BpayOutcome } from '../bpay/index.js'
-import type { Customer } from '../customers/repo.js'
 import type { LedgerTransaction } from '../transactions/repo.js'
-import { requestCents, type LedgerOutcome, type PostInput } from '../transactions/service.js'
+import { customerName, requestCents, WEBHOOK_TYPE, type LedgerOutcome, type PostInput } from '../transactions/service.js'
 import { addDays, isIsoDate, nextOccurrence } from './dates.js'
+import { ACCOUNT_NUMBER_RE, BSB_RE, resolveLocalAccount } from './local.js'
 import { SCHEDULE_TERMINAL, type DirectEntryRepo, type HayArchivedScheduledPayment, type HayScheduledPayment, type ScheduledPayment, type ScheduledPaymentRecipient, type ScheduleFrequency, type ScheduleStatus, type ScheduleType } from './repo.js'
 
 /** Body of POST /_admin/scheduled-payments (the portal's createScheduledPayment / updateSchedulePayment stand-in). */
@@ -44,8 +44,6 @@ export interface CreateScheduleInput {
 export interface OccurrenceResult { schedule: ScheduledPayment; outcome: LedgerOutcome; transaction?: LedgerTransaction }
 
 const FREQUENCIES: readonly ScheduleFrequency[] = ['WEEKLY', 'FORTNIGHTLY', 'MONTHLY', 'QUARTERLY']
-const BSB_RE = /^\d{6}$/
-const ACCOUNT_NUMBER_RE = /^\d{5,9}$/
 const BILLER_CODE_RE = /^\d{3,10}$/
 const BILLER_REFERENCE_RE = /^\d{2,20}$/
 const MAX_CATCH_UP = 400
@@ -144,7 +142,7 @@ export class ScheduledPaymentsService {
     const recipient = validateRecipient(input.recipient)
     if (recipient.recipientType === 'ACCOUNT') {
       const target = recipient.recipientAccountNumber!
-      if (target.branchNumber === LOCAL_BSB && !this.accounts.search(target.accountNumber!).length) throw badRequest(`BAD_REQUEST: no local account with account number ${target.accountNumber}`)
+      if (target.branchNumber === LOCAL_BSB && !resolveLocalAccount(this.ctx, LOCAL_BSB, target.accountNumber!)) throw badRequest(`BAD_REQUEST: no local account with account number ${target.accountNumber}`)
       if (target.branchNumber === account.bsb && target.accountNumber === account.accountNumber) throw badRequest('BAD_REQUEST: the recipient is the paying account')
     }
 
@@ -266,67 +264,71 @@ export class ScheduledPaymentsService {
     return compact({ schedule: next, outcome, transaction })
   }
 
+  /**
+   * An ACCOUNT occurrence, checked in makeTransferV1's order (TransactionsService.transfer, 00-balance
+   * §3.2): sender status -> an FX child may not pay an account (REFUSED_CAPABILITY_NOT_ENABLED) -> another
+   * BSB posts INTERBANK_TRANSFER_OUT through the ledger (limits, funds) -> a local recipient: currency
+   * (REFUSED_CAPABILITY_NOT_ENABLED), status (REFUSED_RECIPIENT_ACCOUNT_BLOCKED / _CLOSED; an account
+   * number that no longer resolves counts as closed), sender limits, recipient MAX_BALANCE, sender funds;
+   * then both intrabank legs atomically. Every refusal emits the refused TRANSACTION webhook.
+   */
   private pay(s: ScheduledPayment, account: Account): { outcome: LedgerOutcome; transaction?: LedgerTransaction } {
-    const common = {
-      description: s.description,
-      reference: s.reference,
-      originType: 'SCHEDULED_PAYMENT' as const,
-      originId: s.id,
-      actionOwner: 'PLATFORM' as const,
-      notifyRefusal: true,
-    }
     const recipient = s.recipient
     if (recipient.recipientType === 'BPAY') return this.payBpay(s, account)
 
     const target = recipient.recipientAccountNumber!
-    const local = target.branchNumber === LOCAL_BSB ? this.accounts.search(target.accountNumber!)[0] : undefined
-    const recipientAccount = local?.accountHayId ? this.accounts.find(local.accountHayId) : undefined
-    if (target.branchNumber !== LOCAL_BSB) {
-      const r = this.ledger.post(compact({
+    const recipientAccount = resolveLocalAccount(this.ctx, target.branchNumber!, target.accountNumber!)
+    const common = { description: s.description, reference: s.reference, originType: 'SCHEDULED_PAYMENT' as const, originId: s.id, actionOwner: 'PLATFORM' as const }
+    const out: PostInput = target.branchNumber !== LOCAL_BSB
+      ? compact({
         ...common,
         accountId: account.id,
         amountCents: -s.amount,
         type: 'INTERBANK_TRANSFER_OUT',
         channel: 'CUSCAL_NPP_TRANSFER_OUT',
         counterpart: compact({ name: recipient.recipientName, basicAccountNumber: { accountNumber: target.accountNumber!, branchNumber: target.branchNumber! } }),
+      })
+      : compact({
+        ...common,
+        accountId: account.id,
+        amountCents: -s.amount,
+        type: 'INTRABANK_TRANSFER_OUT',
+        channel: 'HAAS_TRANSFER_INTERNAL_OUT',
+        counterpart: compact({ accountId: recipientAccount?.id, customerId: recipientAccount && this.ledger.primaryCustomer(recipientAccount), name: recipient.recipientName }),
+      })
+    const refuse = (outcome: LedgerOutcome): { outcome: LedgerOutcome } => {
+      this.ledger.notifyRefused(account, 'PLATFORM', outcome, compact({
+        amountCents: -s.amount, webhookType: WEBHOOK_TYPE[out.type], transactionTime: isoUtc(this.ctx.clock.now()), isPending: false,
+        counterpart: out.counterpart, description: s.description, reference: s.reference, originType: 'SCHEDULED_PAYMENT' as const, originId: s.id,
       }))
+      return { outcome }
+    }
+
+    const senderGate = this.accounts.requireOpenForMovement(account.id)
+    if (typeof senderGate === 'string') return refuse(senderGate)
+    if (account.parentAccountId) return refuse('REFUSED_CAPABILITY_NOT_ENABLED')
+    if (out.type === 'INTERBANK_TRANSFER_OUT') {
+      const r = this.ledger.post({ ...out, notifyRefusal: true })
       return compact({ outcome: r.outcome, transaction: r.transaction })
     }
 
-    const out: PostInput = compact({
-      ...common,
-      accountId: account.id,
-      amountCents: -s.amount,
-      type: 'INTRABANK_TRANSFER_OUT',
-      channel: 'HAAS_TRANSFER_INTERNAL_OUT',
-      counterpart: compact({ accountId: recipientAccount?.id, customerId: recipientAccount && this.ledger.primaryCustomer(recipientAccount), name: recipient.recipientName }),
-    })
-    const refuse = (outcome: LedgerOutcome): { outcome: LedgerOutcome } => {
-      this.ledger.notifyRefused(account, 'PLATFORM', outcome, {
-        amountCents: -s.amount, webhookType: 'INTRABANK_TRANSFER_OUT', transactionTime: isoUtc(this.ctx.clock.now()), isPending: false,
-        counterpart: out.counterpart, description: s.description, reference: s.reference, originType: 'SCHEDULED_PAYMENT', originId: s.id,
-      })
-      return { outcome }
-    }
-    const senderGate = this.ledger.evaluate(out)
-    if (senderGate !== 'ACCEPTED') return refuse(senderGate)
     if (!recipientAccount) return refuse('REFUSED_RECIPIENT_ACCOUNT_CLOSED')
+    if (recipientAccount.currency !== account.currency) return refuse('REFUSED_CAPABILITY_NOT_ENABLED')
     const recipientGate = this.accounts.requireOpenForMovement(recipientAccount.id)
     if (recipientGate === 'REFUSED_ACCOUNT_BLOCKED') return refuse('REFUSED_RECIPIENT_ACCOUNT_BLOCKED')
     if (recipientGate === 'REFUSED_ACCOUNT_CLOSED') return refuse('REFUSED_RECIPIENT_ACCOUNT_CLOSED')
-    if (recipientAccount.currency !== account.currency) return refuse('REFUSED_CAPABILITY_NOT_ENABLED')
+    const payer = this.ctx.services.customers.find(s.customerId)
     const into: PostInput = compact({
       ...common,
-      notifyRefusal: false,
       accountId: recipientAccount.id,
       amountCents: s.amount,
       type: 'INTRABANK_TRANSFER_IN',
       channel: 'HAAS_TRANSFER_INTERNAL_IN',
-      counterpart: { accountId: account.id, customerId: s.customerId, name: senderName(this.ctx.services.customers.find(s.customerId)) },
+      counterpart: compact({ accountId: account.id, customerId: s.customerId, name: (payer && customerName(payer)) || undefined }),
       limits: ['MAX_BALANCE'],
     })
-    const recipientOutcome = this.ledger.evaluate(into)
-    if (recipientOutcome !== 'ACCEPTED') return refuse(recipientOutcome)
+    const breached = this.ledger.checkLimits(out) ?? this.ledger.checkLimits(into) ?? this.ledger.checkFunds(out)
+    if (breached) return refuse(breached)
     const sent = this.ctx.db.transaction(() => {
       const t = this.ledger.apply(out)
       this.ledger.apply(into)
@@ -393,13 +395,6 @@ function fromBpayOutcome(outcome: BpayOutcome): LedgerOutcome {
     case 'INVALID_PAYMENT': return 'REFUSED_BPAY_INVALID_PAYMENT'
     default: return outcome
   }
-}
-
-function senderName(c: Customer | undefined): string | undefined {
-  if (!c) return undefined
-  const d = c.customerDetails as { firstName?: string; lastName?: string }
-  const name = [d.firstName, d.lastName].filter(Boolean).join(' ')
-  return name || undefined
 }
 
 /** ScheduledPaymentRecipient as the portal would validate it: ACCOUNT needs a BSB + account number, BPAY a biller code + CRN. @throws 400 */
