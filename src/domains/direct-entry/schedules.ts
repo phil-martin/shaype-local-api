@@ -14,7 +14,7 @@ import type { Account } from '../accounts/repo.js'
 import type { Customer } from '../customers/repo.js'
 import type { LedgerTransaction } from '../transactions/repo.js'
 import { requestCents, type LedgerOutcome, type PostInput } from '../transactions/service.js'
-import { isIsoDate, nextOccurrence } from './dates.js'
+import { addDays, isIsoDate, nextOccurrence } from './dates.js'
 import { SCHEDULE_TERMINAL, type DirectEntryRepo, type HayArchivedScheduledPayment, type HayScheduledPayment, type ScheduledPayment, type ScheduledPaymentRecipient, type ScheduleFrequency, type ScheduleStatus, type ScheduleType } from './repo.js'
 
 /** Body of POST /_admin/scheduled-payments (the portal's createScheduledPayment / updateSchedulePayment stand-in). */
@@ -113,8 +113,11 @@ export class ScheduledPaymentsService {
   /**
    * Creates an ACTIVE schedule (SCHEDULED_PAYMENT webhook) or, with `replaces`, updates that ACTIVE
    * schedule in place, archiving its previous definition as REPLACED in previousVersions (no webhook:
-   * the event is a creation notification). Validation failures are 400; an unknown account 404; a
-   * customer that does not hold the account 422 PERMISSION_DENIED; replacing a non-ACTIVE schedule 422.
+   * the event is a creation notification). A replacement keeps the processed counters and resumes at its
+   * first occurrence on or after today and strictly after the day of the last payment (never replaying a
+   * paid occurrence). Validation failures are 400; an unknown account 404; a customer that does not hold
+   * the account 422 PERMISSION_DENIED; replacing a non-ACTIVE schedule 422 INVALID_STATUS_TRANSITION; a
+   * replacement with no occurrence left (count reached, past endDate, ONE_TIME already due) 422 INVALID_SCHEDULE.
    */
   create(input: CreateScheduleInput): ScheduledPayment {
     if (!isUuid(input.accountId)) throw badRequest('BAD_REQUEST: accountId must be a UUID')
@@ -141,12 +144,23 @@ export class ScheduledPaymentsService {
       if (target.branchNumber === account.bsb && target.accountNumber === account.accountNumber) throw badRequest('BAD_REQUEST: the recipient is the paying account')
     }
 
-    const now = isoUtc(this.ctx.clock.now())
+    const clock = this.ctx.clock.now()
+    const now = isoUtc(clock)
     const previous = input.replaces !== undefined ? this.repo.scheduleById(input.replaces) : undefined
+    const numberOfPayments = type === 'ONE_TIME' ? 1 : input.numberOfPayments
+    let nextRunDate: string | undefined = input.startDate
     if (input.replaces !== undefined) {
       if (!previous) throw notFound(`NOT_FOUND: Scheduled payment ${input.replaces} not found`)
       if (previous.accountId !== account.id) throw unprocessable(`PERMISSION_DENIED: Scheduled payment ${previous.id} does not belong to account ${account.id}`)
       if (previous.status !== 'ACTIVE') throw unprocessable(`INVALID_STATUS_TRANSITION: Scheduled payment ${previous.id} is ${previous.status} and cannot be updated`)
+      // Resume, never replay: the first occurrence of the new definition on or after today and after the last payment.
+      const yesterday = addDays(isoDate(clock), -1)
+      const lastPaid = previous.lastProcessedAt?.slice(0, 10)
+      const after = lastPaid !== undefined && lastPaid > yesterday ? lastPaid : yesterday
+      nextRunDate = type === 'ONE_TIME' ? (input.startDate > after ? input.startDate : undefined) : nextOccurrence(input.startDate, input.frequency!, after)
+      if (nextRunDate === undefined || (numberOfPayments !== undefined && previous.numberOfProcessedPayments >= numberOfPayments) || (input.endDate !== undefined && nextRunDate > input.endDate)) {
+        throw unprocessable(`INVALID_SCHEDULE: Scheduled payment ${previous.id} has made ${previous.numberOfProcessedPayments} payment(s); the updated definition has no occurrence left to run`)
+      }
     }
     const s: ScheduledPayment = compact({
       id: previous?.id ?? uuid(),
@@ -161,9 +175,11 @@ export class ScheduledPaymentsService {
       frequency: type === 'RECURRING' ? input.frequency : undefined,
       startDate: input.startDate,
       endDate: input.endDate,
-      numberOfPayments: type === 'ONE_TIME' ? 1 : input.numberOfPayments,
-      numberOfProcessedPayments: 0,
-      nextRunDate: input.startDate,
+      numberOfPayments,
+      numberOfProcessedPayments: previous?.numberOfProcessedPayments ?? 0,
+      nextRunDate,
+      lastProcessedAt: previous?.lastProcessedAt,
+      lastOutcome: previous?.lastOutcome,
       shouldCancelOnFailure: input.shouldCancelOnFailure ?? false,
       recipient,
       status: 'ACTIVE',

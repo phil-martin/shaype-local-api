@@ -42,7 +42,9 @@
  *   observe ACCEPTED and SUBMITTED (avoid /_admin/flush while such a hop is pending).
  * - Scheduled payments (portal-only on Shaype) are seeded by POST /_admin/scheduled-payments, which also
  *   updates an ACTIVE schedule in place with `replaces` (the previous definition archived as REPLACED in
- *   previousVersions, counters reset, no webhook). SCHEDULED_PAYMENT { hayId } is emitted on creation only
+ *   previousVersions, no webhook; numberOfProcessedPayments / lastProcessedDateTimeUtc carry over and the
+ *   next run is the new definition's first occurrence on or after today and after the last payment, so paid
+ *   occurrences are never replayed; a definition with nothing left to run is 422 INVALID_SCHEDULE). SCHEDULED_PAYMENT { hayId } is emitted on creation only
  *   (actionOwner CLIENT: the portal is the client's). Dates are UTC calendar days; a schedule is due when
  *   nextRunDate <= today at any tick (request or clock change), missed periods are caught up in order.
  *   Occurrences are anchored on startDate; a MONTHLY / QUARTERLY day that does not exist rolls forward

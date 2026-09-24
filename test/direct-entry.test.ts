@@ -749,6 +749,53 @@ describe('scheduled payments', () => {
     expectError(await app.inject({ method: 'POST', url: '/_admin/scheduled-payments', payload: scheduleInput(account, { startDate: start, replaces: UNKNOWN_ID }) }), 404, /^NOT_FOUND: /)
   })
 
+  it('`replaces` keeps the processed counters and resumes after the last payment: paid occurrences are never replayed', async () => {
+    await setClock('2027-03-10T10:00:00Z')
+    try {
+      const account = await fundedAccount(1000)
+      const s = await createSchedule(scheduleInput(account, { frequency: 'MONTHLY', startDate: '2027-01-05', amount: 10 }))
+      const paid = await getSchedule(account.accountHayId!, s.hayId!)
+      expect(paid).toMatchObject({ status: 'ACTIVE', numberOfProcessedPayments: 3 }) // 5 Jan, 5 Feb, 5 Mar caught up
+      expect((await getAccount(account.accountHayId!)).totalBalance).toBe(970)
+
+      const updated = await createSchedule(scheduleInput(account, { frequency: 'MONTHLY', startDate: '2027-01-05', amount: 11, replaces: s.hayId! }), 200)
+      expect(updated).toMatchObject({ status: 'ACTIVE', numberOfProcessedPayments: 3, lastProcessedDateTimeUtc: paid.lastProcessedDateTimeUtc, amount: { amount: 11 } })
+      expect(updated.previousVersions).toEqual([expect.objectContaining({ status: 'REPLACED', numberOfProcessedPayments: 3, amount: { currency: 'AUD', amount: 10 } })])
+      expect(await getSchedule(account.accountHayId!, s.hayId!)).toMatchObject({ numberOfProcessedPayments: 3 })
+      expect((await getAccount(account.accountHayId!)).totalBalance).toBe(970)
+      await setClock('2027-04-04T10:00:00Z')
+      expect(await getSchedule(account.accountHayId!, s.hayId!)).toMatchObject({ numberOfProcessedPayments: 3 })
+      expect((await getAccount(account.accountHayId!)).totalBalance).toBe(970)
+      await setClock('2027-04-05T10:00:00Z')
+      expect(await getSchedule(account.accountHayId!, s.hayId!)).toMatchObject({ status: 'ACTIVE', numberOfProcessedPayments: 4 })
+      expect((await getAccount(account.accountHayId!)).totalBalance).toBe(959)
+
+      // switching to WEEKLY (4 Jan + 7k: ..., 5 Apr, 12 Apr) on the day of a payment: 12 Apr is next, not 5 Apr again
+      const weekly = await createSchedule(scheduleInput(account, { frequency: 'WEEKLY', startDate: '2027-01-04', amount: 1, replaces: s.hayId! }), 200)
+      expect(weekly).toMatchObject({ numberOfProcessedPayments: 4, frequency: 'WEEKLY' })
+      await setClock('2027-04-11T10:00:00Z')
+      expect((await getSchedule(account.accountHayId!, s.hayId!)).numberOfProcessedPayments).toBe(4)
+      await setClock('2027-04-12T10:00:00Z')
+      expect((await getSchedule(account.accountHayId!, s.hayId!)).numberOfProcessedPayments).toBe(5)
+      expect((await getAccount(account.accountHayId!)).totalBalance).toBe(958)
+
+      // nothing paid yet: resumes at the first occurrence on or after today, never replaying past dates
+      const later = await createSchedule(scheduleInput(account, { frequency: 'MONTHLY', startDate: '2027-06-01', amount: 5 }))
+      await createSchedule(scheduleInput(account, { frequency: 'MONTHLY', startDate: '2027-01-12', amount: 5, replaces: later.hayId! }), 200)
+      expect(await getSchedule(account.accountHayId!, later.hayId!)).toMatchObject({ numberOfProcessedPayments: 1 }) // 12 Apr (today) only
+      expect((await getAccount(account.accountHayId!)).totalBalance).toBe(953)
+
+      // a definition with nothing left to run is refused
+      const bad = async (input: CreateScheduleInput) => expectError(await app.inject({ method: 'POST', url: '/_admin/scheduled-payments', payload: input }), 422, /^INVALID_SCHEDULE: /)
+      await bad(scheduleInput(account, { frequency: 'WEEKLY', startDate: '2027-01-04', numberOfPayments: 5, replaces: s.hayId! }))
+      await bad(scheduleInput(account, { frequency: 'WEEKLY', startDate: '2027-01-04', endDate: '2027-04-18', replaces: s.hayId! })) // next would be 19 Apr
+      await bad(scheduleInput(account, { startDate: '2027-04-12', replaces: later.hayId! })) // ONE_TIME: already paid once
+      expect(await getSchedule(account.accountHayId!, s.hayId!)).toMatchObject({ status: 'ACTIVE', numberOfProcessedPayments: 5, frequency: 'WEEKLY' })
+    } finally {
+      await resetClock()
+    }
+  })
+
   it('validates the seeding body', async () => {
     const account = await newAccount()
     const stranger = await newCustomer()
