@@ -29,8 +29,9 @@ export async function buildServer(overrides: Partial<Config> = {}, deps: { fetch
   const app = Fastify({
     logger: { level: config.logLevel },
     // PayID path values are free text (EMAIL up to 256 chars, ORGANISATION names); Fastify's 100-char
-    // default answers a raw 414 that bypasses the ErrorResponse envelope, so the domain can 422 instead.
-    maxParamLength: 512,
+    // default would refuse them in the router, so the domain can 422 instead. (routerOptions: the top-level
+    // option is deprecated, FSTDEP022.)
+    routerOptions: { maxParamLength: 512 },
     ajv: {
       customOptions: {
         coerceTypes: 'array',

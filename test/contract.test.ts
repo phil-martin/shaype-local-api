@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { operations } from '../src/contract/index.js'
 import { startApp } from './helpers.js'
@@ -24,6 +25,13 @@ describe('contract coverage', () => {
       const acceptable = built.stubbed.includes(op.operationId) ? [op.successStatus] : [op.successStatus, 404]
       expect(acceptable, `${op.operationId} ${url} -> ${res.statusCode} ${res.body}`).toContain(res.statusCode)
     }
+  })
+
+  it('builds the server without any Fastify deprecation warning on stderr', () => {
+    const script = "const m = await import('./src/server.ts'); const b = await m.buildServer({ logLevel: 'silent' }); await b.app.ready(); await b.app.close()"
+    const out = spawnSync(process.execPath, ['--import', 'tsx', '-e', script], { cwd: process.cwd(), encoding: 'utf8', timeout: 60_000 })
+    expect(out.status, out.stderr).toBe(0)
+    expect(out.stderr).not.toMatch(/FSTDEP|DeprecationWarning|FastifyWarning/)
   })
 
   it('returns the ErrorResponse envelope for unknown routes', async () => {
