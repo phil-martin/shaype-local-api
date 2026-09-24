@@ -1,4 +1,8 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { openDatabase } from '../src/db/index.js'
 import { withIdempotency } from '../src/lib/idempotency.js'
 import { hasAtMostTwoDecimals, toCents, toCentsStrict } from '../src/lib/money.js'
 import { startApp } from './helpers.js'
@@ -76,5 +80,23 @@ describe('scheduler', () => {
     expect(ticks).toBeGreaterThanOrEqual(1)
     const res = await built.app.inject({ method: 'POST', url: '/_admin/flush' })
     expect(res.json()).toEqual({ status: 'idle' })
+  })
+})
+
+describe('database migrations', () => {
+  it('adds a column registered after a file database was created (registerColumn) when it is reopened', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'shaype-db-'))
+    try {
+      const file = join(dir, 'old.db')
+      const first = openDatabase(file)
+      first.exec('ALTER TABLE accounts DROP COLUMN close_requested_at') // what an earlier version created
+      first.close()
+      const reopened = openDatabase(file)
+      const cols = (reopened.prepare('PRAGMA table_info(accounts)').all() as { name: string }[]).map((c) => c.name)
+      reopened.close()
+      expect(cols).toContain('close_requested_at')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

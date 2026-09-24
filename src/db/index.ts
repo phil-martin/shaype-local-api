@@ -4,10 +4,19 @@ import { CORE_SCHEMA } from './schema.js'
 export type Db = Database.Database
 
 const schemas: string[] = [CORE_SCHEMA]
+const columns: { table: string; column: string; ddl: string }[] = []
 
 /** Domain modules call this at import time to contribute their tables. */
 export function registerSchema(sql: string): void {
   schemas.push(sql)
+}
+
+/**
+ * A column added after a table was first shipped: a file database created by an earlier version gets it
+ * through ALTER TABLE when opened (CREATE TABLE IF NOT EXISTS leaves an existing table untouched).
+ */
+export function registerColumn(table: string, column: string, ddl: string): void {
+  columns.push({ table, column, ddl })
 }
 
 export function openDatabase(file: string): Db {
@@ -20,6 +29,10 @@ export function openDatabase(file: string): Db {
 
 export function migrate(db: Db): void {
   for (const sql of schemas) db.exec(sql)
+  for (const c of columns) {
+    const existing = db.prepare(`PRAGMA table_info("${c.table}")`).all() as { name: string }[]
+    if (!existing.some((e) => e.name === c.column)) db.exec(`ALTER TABLE "${c.table}" ADD COLUMN ${c.column} ${c.ddl}`)
+  }
 }
 
 /** Wipe every user table (keeps the schema). */

@@ -22,9 +22,10 @@
  *   A child account cannot be created under a LOCKED parent (422 ACCOUNT_BLOCKED) — a blocked wallet must
  *   not be partly reopened; a child that fx.childAccounts provisions after its parent was blocked is
  *   created LOCKED with the parent's block (APPROVED then BLOCKED, both PLATFORM).
- * - closeAccount on a CLOSED account is a 202 SUCCESS no-op; success bodies carry `errors: []`; the
- *   cascade re-runs the checks and leaves the account open if balances moved in between (no signal to
- *   the client beyond the missing CLOSED webhook). Owners inside the cascade follow the webhook matrix:
+ * - closeAccount on a CLOSED account is a 202 SUCCESS no-op; success bodies carry `errors: []`. An accepted
+ *   closure is recorded (closeRequestedAt) and money movements are refused REFUSED_ACCOUNT_CLOSED from then
+ *   on, so the asynchronous cascade always finds the balances it validated and closes the account (a child
+ *   cannot be opened under it either); a repeated request while pending schedules nothing new. Owners inside the cascade follow the webhook matrix:
  *   ACCOUNT_STATUS_CHANGE {CLOSED} is CLIENT (the closeAccount call caused it), while the card
  *   cancellations (deps.ts) and the customer's INACTIVE are PLATFORM cascades.
  * - Limits: accountLimit is omitted (not null) when no override exists; effectiveLimit is 0 while risk

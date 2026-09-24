@@ -894,6 +894,31 @@ describe('closeAccount', () => {
     }
   })
 
+  it('an accepted closure refuses money movements until its asynchronous cascade has run, so the cascade always closes the account', async () => {
+    const slow = await startApp({ asyncDelayMs: 60_000, defaultRiskLevel: 'LOW' })
+    try {
+      const sapp = slow.app
+      const c = await sapp.inject({ method: 'POST', url: '/v0/customers/create', payload: {
+        idempotencyKey: randomUUID(), email: 'closing@example.com', customerTier: 'STANDARD', phoneNumber: { countryCodePrefix: '+61', numberAfterPrefix: '499999999' },
+        address: { line1: '1 Test St', townOrCity: 'Sydney', administrativeRegion: 'NSW', postcode: '2000', countryCodeIso: 'AUS' },
+        customerDetails: { firstName: 'Closing', lastName: 'Holder', dateOfBirth: '1990-01-01' },
+      } })
+      const holder = c.json().customerHayId as string
+      await sapp.inject({ method: 'POST', url: '/_admin/clock', payload: { advanceMs: 61_000 } })
+      const acc = await sapp.inject({ method: 'POST', url: '/v1/accounts', payload: { idempotencyKey: randomUUID(), accountHolderId: holder, accountHolderType: 'CUSTOMER', productId: LOCAL_PRODUCT_ID } })
+      expect(acc.statusCode, acc.body).toBe(200)
+      const id = acc.json().accountHayId as string
+      expect((await sapp.inject({ method: 'POST', url: `/v0/accounts/${id}/close`, payload: { reason: 'CUSTOMER' } })).statusCode).toBe(202)
+      expect((await sapp.inject({ method: 'GET', url: `/v0/accounts/${id}` })).json().status).toBe('APPROVED')
+      const credit = await sapp.inject({ method: 'POST', url: '/v1/transactions/credit', payload: { idempotencyKey: randomUUID(), accountHayId: id, amount: 5, counterpartName: 'x', description: 'late', transactionChannel: 'MANUAL_ADJUSTMENT' } })
+      expect(credit.json()).toEqual({ outcome: 'REFUSED_ACCOUNT_CLOSED' })
+      await sapp.inject({ method: 'POST', url: '/_admin/clock', payload: { advanceMs: 61_000 } })
+      expect((await sapp.inject({ method: 'GET', url: `/v0/accounts/${id}` })).json()).toMatchObject({ status: 'CLOSED', totalBalance: 0 })
+    } finally {
+      await slow.app.close()
+    }
+  })
+
   it('an unused overdraft limit does not block closure, and a CLOSED account reports nothing spendable (limit 0)', async () => {
     const a = await newLowRiskAccount()
     const id = a.accountHayId!

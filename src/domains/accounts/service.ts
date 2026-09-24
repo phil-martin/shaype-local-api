@@ -159,6 +159,8 @@ export class AccountsService {
     const a = this.get(id)
     if (a.status === 'LOCKED') return 'REFUSED_ACCOUNT_BLOCKED'
     if (a.status === 'CLOSED') return 'REFUSED_ACCOUNT_CLOSED'
+    // closure accepted, cascade pending: nothing may move, or the cascade would find balances and not close
+    if (a.closeRequestedAt) return 'REFUSED_ACCOUNT_CLOSED'
     // Only PENDING_APPROVAL remains, and setStatus() refuses it (accounts created through this API are
     // always APPROVED), so this branch is unreachable; it keeps the status switch exhaustive.
     if (!OPEN.has(a.status)) return 'REFUSED_ACCOUNT_BLOCKED'
@@ -327,7 +329,7 @@ export class AccountsService {
     if (parent.holderType !== input.accountHolderType || parent.holderId !== input.accountHolderId) {
       throw unprocessable(`INVALID_ARGUMENT: parent account ${parent.id} belongs to a different account holder`)
     }
-    if (parent.status === 'CLOSED') throw unprocessable(`ACCOUNT_CLOSED: parent account ${parent.id} is CLOSED`)
+    if (parent.status === 'CLOSED' || parent.closeRequestedAt) throw unprocessable(`ACCOUNT_CLOSED: parent account ${parent.id} is ${parent.status === 'CLOSED' ? 'CLOSED' : 'being closed'}`)
     if (parent.status === 'LOCKED' && !opts.provisioning) throw unprocessable(`ACCOUNT_BLOCKED: parent account ${parent.id} is LOCKED`)
     if (this.repo.children(parent.id).some((c) => c.currency === currency)) {
       throw unprocessable(`DUPLICATE_CHILD_CURRENCY: parent account ${parent.id} already has a ${currency} child account`)
@@ -350,7 +352,7 @@ export class AccountsService {
       if (currency === HOME_CURRENCY) continue
       this.ctx.scheduler.later(() => {
         const p = this.repo.byId(parent.id)
-        if (!p || p.status === 'CLOSED' || this.repo.children(p.id).some((c) => c.currency === currency)) return
+        if (!p || p.status === 'CLOSED' || p.closeRequestedAt || this.repo.children(p.id).some((c) => c.currency === currency)) return
         this.ctx.db.transaction(() => {
           const c = this.createEntity({ accountHolderType: p.holderType, accountHolderId: p.holderId, productId: p.productId, currency, parentAccountId: p.id }, { provisioning: true })
           if (p.status === 'LOCKED') {
@@ -777,15 +779,29 @@ export class AccountsService {
       const body: CloseAccountResponse = { result: 'FAILURE', description: 'Account closure failed. Check errors for more details.', errors }
       throw new ApiError(422, `ACCOUNT_CLOSURE_FAILED: ${errors.map((e) => e.type).join(', ')}`, body)
     }
-    this.ctx.scheduler.later(() => this.completeClosure(id, reason ?? undefined))
+    if (!a.closeRequestedAt) {
+      a.closeRequestedAt = isoUtc(this.ctx.clock.now())
+      this.repo.save(a)
+      this.ctx.scheduler.later(() => this.completeClosure(id, reason ?? undefined))
+    }
     return { result: 'SUCCESS', description: 'Account closure request accepted.', errors: [] }
   }
 
-  /** The asynchronous closure cascade (runs once; a second close request for the same account is a no-op here). */
+  /**
+   * The asynchronous closure cascade (runs once; a second close request for the same account is a no-op here).
+   * Movements were refused since the request (closeRequestedAt), so the checks still pass; should one fail
+   * anyway, the request is withdrawn (the account reopens for movements) and a warning is logged.
+   */
   completeClosure(id: string, reason?: CloseReason): void {
     const a = this.repo.byId(id)
     if (!a || a.status === 'CLOSED') return
-    if (this.closureErrors(a).length) return // balances moved between the request and the cascade: leave the account open
+    const errors = this.closureErrors(a)
+    if (errors.length) {
+      delete a.closeRequestedAt
+      this.repo.save(a)
+      this.ctx.log.warn({ accountId: id, errors: errors.map((e) => e.type) }, 'account closure abandoned: a closure check failed after the request was accepted')
+      return
+    }
     this.ctx.db.transaction(() => {
       this.transition(a, 'CLOSED', { actionOwner: 'CLIENT', closeReason: reason })
     })()

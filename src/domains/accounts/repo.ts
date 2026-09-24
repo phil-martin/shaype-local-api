@@ -38,6 +38,8 @@ export interface Account {
   riskLevel: RiskLevel
   copOptOut: boolean
   closeReason?: CloseReason
+  /** closeAccount accepted the closure (202); the asynchronous cascade has not closed the account yet. */
+  closeRequestedAt?: string
   createdAt: string
   closedAt?: string
   updatedAt?: string
@@ -181,6 +183,7 @@ function toRow(a: Account): Row {
     risk_level: a.riskLevel,
     cop_opt_out: a.copOptOut ? 1 : 0,
     close_reason: a.closeReason ?? null,
+    close_requested_at: a.closeRequestedAt ?? null,
     created_at: a.createdAt,
     closed_at: a.closedAt ?? null,
     updated_at: a.updatedAt ?? null,
@@ -211,7 +214,7 @@ function fromRow(r: Row): Account {
   if (blocked !== undefined) a.blockedCustomerIds = blocked
   const opt: [keyof Account, unknown][] = [
     ['blockedBy', r.blocked_by], ['blockNote', r.block_note], ['parentAccountId', r.parent_account_id], ['closeReason', r.close_reason],
-    ['closedAt', r.closed_at], ['updatedAt', r.updated_at],
+    ['closeRequestedAt', r.close_requested_at], ['closedAt', r.closed_at], ['updatedAt', r.updated_at],
   ]
   for (const [k, v] of opt) if (v !== null && v !== undefined) (a as unknown as Record<string, unknown>)[k] = v
   return a

@@ -1,4 +1,4 @@
-import { registerSchema } from '../../db/index.js'
+import { registerColumn, registerSchema } from '../../db/index.js'
 
 /**
  * accounts: one row per HayAccount. Money columns are INTEGER cents (spec §5.2 balance model):
@@ -64,3 +64,5 @@ CREATE INDEX IF NOT EXISTS account_rules_account ON account_rules(account_id, se
 `
 
 registerSchema(ACCOUNTS_SCHEMA)
+// set when closeAccount accepts the closure (202): movements are refused until the asynchronous cascade closes the account
+registerColumn('accounts', 'close_requested_at', 'TEXT')
