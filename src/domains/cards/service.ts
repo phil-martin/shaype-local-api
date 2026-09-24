@@ -609,8 +609,8 @@ export class CardsService {
 
   /**
    * Device provisioning (outside the B2B API): stores an ACTIVE_TOKEN wallet on an ACTIVE card and emits
-   * CARD_ADDED_TO_WALLET. Requires mobileWalletPaymentsEnabled? No — provisioning is allowed; payments
-   * are gated at authorisation. Not ACTIVE -> 422 INVALID_CARD_STATUS.
+   * CARD_ADDED_TO_WALLET. Provisioning ignores mobileWalletPaymentsEnabled (payments are gated at
+   * authorisation). Not ACTIVE -> 422 INVALID_CARD_STATUS.
    */
   provisionWallet(id: string, walletType: WalletType): Wallet {
     const c = this.get(id)
@@ -667,8 +667,11 @@ export class CardsService {
    * 2_WEEK / DAY reminders, each once.
    */
   tick(): void {
-    const today = isoDate(this.ctx.clock.now())
-    for (const c of this.repo.byStatuses(['ACTIVE', 'AWAITING_ACTIVATION', 'BLOCKED'])) {
+    const now = this.ctx.clock.now()
+    const today = isoDate(now)
+    // Only cards inside the earliest reminder window can have anything due (a few days of slack for the calendar-month clamp).
+    const horizon = isoDate(addDays(addMonthsClamped(now, 1), 3))
+    for (const c of this.repo.byStatuses(['ACTIVE', 'AWAITING_ACTIVATION', 'BLOCKED'], horizon)) {
       if (this.expireCard(c, today)) continue
       if (c.renewedIntoCardId) continue
       const expiry = parseDate(c.expiryDate)!

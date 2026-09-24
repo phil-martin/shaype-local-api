@@ -128,9 +128,11 @@ export class CardRepo {
     return r ? fromRow(r) : undefined
   }
 
-  /** Cards in one of `statuses`, creation order (the expiry tick's working set). */
-  byStatuses(statuses: CardStatus[]): Card[] {
-    return (this.db.prepare(`SELECT * FROM cards WHERE status IN (${statuses.map(() => '?').join(',')}) ORDER BY seq ASC`).all(...statuses) as Row[]).map(fromRow)
+  /** Cards in one of `statuses` expiring on or before `expiringOnOrBefore` (YYYY-MM-DD), creation order — the expiry tick's working set. */
+  byStatuses(statuses: CardStatus[], expiringOnOrBefore: string): Card[] {
+    return (this.db
+      .prepare(`SELECT * FROM cards WHERE status IN (${statuses.map(() => '?').join(',')}) AND expiry_date <= ? ORDER BY seq ASC`)
+      .all(...statuses, expiringOnOrBefore) as Row[]).map(fromRow)
   }
 
   // ---------------------------------------------------------------- wallets
