@@ -251,7 +251,7 @@ expect(await status()).toBe('COMPLETE')
 
 Rules of thumb:
 
-- In this mode do not call `POST /_admin/flush` while an effect is pending: it waits in real time and answers `500` after 10 s. Use `/_admin/notifications/flush` after moving the clock.
+- In this mode `POST /_admin/flush` does not run a pending effect: it answers at once with `{ "status": "idle", "deferred": n }`, `n` counting the steps still pending. Move the clock, then use `/_admin/notifications/flush`.
 - Tokens live 3600 s on the virtual clock: fetch a new one after moving it by an hour or more.
 - `{ "set": "<ISO date-time>" }` jumps to an instant and keeps ticking; `{ "freeze": "<ISO date-time>" }` pins the clock so timestamps in responses and webhooks are predictable; `{ "reset": true }` (or `/_admin/reset`) returns to real time.
 - Time-driven jobs run whenever the clock moves and on every API request. For example a card issued in September 2026 expires on 2030-09-30: `{ "set": "2030-09-01T00:00:00Z" }` produces a `REMINDER` notification (`reminderType: CARD_EXPIRY_MONTH_REMINDER`), and `{ "set": "2030-10-01T00:00:00Z" }` turns the card `EXPIRED` (`CARD_STATUS_CHANGE`, `actionOwner: PLATFORM`). Scheduled payments created with `POST /_admin/scheduled-payments` run on their dates the same way, as do the PayID and PayTo timers.

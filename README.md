@@ -5,7 +5,7 @@
 
 **Full-fidelity operations: 144 / 144 (100%)**  `████████████████████`
 
-All 169 operations of the spec are routed and schema-validated; the 25 stub-only operations answer with deterministic spec-shaped data. Test files: 16. Updated 2026-09-24 at `7d25631`.
+All 169 operations of the spec are routed and schema-validated; the 25 stub-only operations answer with deterministic spec-shaped data. Test files: 16. Updated 2026-09-24 at `1780416`.
 
 | Section | Implemented | Progress | Status |
 |---|---|---|---|
@@ -169,7 +169,7 @@ Every such effect is also due on the **virtual clock**. Start the server with a 
 curl -s -X POST localhost:8080/_admin/clock -H 'content-type: application/json' -d '{ "advanceMs": 3600000 }'
 ```
 
-In that mode do not call `/_admin/flush` while an effect is pending (it waits in real time and gives up with a 500 after 10 s); wait for the webhook instead. Time-driven jobs run whenever the clock moves and on every API request: card expiry and its reminders, scheduled payments, PayID timers, PayTo action expiry, due payments and validity ends. Remember that tokens expire on the same clock.
+In that mode `/_admin/flush` does not run the pending effects: it answers at once with `{ "status": "idle", "deferred": n }`, counting the steps it left pending. Move the clock first, then call `/_admin/notifications/flush` (or wait for the webhook). Time-driven jobs run whenever the clock moves and on every API request: card expiry and its reminders, scheduled payments, PayID timers, PayTo action expiry, due payments and validity ends. Remember that tokens expire on the same clock.
 
 ## Stub-only sections
 
