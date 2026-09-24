@@ -5,7 +5,7 @@
 
 **Full-fidelity operations: 144 / 144 (100%)**  `████████████████████`
 
-All 169 operations of the spec are routed and schema-validated; the 25 stub-only operations answer with deterministic spec-shaped data. Test files: 16. Updated 2026-09-24 at `0656d4d`.
+All 169 operations of the spec are routed and schema-validated; the 25 stub-only operations answer with deterministic spec-shaped data. Test files: 16. Updated 2026-09-24 at `3e05eb1`.
 
 | Section | Implemented | Progress | Status |
 |---|---|---|---|
