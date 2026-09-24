@@ -246,12 +246,12 @@ export class CardsService {
   }
 
   /** @throws 404 unknown account; 422 ACCOUNT_BLOCKED / ACCOUNT_CLOSED; 422 PERMISSION_DENIED when the customer does not hold it */
-  private requireOpenAccountHeldBy(accountId: string, customerHayId: string): void {
+  private requireOpenAccountHeldBy(accountId: string, customerHayId: string, action = 'created'): void {
     const accounts = this.ctx.services.accounts
     const a = accounts.get(accountId)
-    if (a.status === 'LOCKED') throw unprocessable(`ACCOUNT_BLOCKED: Card cannot be created for account ${accountId} as its status is currently LOCKED`)
-    if (a.status === 'CLOSED') throw unprocessable(`ACCOUNT_CLOSED: Card cannot be created for account ${accountId} as its status is currently CLOSED`)
-    if (!OPEN_ACCOUNT_STATUSES.has(a.status)) throw unprocessable(`PERMISSION_DENIED: Card cannot be created for account ${accountId} as its status is currently ${a.status}`)
+    if (a.status === 'LOCKED') throw unprocessable(`ACCOUNT_BLOCKED: Card cannot be ${action} for account ${accountId} as its status is currently LOCKED`)
+    if (a.status === 'CLOSED') throw unprocessable(`ACCOUNT_CLOSED: Card cannot be ${action} for account ${accountId} as its status is currently CLOSED`)
+    if (!OPEN_ACCOUNT_STATUSES.has(a.status)) throw unprocessable(`PERMISSION_DENIED: Card cannot be ${action} for account ${accountId} as its status is currently ${a.status}`)
     if (!accounts.holderCustomerIds(a).includes(customerHayId)) {
       throw unprocessable(`PERMISSION_DENIED: Customer ${customerHayId} does not hold account ${accountId}`)
     }
@@ -260,14 +260,21 @@ export class CardsService {
   // ---------------------------------------------------------------- status machine
 
   /**
-   * activateCard: AWAITING_ACTIVATION -> ACTIVE (422 INVALID_CARD_STATUS otherwise). Activating a
-   * renewal card retires the card it renewed (INACTIVE, voided).
+   * activateCard: AWAITING_ACTIVATION -> ACTIVE (422 INVALID_CARD_STATUS otherwise). The same cardholder /
+   * account gate as issuance (00-open-questions S7): customer ACTIVE (422 PERMISSION_DENIED), account open
+   * (422 ACCOUNT_BLOCKED / ACCOUNT_CLOSED). Activating a renewal card retires the card it renewed
+   * (INACTIVE, voided).
    */
   activate(id: string, opts: { actionOwner?: ActionOwner } = {}): Card {
     const actionOwner = opts.actionOwner ?? 'CLIENT'
     return this.ctx.db.transaction(() => {
       const c = this.get(id)
       if (c.status !== 'AWAITING_ACTIVATION') throw this.invalidStatus(c, 'activated')
+      const holder = this.ctx.services.customers.get(c.customerId)
+      if (holder.status !== 'ACTIVE') {
+        throw unprocessable(`PERMISSION_DENIED: Card cannot be activated for customer with id ${c.customerId} as their status is currently ${holder.status}`)
+      }
+      this.requireOpenAccountHeldBy(c.accountId, c.customerId, 'activated')
       this.transition(c, 'ACTIVE', { actionOwner })
       const old = this.repo.renewedInto(c.id)
       if (old && !TERMINAL.has(old.status)) {

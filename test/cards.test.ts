@@ -273,6 +273,19 @@ describe('activateCard', () => {
     expectError(await act(card.cardHayId!, 'activate'), 422, /^INVALID_CARD_STATUS: Card .* cannot be activated from status ACTIVE/)
     expectError(await act(UNKNOWN_ID, 'activate'), 404, /^NOT_FOUND: Card/)
   })
+
+  it('applies the issuance gate: a BLOCKED cardholder or a LOCKED account cannot activate (422, card unchanged)', async () => {
+    const { customer, account, card } = await setup()
+    const id = card.cardHayId!
+    expect((await app.inject({ method: 'POST', url: `/v0/customers/${customer}/block`, payload: { note: 'x' } })).statusCode).toBe(200)
+    expectError(await act(id, 'activate'), 422, /^PERMISSION_DENIED: Card cannot be activated for customer with id .* BLOCKED/)
+    expect((await app.inject({ method: 'POST', url: `/v0/customers/${customer}/unblock`, payload: { note: 'x' } })).statusCode).toBe(200)
+    expect((await app.inject({ method: 'POST', url: `/v0/accounts/${account}/block`, payload: { note: 'x', accountBlockStyle: 'ACCOUNT_ONLY' } })).statusCode).toBe(200)
+    expectError(await act(id, 'activate'), 422, /^ACCOUNT_BLOCKED: Card cannot be activated for account/)
+    expect(await statuses(id)).toEqual(['AWAITING_ACTIVATION'])
+    expect((await app.inject({ method: 'POST', url: `/v0/accounts/${account}/unblock`, payload: { note: 'x' } })).statusCode).toBe(200)
+    expect((await act(id, 'activate')).statusCode).toBe(200)
+  })
 })
 
 describe('blockCard / unblockCard', () => {

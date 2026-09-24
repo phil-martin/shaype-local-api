@@ -12,8 +12,8 @@
  * - createHayCard also requires the cardholder to hold the account (personal holder or group member):
  *   422 PERMISSION_DENIED otherwise; LOCKED / CLOSED accounts are 422 ACCOUNT_BLOCKED / ACCOUNT_CLOSED. The
  *   create pin must be 4–12 digits (400); nameOnCard keeps the case it was given (default: "first last"
- *   under 23 characters, else "F last", cut at 23 characters). Re-issue and renew apply the same customer /
- *   account gate.
+ *   under 23 characters, else "F last", cut at 23 characters). Re-issue, renew and activate apply the same
+ *   customer / account gate (00-open-questions S7).
  * - Same-state calls are idempotent no-ops with no webhook (block on BLOCKED, cancel on INACTIVE, PIN /
  *   CVV unblock when not blocked); illegal transitions are 422 INVALID_CARD_STATUS. unblockCard restores
  *   the status held before the block (ACTIVE for the documented case, AWAITING_ACTIVATION for a card
