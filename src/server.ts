@@ -28,6 +28,9 @@ export async function buildServer(overrides: Partial<Config> = {}, deps: { fetch
   const config: Config = { ...defaultConfig, ...overrides }
   const app = Fastify({
     logger: { level: config.logLevel },
+    // PayID path values are free text (EMAIL up to 256 chars, ORGANISATION names); Fastify's 100-char
+    // default answers a raw 414 that bypasses the ErrorResponse envelope, so the domain can 422 instead.
+    maxParamLength: 512,
     ajv: {
       customOptions: {
         coerceTypes: 'array',
@@ -51,6 +54,17 @@ export async function buildServer(overrides: Partial<Config> = {}, deps: { fetch
 
   for (const s of requestComponents) app.addSchema(s)
   for (const s of responseComponents) app.addSchema(s)
+
+  // Most HTTP clients send `Content-Type: application/json` on every POST, body or not. Fastify's default
+  // parser answers an empty body with FST_ERR_CTP_EMPTY_JSON_BODY (400); here it is the same as no body at
+  // all, so the optional-body ops (bodyRequired: false, e.g. createCase) accept it and the required-body
+  // ops fail schema validation ("body must be object") as they do without the header.
+  const parseJson = app.getDefaultJsonParser('error', 'error')
+  app.removeContentTypeParser('application/json')
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body: string, done) => {
+    if (body.length === 0) return done(null, undefined)
+    parseJson(req, body, done)
+  })
 
   app.setErrorHandler((err, req, reply) => {
     if (err instanceof ApiError) {

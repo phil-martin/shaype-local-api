@@ -3,27 +3,27 @@
 <!-- progress:start -->
 ## Implementation progress
 
-**Full-fidelity operations: 45 / 143 (31%)**  `██████░░░░░░░░░░░░░░`
+**Full-fidelity operations: 108 / 143 (76%)**  `███████████████░░░░░`
 
-All 169 operations of the spec are routed and schema-validated; the 26 stub-only operations answer with deterministic spec-shaped data. Test files: 7. Updated 2026-09-24 at `3e01157`.
+All 169 operations of the spec are routed and schema-validated; the 26 stub-only operations answer with deterministic spec-shaped data. Test files: 13. Updated 2026-09-24 at `5a17f06`.
 
 | Section | Implemented | Progress | Status |
 |---|---|---|---|
 | Accounts API | 24 / 24 | `████████████████████` 100% | ✅ complete |
-| BPAY API | 0 / 6 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
-| Cards API | 0 / 19 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
+| BPAY API | 6 / 6 | `████████████████████` 100% | ✅ complete |
+| Cards API | 19 / 19 | `████████████████████` 100% | ✅ complete |
 | Customers API | 11 / 11 | `████████████████████` 100% | ✅ complete |
-| Direct Debits API | 0 / 6 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
-| Direct Entry API | 0 / 1 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
-| Groups API | 0 / 6 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
+| Direct Debits API | 6 / 6 | `████████████████████` 100% | ✅ complete |
+| Direct Entry API | 1 / 1 | `████████████████████` 100% | ✅ complete |
+| Groups API | 6 / 6 | `████████████████████` 100% | ✅ complete |
 | Holds API | 1 / 1 | `████████████████████` 100% | ✅ complete |
-| KYC API | 0 / 4 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
-| NPP API | 0 / 1 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
-| PayID API | 0 / 8 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
+| KYC API | 4 / 4 | `████████████████████` 100% | ✅ complete |
+| NPP API | 1 / 1 | `████████████████████` 100% | ✅ complete |
+| PayID API | 8 / 8 | `████████████████████` 100% | ✅ complete |
 | PayTo API | 0 / 22 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
 | Products API | 1 / 1 | `████████████████████` 100% | ✅ complete |
-| Scheduled Payments API | 0 / 3 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
-| Stacks API | 0 / 9 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
+| Scheduled Payments API | 3 / 3 | `████████████████████` 100% | ✅ complete |
+| Stacks API | 9 / 9 | `████████████████████` 100% | ✅ complete |
 | Transactions API | 8 / 8 | `████████████████████` 100% | ✅ complete |
 | Utilities API | 0 / 13 | `░░░░░░░░░░░░░░░░░░░░` 0% | ⬜ not started |
 | Click to Pay API | stub-only | `████████████████████` 100% | ✅ stub (by design) |
