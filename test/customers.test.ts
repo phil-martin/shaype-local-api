@@ -251,6 +251,17 @@ describe('onboarding (asynchronous outcome)', () => {
     expect((await payloadsFor(c.customerHayId!)).map((e) => e.type)).toEqual(['ONBOARDING_PASSED', 'CUSTOMER_STATUS_UPDATED'])
   })
 
+  it('onlySanctionsCheck (Reduced KYC) fails +referred / +rejected at SANCTIONS_SCAN, the only stage it runs', async () => {
+    for (const [emailTag, status] of [['referred', 'REFERRED'], ['rejected', 'REJECTED']] as const) {
+      const created = await create({ emailTag, onlySanctionsCheck: true })
+      await flush()
+      expect((await get(created.customerHayId!)).status).toBe(status)
+      const events = await payloadsFor(created.customerHayId!)
+      expect(events.map((e) => e.type)).toEqual(['ONBOARDING_FAILED', 'CUSTOMER_STATUS_UPDATED'])
+      expect(events[0].onboardingFailedEvent, emailTag).toEqual({ state: 'SANCTIONS_SCAN', submissionFailure: false })
+    }
+  })
+
   it('+pending and skipKyc leave the customer PENDING_APPROVAL for the client to activate', async () => {
     const pending = await create({ emailTag: 'pending' })
     const skip = await create({ skipKyc: true })

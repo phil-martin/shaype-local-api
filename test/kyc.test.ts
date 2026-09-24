@@ -359,10 +359,19 @@ describe('approve*Check on a REFERRED customer', () => {
     expect(events[2].customerStatusUpdatedEvent).toEqual({ customerStatus: 'ACTIVE' })
   })
 
-  it('reduced KYC (onlySanctionsCheck) referrals clear through the stage the platform reported', async () => {
+  it('reduced KYC (onlySanctionsCheck): only the sanctions check exists — document / AML approvals 422, sanction activates', async () => {
     const c = await createCustomer({ emailTag: 'referred', onlySanctionsCheck: true })
     expect(c.status).toBe('REFERRED')
-    expect((await approve(c.customerHayId!, 'aml')).statusCode).toBe(200)
+    expect(built.ctx.services.kyc.stages(c.customerHayId!).map((s) => [s.stage, s.result])).toEqual([['SANCTIONS_SCAN', 'FAILED']])
+    for (const check of ['aml', 'document'] as const) {
+      const res = await approve(c.customerHayId!, check, { comments: 'n/a' })
+      expect(res.statusCode, check).toBe(422)
+      expect(res.json()).toMatchObject({ status: '422', message: `INVALID_STATE: Customer ${c.customerHayId} is onboarded under Reduced KYC (onlySanctionsCheck); only the sanctions check can be approved`, traceId: expect.any(String) })
+    }
+    expect(built.ctx.services.kyc.stages(c.customerHayId!).map((s) => s.stage)).toEqual(['SANCTIONS_SCAN'])
+    expect((await getCustomer(c.customerHayId!)).status).toBe('REFERRED')
+    const res = await approve(c.customerHayId!, 'sanction', { comments: 'Not the listed person' })
+    expect(res.statusCode, res.body).toBe(200)
     expect((await getCustomer(c.customerHayId!)).status).toBe('ACTIVE')
   })
 

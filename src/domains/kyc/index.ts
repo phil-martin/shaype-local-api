@@ -26,8 +26,9 @@
  *   stage that never failed records the approval and is otherwise a no-op; repeating an approval keeps the
  *   first comment. The customer activates when no FAILED stage remains — so a customer the client referred
  *   with no failure on record activates on the first approval, and a DUPLICATE_CHECK failure (no endpoint)
- *   can never be cleared here. Reduced KYC (onlySanctionsCheck) is not enforced: the stage the platform
- *   reported is the one that must be approved. Webhooks on activation: ONBOARDING_PASSED then
+ *   can never be cleared here. Reduced KYC (onlySanctionsCheck) runs Sanctions Screening only: the
+ *   platform fails SANCTIONS_SCAN (customers.completeOnboarding), and approveDocumentCheck /
+ *   approveAmlKycCheck on such a customer are 422 INVALID_STATE (00-status C.1). Webhooks on activation: ONBOARDING_PASSED then
  *   CUSTOMER_STATUS_UPDATED {ACTIVE}, both actionOwner CLIENT; no webhook while stages remain outstanding.
  * - ConfirmationResponse.message = "<Operation summary> successful." (critic E8 template).
  */

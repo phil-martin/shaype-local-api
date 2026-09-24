@@ -119,7 +119,8 @@ export class KycService {
 
   /**
    * approveAmlKycCheck / approveDocumentCheck / approveSanctionCheck. Customer must exist (404) and be
-   * REFERRED (422 INVALID_STATE). Marks the stage APPROVED with the comment (an already approved stage is
+   * REFERRED (422 INVALID_STATE); under Reduced KYC (onlySanctionsCheck) only SANCTIONS_SCAN exists, so the
+   * other two stages are 422 INVALID_STATE (docs/map/00-status.md C.1). Marks the stage APPROVED with the comment (an already approved stage is
    * a no-op keeping the first comment); when no failed stage remains the customer becomes ACTIVE with
    * ONBOARDING_PASSED then CUSTOMER_STATUS_UPDATED, both actionOwner CLIENT.
    */
@@ -129,6 +130,7 @@ export class KycService {
       const customers = this.ctx.services.customers
       let customer = customers.get(customerId)
       if (customer.status !== 'REFERRED') throw unprocessable(`INVALID_STATE: Customer ${customerId} is not REFERRED (status is ${customer.status}); onboarding checks can only be approved for a REFERRED customer`)
+      if (customer.onlySanctionsCheck && stage !== 'SANCTIONS_SCAN') throw unprocessable(`INVALID_STATE: Customer ${customerId} is onboarded under Reduced KYC (onlySanctionsCheck); only the sanctions check can be approved`)
       let record = this.repo.stage(customerId, stage)
       if (record?.result !== 'APPROVED') {
         record = compact({ ...(record ?? { customerId, stage, submissionFailure: false }), result: 'APPROVED' as const, comments, approvedAt: isoUtc(this.ctx.clock.now()) })

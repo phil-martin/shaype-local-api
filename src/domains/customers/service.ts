@@ -136,16 +136,18 @@ export class CustomersService {
   /**
    * Platform onboarding outcome (spec §5.1 test steering): +referred -> REFERRED (ONBOARDING_FAILED
    * KYC_AML_SCAN), +rejected -> REJECTED (ONBOARDING_FAILED DOCUMENT_SCAN), otherwise ACTIVE
-   * (ONBOARDING_PASSED). Skipped when the client already moved the customer out of PENDING_APPROVAL.
+   * (ONBOARDING_PASSED). Reduced KYC (onlySanctionsCheck) runs Sanctions Screening only
+   * [docs:flexible-kyc-checks], so both failures name SANCTIONS_SCAN there. Skipped when the client
+   * already moved the customer out of PENDING_APPROVAL.
    */
   completeOnboarding(id: string): void {
     const c = this.repo.byId(id)
     if (!c || c.status !== 'PENDING_APPROVAL') return
     const tags = emailTags(c.email)
     if (tags.has('referred')) {
-      this.failOnboarding(c, 'REFERRED', 'KYC_AML_SCAN')
+      this.failOnboarding(c, 'REFERRED', c.onlySanctionsCheck ? 'SANCTIONS_SCAN' : 'KYC_AML_SCAN')
     } else if (tags.has('rejected')) {
-      this.failOnboarding(c, 'REJECTED', 'DOCUMENT_SCAN')
+      this.failOnboarding(c, 'REJECTED', c.onlySanctionsCheck ? 'SANCTIONS_SCAN' : 'DOCUMENT_SCAN')
     } else {
       this.ctx.events.emit('customer.onboardingPassed', { customer: structuredClone(c) })
       this.transition(c, 'ACTIVE', { actionOwner: 'PLATFORM' })
