@@ -327,13 +327,39 @@ describe('updatePayIdStatus (NPP state model)', () => {
 
   it('same status is an idempotent no-op (200, nothing changes); DEREGISTERED -> DEREGISTERED is refused', async () => {
     const payId = await payIdIn('DISABLED')
+    await mustSetStatus(payId, { payIdStatus: 'DISABLED' })
     const before = (await details(payId)).payIdDetails
     await setClock({ advanceMs: 1000 })
-    await mustSetStatus(payId, { payIdStatus: 'DISABLED', reason: 'FROD' })
+    await mustSetStatus(payId, { payIdStatus: 'DISABLED' })
+    await mustSetStatus(payId, { payIdStatus: 'DISABLED', reason: null })
     expect((await details(payId)).payIdDetails).toEqual(before)
     await setClock({ reset: true })
     const gone = await payIdIn('DEREGISTERED')
     expectError(await setStatus(gone, { payIdStatus: 'DEREGISTERED' }), 422, /^INVALID_STATE/)
+  })
+
+  it('same status with a different reason replaces the reason and bumps lastUpdatedDateTimeUtc, without a status change event', async () => {
+    const payId = await payIdIn('DISABLED')
+    await mustSetStatus(payId, { payIdStatus: 'DISABLED', reason: 'FROD' })
+    const before = (await details(payId)).payIdDetails!
+    expect(before.reason).toBe('FROD')
+    const events: unknown[] = []
+    const off = built.ctx.events.on('payid.statusChanged', (e) => events.push(e))
+    try {
+      await setClock({ advanceMs: 1000 })
+      await mustSetStatus(payId, { payIdStatus: 'DISABLED', reason: 'LEGL' })
+      const after = (await details(payId)).payIdDetails!
+      expect(after).toMatchObject({ status: 'DISABLED', reason: 'LEGL' })
+      expect(after.lastUpdatedDateTimeUtc! > before.lastUpdatedDateTimeUtc!).toBe(true)
+      // the same reason again is a no-op
+      await setClock({ advanceMs: 1000 })
+      await mustSetStatus(payId, { payIdStatus: 'DISABLED', reason: 'LEGL' })
+      expect((await details(payId)).payIdDetails).toEqual(after)
+      expect(events).toEqual([])
+    } finally {
+      off()
+      await setClock({ reset: true })
+    }
   })
 
   it('reason: any code with any status; null or omitted clears it', async () => {

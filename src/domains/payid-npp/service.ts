@@ -222,15 +222,24 @@ export class PayIdService {
 
   /**
    * updatePayIdStatus per the NPP state model: ACTIVE -> DISABLED | PORTABLE | DEREGISTERED,
-   * DISABLED -> ACTIVE | DEREGISTERED, PORTABLE -> ACTIVE | DISABLED | DEREGISTERED. Same status -> no-op.
+   * DISABLED -> ACTIVE | DEREGISTERED, PORTABLE -> ACTIVE | DISABLED | DEREGISTERED. Same status -> no-op,
+   * except that a non-null `reason` different from the stored one replaces it (no status change event).
    * Any other move -> 422 INVALID_STATUS_TRANSITION; a DEREGISTERED PayID -> 422 INVALID_STATE (it must be
-   * registered again). `reason` (any code with any status) replaces the stored reason; null / omitted clears it.
+   * registered again). On a transition `reason` (any code with any status) replaces the stored reason;
+   * null / omitted clears it.
    * @throws 404 unknown value
    */
   updateStatus(rawValue: string, input: UpdateStatusInput): PayId {
     const p = this.requireLive(rawValue, input.payIdType)
     const to = input.payIdStatus
-    if (p.status === to) return p
+    if (p.status === to) {
+      if (input.reason && input.reason !== p.reason) {
+        p.reason = input.reason
+        p.updatedAt = this.now()
+        this.repo.save(p)
+      }
+      return p
+    }
     if (!TRANSITIONS[p.status].includes(to)) throw unprocessable(`INVALID_STATUS_TRANSITION: PayID ${p.value} cannot move from ${p.status} to ${to}`)
     const now = this.now()
     if (to === 'DEREGISTERED') {
