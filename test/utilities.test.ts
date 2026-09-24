@@ -318,12 +318,36 @@ describe('generateAuthHold (POST /v0/utils/generate-auth-hold)', () => {
     expect(await balances(locked.account.accountHayId!)).toEqual({ total: 100, held: 0, available: 100 })
   })
 
-  it('a card whose account is CLOSED is 422 ACCOUNT_CLOSED (no webhook)', async () => {
+  it('a card whose account is CLOSED: 200 and the refused TRANSACTION webhook with REFUSED_ACCOUNT_CLOSED (spec §5.2), for every card mock', async () => {
     const { account: a, card } = await setup(0)
     await closeAccount(a.accountHayId!)
     await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
-    expectError(await post('/v0/utils/generate-auth-hold', { amount: -1, cardToken: card.cardToken }), 422, /^ACCOUNT_CLOSED: /)
-    expect(await txs(a.accountHayId!)).toEqual([])
+    for (const url of ['/v0/utils/generate-auth-hold', '/v0/utils/generate-card-transaction', '/v0/utils/generate-refund-transaction', '/v0/utils/generate-atm-transaction']) {
+      const res = await post(url, { amount: -1, cardToken: card.cardToken })
+      expect(res.statusCode, `${url} ${res.body}`).toBe(200)
+    }
+    expect((await post('/v0/utils/generate-update-auth-hold', { amount: -1, updateHoldAmount: -1, cardToken: card.cardToken })).statusCode).toBe(200)
+    const events = (await txs(a.accountHayId!)).map((p) => p.transactionEvent)
+    expect(events.map((e) => [e.transactionType, e.outcome, e.isPending, e.currencyAmount.amount, e.isAtmTransaction])).toEqual([
+      ['CARD_TRANSACTION', 'REFUSED_ACCOUNT_CLOSED', false, -1, false],
+      ['CARD_TRANSACTION', 'REFUSED_ACCOUNT_CLOSED', false, -1, false],
+      ['CARD_TRANSACTION_REFUND', 'REFUSED_ACCOUNT_CLOSED', false, 1, false],
+      ['CARD_TRANSACTION', 'REFUSED_ACCOUNT_CLOSED', false, -1, true],
+      ['CARD_TRANSACTION', 'REFUSED_ACCOUNT_CLOSED', false, -1, false],
+    ])
+    for (const e of events) expect(e.cardHayId).toBe(card.cardHayId)
+    expect(await balances(a.accountHayId!)).toEqual({ total: 0, held: 0, available: 0 })
+  })
+
+  it('a CLOSED account of a customer who stays ACTIVE (another account open) is refused the same way', async () => {
+    const { customer, account: a, card } = await setup(0)
+    await newAccount({ customer })
+    await closeAccount(a.accountHayId!)
+    expect((await get(`/v0/customers/${customer}`)).json().status).toBe('ACTIVE')
+    await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
+    expect((await post('/v0/utils/generate-auth-hold', { amount: -5, cardToken: card.cardToken })).statusCode).toBe(200)
+    const [p] = await txs(a.accountHayId!)
+    expect(p).toMatchObject({ customerHayId: customer, transactionEvent: { transactionType: 'CARD_TRANSACTION', outcome: 'REFUSED_ACCOUNT_CLOSED', isPending: false, currencyAmount: { amount: -5 } } })
   })
 
   it('a non-AUD currency carries originalCurrencyAmount and the _INTERNATIONAL channel (1:1, no FX rates locally)', async () => {
@@ -628,7 +652,7 @@ describe('generateInboundNppTransaction (POST /v0/utils/generate-npp-inbound)', 
     expectError(await post('/v0/utils/generate-npp-inbound', { ...body, amount: 6 }), 422, /^IDEMPOTENCY_KEY_REUSED/)
   })
 
-  it('an unknown or non-local receiver is 404, a CLOSED one 422; the unanchored spec patterns are full-matched (400)', async () => {
+  it('an unknown or non-local receiver is 404; the unanchored spec patterns are full-matched (400)', async () => {
     const { account: a } = await newAccount()
     expectError(await post('/v0/utils/generate-npp-inbound', nppBody(a, { receiverAccountNumber: '99999999' })), 404, /^NOT_FOUND: /)
     expectError(await post('/v0/utils/generate-npp-inbound', nppBody(a, { receiverBsb: '062000' })), 404, /^NOT_FOUND: /)
@@ -636,8 +660,16 @@ describe('generateInboundNppTransaction (POST /v0/utils/generate-npp-inbound)', 
     expectError(await post('/v0/utils/generate-npp-inbound', nppBody(a, { senderBsb: '3022271' })), 400, /^BAD_REQUEST: senderBsb/)
     expectError(await post('/v0/utils/generate-npp-inbound', nppBody(a, { amount: 0 })), 400, /^BAD_REQUEST/)
     expectError(await post('/v0/utils/generate-npp-inbound', nppBody(a, { amount: 1.005 })), 400, /^BAD_REQUEST: amount/)
+  })
+
+  it('a CLOSED receiver refuses the credit (spec §5.2): 200 with the refused INTERBANK_TRANSFER_IN, REFUSED_ACCOUNT_CLOSED', async () => {
+    const { account: a } = await newAccount()
     await closeAccount(a.accountHayId!)
-    expectError(await post('/v0/utils/generate-npp-inbound', nppBody(a)), 422, /^ACCOUNT_CLOSED: /)
+    await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
+    expect((await post('/v0/utils/generate-npp-inbound', nppBody(a, { amount: 7 }))).statusCode).toBe(200)
+    const [p] = await txs(a.accountHayId!)
+    expect(p.transactionEvent).toMatchObject({ transactionType: 'INTERBANK_TRANSFER_IN', outcome: 'REFUSED_ACCOUNT_CLOSED', isPending: false, currencyAmount: { amount: 7 }, counterpartName: 'Andy' })
+    expect(await balances(a.accountHayId!)).toEqual({ total: 0, held: 0, available: 0 })
   })
 
   it('a LOCKED receiver or a breached limit refuses the credit: 200 with the refused TRANSACTION webhook, balances unchanged', async () => {
@@ -740,6 +772,12 @@ describe('generateInboundNppTransactionV2 (POST /v0/utils/generate-inbound-npp-t
     const zero = rapBody(a)
     zero.paymentInformation.instructedAmount = '0'
     expectError(await post('/v0/utils/generate-inbound-npp-transaction-v2', zero), 400, /^BAD_REQUEST: paymentInformation.instructedAmount/)
+    // a CLOSED creditor refuses the credit: 200 + the refused INTERBANK_TRANSFER_IN (spec §5.2)
+    await closeAccount(a.accountHayId!)
+    await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
+    expect((await post('/v0/utils/generate-inbound-npp-transaction-v2', rapBody(a))).statusCode).toBe(200)
+    const [p] = await txs(a.accountHayId!)
+    expect(p.transactionEvent).toMatchObject({ transactionType: 'INTERBANK_TRANSFER_IN', outcome: 'REFUSED_ACCOUNT_CLOSED', currencyAmount: { amount: 2 } })
   })
 })
 
@@ -831,7 +869,7 @@ describe('generateInboundDeTransaction (POST /v0/utils/generate-de-inbound)', ()
     expect(await balances(a.accountHayId!)).toEqual({ total: 20, held: 0, available: 20 })
   })
 
-  it('an optional idempotencyKey replays; an unknown recipient is 404, a CLOSED one 422; patterns are full-matched', async () => {
+  it('an optional idempotencyKey replays; an unknown recipient is 404, a CLOSED one is refused (200 + REFUSED_ACCOUNT_CLOSED); patterns are full-matched', async () => {
     const { account: a } = await newAccount()
     const body = deBody(a, { idempotencyKey: randomUUID(), amount: 3 })
     await post('/v0/utils/generate-de-inbound', body)
@@ -842,7 +880,13 @@ describe('generateInboundDeTransaction (POST /v0/utils/generate-de-inbound)', ()
     expectError(await post('/v0/utils/generate-de-inbound', deBody(a, { amount: 1.999 })), 400, /^BAD_REQUEST: amount/)
     const { account: empty } = await newAccount()
     await closeAccount(empty.accountHayId!)
-    expectError(await post('/v0/utils/generate-de-inbound', deBody(empty)), 422, /^ACCOUNT_CLOSED: /)
+    await app.inject({ method: 'DELETE', url: '/_admin/notifications' })
+    expect((await post('/v0/utils/generate-de-inbound', deBody(empty))).statusCode).toBe(200)
+    expect((await post('/v0/utils/generate-de-inbound', deBody(empty, { transactionType: 'DEBIT', amount: 2 }))).statusCode).toBe(200)
+    const events = (await txs(empty.accountHayId!)).map((p) => p.transactionEvent)
+    expect(events.map((e) => [e.transactionType, e.outcome, e.currencyAmount.amount])).toEqual([
+      ['INTERBANK_TRANSFER_IN', 'REFUSED_ACCOUNT_CLOSED', 11.98], ['DIRECT_DEBIT_TRANSFER', 'REFUSED_ACCOUNT_CLOSED', -2],
+    ])
   })
 })
 

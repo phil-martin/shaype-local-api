@@ -332,10 +332,10 @@ export class UtilitiesService {
     this.ledger.holds.settle(holdId, undefined, { actionOwner: 'PLATFORM' })
   }
 
-  /** The card (by token or id; 404) and its account (422 ACCOUNT_CLOSED when closed). */
+  /** The card (by token or id; 404) and its account, whatever its status (the ledger's account gate refuses a LOCKED / CLOSED one). */
   private cardAndAccount(ref: string): { card: Card; account: Account } {
     const card = this.cards.resolve(ref)
-    return { card, account: this.requireNotClosed(this.accounts.get(card.accountId)) }
+    return { card, account: this.accounts.get(card.accountId) }
   }
 
   /** originalCurrencyAmount when the transaction currency (default AUD) is not the account's: 1:1, no FX rates locally. */
@@ -552,11 +552,14 @@ export class UtilitiesService {
 
   // ---------------------------------------------------------------- helpers
 
-  /** A local account by BSB + account number (an open one wins over a closed one with the same number). 404 when none, 422 when CLOSED. */
+  /**
+   * A local account by BSB + account number (an open one wins over a closed one with the same number). 404
+   * when none; a LOCKED / CLOSED one is returned and refused by the ledger's account gate (spec §5.2).
+   */
   private localAccount(bsb: string, accountNumber: string, party: string): Account {
     const account = bsb === LOCAL_BSB ? this.findLocal(accountNumber) : undefined
     if (!account) throw notFound(`NOT_FOUND: ${party} account BSB ${bsb} account number ${accountNumber} not found`)
-    return this.requireNotClosed(account)
+    return account
   }
 
   /** A local account named by a BBAN account identification (BSB + account number). */
@@ -575,15 +578,6 @@ export class UtilitiesService {
     const hits = this.accounts.search(accountNumber)
     const hit = hits.find((a) => a.status !== 'CLOSED') ?? hits[0]
     return hit?.accountHayId ? this.accounts.find(hit.accountHayId) : undefined
-  }
-
-  /**
-   * A mock addressed to a CLOSED account is a 422: the account is gone and its customer is INACTIVE, whose
-   * notifications Shaype stops (docs:account-closure), so there is no one to tell about a refusal.
-   */
-  private requireNotClosed(account: Account): Account {
-    if (account.status === 'CLOSED') throw unprocessable(`ACCOUNT_CLOSED: Account ${account.id} is CLOSED`)
-    return account
   }
 
   /** Delay of a deferred mock step: the given seconds, else config.asyncDelayMs. */

@@ -11,10 +11,11 @@
  *
  * Decisions beyond the spec (all covered in test/utilities.test.ts):
  * - Errors: an unknown card (cardToken or cardId), account (BSB + account number / BBAN), mandate or
- *   outbound payment to return is 404 NOT_FOUND (spec §4, like every domain); a mock addressed to a CLOSED
- *   account (directly or through its card) is 422 ACCOUNT_CLOSED — the customer is INACTIVE and Shaype stops
- *   notifying it (docs:account-closure). Every other business refusal is HTTP 200 with the refused
- *   TRANSACTION webhook (docs: "the platform will decline the simulated authorisation"; E3). Schema
+ *   outbound payment to return is 404 NOT_FOUND (spec §4, like every domain). Every business refusal is
+ *   HTTP 200 with the refused TRANSACTION webhook (docs: "the platform will decline the simulated
+ *   authorisation"; E3), including a mock addressed to a LOCKED / CLOSED account, directly or through its
+ *   card: REFUSED_ACCOUNT_BLOCKED / REFUSED_ACCOUNT_CLOSED from the ledger's account gate (spec §5.2), which
+ *   runs before the card-side checks. Schema
  *   violations are 400, including the docs-only declineReason PIN_BLOCKED (C17). The DE / NPP BSB and
  *   account-number patterns the spec leaves unanchored are full-matched (I7): 400.
  * - Success messages: the documented literals ("Receive A Payment Instruction generated.", "Receive A
