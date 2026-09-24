@@ -52,6 +52,23 @@ describe('scheduler', () => {
     await built.app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
   })
 
+  it('/_admin/flush waits for the work that falls due within its window (and what that schedules) and leaves later steps pending', async () => {
+    const ran: string[] = []
+    built.ctx.scheduler.later(() => { ran.push('soon'); built.ctx.scheduler.later(() => { ran.push('chained') }, 20) }, 20)
+    built.ctx.scheduler.later(() => { ran.push('much later') }, 60_000)
+    const started = Date.now()
+    const res = await built.app.inject({ method: 'POST', url: '/_admin/flush' })
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json()).toEqual({ status: 'idle', deferred: 1 })
+    expect(ran).toEqual(['soon', 'chained'])
+    expect(Date.now() - started).toBeLessThan(2_000)
+    // the pending step still runs once the virtual clock passes it
+    await built.app.inject({ method: 'POST', url: '/_admin/clock', payload: { advanceMs: 61_000 } })
+    expect(ran).toEqual(['soon', 'chained', 'much later'])
+    expect(built.ctx.scheduler.pending()).toBe(0)
+    await built.app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
+  })
+
   it('runs tick jobs on requests and on /_admin/flush', async () => {
     let ticks = 0
     built.ctx.scheduler.onTick(() => { ticks++ })

@@ -36,8 +36,9 @@
  * - Delays: settlementDelayInSeconds / updateHoldDelayInSeconds are honoured on the virtual clock
  *   (ctx.scheduler.later; POST /_admin/clock advanceMs fires them); an omitted delay is config.asyncDelayMs
  *   (spec §5.5). The settlement of the hold + update mock is due settlementDelayInSeconds after the update
- *   was due, so one clock jump past both runs both. Avoid /_admin/flush while a delayed step is pending (it
- *   waits for the real timer).
+ *   was due, so one clock jump past both runs both. POST /_admin/flush waits only for steps whose real timer
+ *   fires within ~9 s and reports the later ones as `deferred` (they stay pending until the clock passes
+ *   them or their real timer fires).
  * - Hold + update: three webhooks (C19): the hold, the update (increase: CARD_TRANSACTION pending with the
  *   cumulative amount; decrease: CARD_TRANSACTION_REFUND pending with the released amount), the settlement of
  *   the updated hold. updateHoldAmount 0 or a decrease larger than the hold is 400; a decrease equal to it is

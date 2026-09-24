@@ -34,11 +34,13 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext, extra
   })
 
   /** Wait for deferred work and webhook deliveries to settle (tests call this before asserting). */
+  // waits for the deferred work due within ~9 s (Scheduler.waitForIdle); `deferred` counts the later steps left pending
   app.post('/_admin/flush', async () => {
     await ctx.scheduler.tick()
     await ctx.scheduler.waitForIdle()
     await ctx.webhooks.waitForIdle()
-    return { status: 'idle' }
+    const deferred = ctx.scheduler.pending()
+    return deferred ? { status: 'idle', deferred } : { status: 'idle' }
   })
 
   app.get('/_admin/clock', async () => ({ now: isoUtc(ctx.clock.now()), frozen: ctx.clock.isFrozen }))

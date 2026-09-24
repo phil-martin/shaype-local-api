@@ -435,6 +435,22 @@ describe('generateCardTransaction (POST /v0/utils/generate-card-transaction)', (
     }
   })
 
+  it('/_admin/flush with a settlement still minutes away answers at once and leaves it pending', async () => {
+    const { account: a, card } = await setup()
+    const unfreeze = await freezeClock()
+    try {
+      await post('/v0/utils/generate-card-transaction', { amount: -6, cardToken: card.cardToken, settlementDelayInSeconds: 120 })
+      const res = await post('/_admin/flush')
+      expect(res.statusCode, res.body).toBe(200)
+      expect(res.json()).toMatchObject({ status: 'idle', deferred: 1 })
+      expect(await balances(a.accountHayId!)).toEqual({ total: 100, held: 6, available: 94 })
+      await clock({ advanceMs: 120_000 })
+      expect(await balances(a.accountHayId!)).toEqual({ total: 94, held: 0, available: 94 })
+    } finally {
+      await unfreeze()
+    }
+  })
+
   it('a declined authorisation is never settled; the delay must be 5..300 seconds', async () => {
     const { account: a, card } = await setup()
     await post('/v0/utils/generate-card-transaction', { amount: -2, cardToken: card.cardToken, declineReason: 'RESTRICTED_CARD' })

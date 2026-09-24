@@ -55,6 +55,9 @@ npm run dev -- --port 8080 --webhook-url http://localhost:3000
 - Each domain under `src/domains/` implements its operations against SQLite and emits domain events; the webhook dispatcher turns those into Shaype-shaped notifications and POSTs them to `<webhook-url>/api/hay/v0/communications/notification` (retrying on 401/403/429/5xx like the real platform).
 - Operations that are not implemented yet (or are stub-only by design: Perks, FX, Liquidity, Click to Pay, Tokens, MCCs) answer with deterministic, spec-shaped example data and an `x-shaype-local-stub` header.
 - `/_admin/*` gives tests control: reset state, move the virtual clock, list/clear/redeliver notifications, wait for async work to settle.
+  `POST /_admin/flush` waits for the deferred work due within about 9 seconds; steps further out (e.g. a
+  Utilities mock with `settlementDelayInSeconds: 120`) stay pending and are counted in its `deferred` field.
+  Run them with `POST /_admin/clock {"advanceMs": …}`.
 
 Design spec: `docs/superpowers/specs/2026-09-24-shaype-local-api-design.md`. Verified per-domain API maps: `docs/map/`.
 
