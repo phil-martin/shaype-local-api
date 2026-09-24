@@ -183,11 +183,11 @@ Mandates (initiator and payer sides) with the statuses and transitions in `docs/
 
 ## 6. Admin API (`/_admin`, no auth)
 
-`GET /health`, `GET /operations` (handled vs stubbed), `POST /reset`, `GET|POST /clock` (`{ set | freeze | advanceMs | reset }`), `GET /notifications?type&status&sinceSeq&limit`, `DELETE /notifications`, `GET /notifications/:id`, `POST /notifications/:id/redeliver`, `POST /notifications/flush` (await idle), `POST /scheduled-payments`.
+`GET /health`, `GET /operations` (handled vs stubbed), `POST /reset`, `GET|POST /clock` (`{ set | freeze | advanceMs | reset }`), `GET /notifications?type&status&sinceSeq&limit&order`, `DELETE /notifications`, `GET /notifications/:id`, `POST /notifications/:id/redeliver`, `POST /notifications/flush` (await idle), `POST /scheduled-payments`.
 
 ## 7. Testing
 
-- Contract: every operation routed; GET operations without required query answer their success status; response bodies of scenario tests validated against the `res:` schema by a test-only `onSend` hook.
+- Contract: every operation routed; GET operations without required query answer their success status; response bodies of scenario tests validated against the `res:` schema by test-only `preSerialization` (object bodies, before the serializer coerces them) and `onSend` (string bodies) hooks; undeclared statuses: `>= 400` against `ErrorResponse`, `2xx` refused.
 - Domain: Vitest per domain using `app.inject`, TDD, covering each transition table row and each refusal outcome.
 - Webhooks: payloads validated against `wh:NotificationDto` in tests; trigger matrix rows asserted.
 - Scenario: onboard → account → risk LOW → card → activate → mock purchase (hold, settlement) → refund → transfer → BPAY → close, asserting balances and the webhook sequence delivered to a test receiver.

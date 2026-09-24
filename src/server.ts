@@ -83,6 +83,11 @@ export async function buildServer(overrides: Partial<Config> = {}, deps: { fetch
     reply.code(404).send(errorBody(404, `NOT_FOUND: Route ${req.method}:${req.url.split('?')[0]} not found`))
   })
 
+  if (config.validateResponses) {
+    // Loaded only when asked for: Ajv is a test-time concern and stays off the default startup path.
+    const { installResponseValidation } = await import('./contract/validate-responses.js')
+    installResponseValidation(app)
+  }
   registerAuthHook(app, ctx, tokens)
   app.addHook('onRequest', async (req) => {
     if (req.url.startsWith('/_admin/')) return
@@ -98,7 +103,7 @@ export async function buildServer(overrides: Partial<Config> = {}, deps: { fetch
 
   app.addHook('onClose', async () => {
     scheduler.cancelAll()
-    webhooks.close()
+    await webhooks.close() // aborts the delivery in flight and waits for the loop to stop: it must not outlive the database
     db.close()
   })
   return { app, ctx, stubbed }

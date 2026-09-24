@@ -21,6 +21,7 @@
     "dev": "tsx src/cli.ts",
     "prebuild": "npm run gen",
     "build": "tsc -p tsconfig.build.json",
+    "postbuild": "node -e \"require('node:fs').cpSync('src/contract/generated', 'dist/contract/generated', { recursive: true, filter: (f) => !f.endsWith('.ts') })\"",
     "start": "node dist/cli.js",
     "pretest": "npm run gen",
     "test": "vitest run",
