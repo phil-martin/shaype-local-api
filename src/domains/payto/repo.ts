@@ -170,7 +170,12 @@ export interface PaymentInstruction {
   transactionId?: string
   creationDateTime: string
   updatedAt?: string
+  /** What searchPaymentsInstructions reports instead, set by a search stub naming this (non-STUB) instruction's id; never written by saveInstruction */
+  stub?: StubView
 }
+
+/** The fields of a search stub entry (PaymentInstructionSummary) laid over a real instruction. */
+export interface StubView { amountCents: Cents; status: InstructionStatus; reasonCode?: string; creationDateTime: string }
 
 export interface ScheduledPayment {
   notificationId: string
@@ -324,6 +329,14 @@ export class MandateRepo {
   /** Newest first (docs/map/00-open-questions.md G2: payment-instruction lists are newest first). */
   instructionsForMandate(mandateId: string): PaymentInstruction[] {
     return (this.db.prepare('SELECT * FROM mandate_instructions WHERE mandate_id = ? ORDER BY seq DESC').all(mandateId) as Row[]).map(instructionFromRow)
+  }
+
+  setStub(instructionId: string, stub: StubView): void {
+    this.db.prepare('UPDATE mandate_instructions SET stub = ? WHERE id = ?').run(JSON.stringify(stub), instructionId)
+  }
+
+  clearStubs(mandateId: string): void {
+    this.db.prepare('UPDATE mandate_instructions SET stub = NULL WHERE mandate_id = ? AND stub IS NOT NULL').run(mandateId)
   }
 
   deleteInstruction(id: string): void {
@@ -498,6 +511,8 @@ function instructionFromRow(r: Row): PaymentInstruction {
   if (r.reason_code != null) i.reasonCode = r.reason_code as string
   if (r.transaction_id != null) i.transactionId = r.transaction_id as string
   if (r.updated_at != null) i.updatedAt = r.updated_at as string
+  const stub = json.parse<StubView>(r.stub as string | null)
+  if (stub) i.stub = stub
   return i
 }
 

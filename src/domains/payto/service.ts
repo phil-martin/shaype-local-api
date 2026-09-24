@@ -23,7 +23,7 @@ import type { LedgerOutcome, PostInput } from '../transactions/service.js'
 import type {
   AccountAliasType, ActionDetails, ActionStatus, ActionType, AmendProposal, CxMandateStatus, Frequency, InstructionOrigin, InstructionStatus, Mandate,
   MandateAction, MandateRepo, MandateSide, MandateStatus, MmsInstructionStatus, Money, PartyDetails, PartyInformation, PartyRole, PaymentInformation,
-  PaymentInstruction, PaymentTerms, ScheduledPayment, StatusChange,
+  PaymentInstruction, PaymentTerms, ScheduledPayment, StatusChange, StubView,
 } from './repo.js'
 
 type S = components['schemas']
@@ -340,8 +340,10 @@ export class PayToService {
     }) as unknown as GetMandateActionsActionDto
   }
 
+  /** searchPaymentsInstructions entry: a search stub laid over the instruction wins (endToEndId stays the instruction's). */
   instructionToResponse(i: PaymentInstruction): PaymentInstructionDto {
-    return compact({ id: i.id, amount: fromCents(i.amountCents), creationDateTime: i.creationDateTime, endToEndId: i.endToEndId, transactionStatus: i.status, transactionStatusReasonCode: i.reasonCode })
+    const v = i.stub ?? i
+    return compact({ id: i.id, amount: fromCents(v.amountCents), creationDateTime: v.creationDateTime, endToEndId: i.endToEndId, transactionStatus: v.status, transactionStatusReasonCode: v.reasonCode })
   }
 
   paymentStatus(mandateId: string, instructionId: string): GetMandatePaymentStatusResponseBody {
@@ -765,9 +767,13 @@ export class PayToService {
     return i
   }
 
-  /** `<BIC>I<YYYYMMDD>00<12-digit sequence>0` — PaymentInstructionSummary.instructionIdentification. */
+  /** `<BIC>I<YYYYMMDD>00<12-digit sequence>0` — PaymentInstructionSummary.instructionIdentification; skips ids a RAPAIN or a stub already took. */
   private instructionId(now: Date): string {
-    return `${BIC}I${isoDate(now).replace(/-/g, '')}00${String(this.repo.nextInstructionSeq()).padStart(12, '0')}0`
+    const prefix = `${BIC}I${isoDate(now).replace(/-/g, '')}00`
+    for (;;) {
+      const id = `${prefix}${String(this.repo.nextInstructionSeq()).padStart(12, '0')}0`
+      if (!this.repo.instructionById(id)) return id
+    }
   }
 
   private finish(m: Mandate, i: PaymentInstruction, outcome: PaymentOutcome, actionOwner: ActionOwner): void {
@@ -889,27 +895,33 @@ export class PayToService {
 
   // ---------------------------------------------------------------- stubs (utilities: createStubForMandateSearchPaymentInstructions)
 
-  /** Replaces the stubbed instructions of the mandate (MMS 4-letter statuses mapped to the API enum). @throws 404 for an unknown mandate */
+  /**
+   * Replaces the search stub of the mandate (MMS 4-letter statuses mapped to the API enum). An entry naming an
+   * instruction of the mandate (the documented flow stubs a makeAdhocPayment instructionId) is laid over it:
+   * searchPaymentsInstructions reports the stub's amount, status, reason and time with the instruction's own
+   * endToEndId, while the instruction itself (status, RAPAIN reconciliation) is untouched. Any other entry is a
+   * STUB instruction. @throws 404 for an unknown mandate, 422 DUPLICATE_INSTRUCTION for another mandate's id
+   */
   addStubInstructions(mandateId: string, summaries: PaymentInstructionSummary[]): PaymentInstruction[] {
     const m = this.get(mandateId)
     return this.ctx.db.transaction(() => {
       this.repo.deleteInstructions(m.id, 'STUB')
+      this.repo.clearStubs(m.id)
       return summaries.map((s) => {
-        const existing = this.repo.instructionById(s.instructionIdentification)
-        if (existing && existing.mandateId !== m.id) throw unprocessable(`DUPLICATE_INSTRUCTION: Payment instruction ${s.instructionIdentification} belongs to mandate ${existing.mandateId}`)
-        const i: PaymentInstruction = compact({
-          id: s.instructionIdentification,
-          mandateId: m.id,
-          origin: 'STUB' as const,
+        const view: StubView = compact({
           amountCents: toCents(s.instructedAmount),
-          currency: 'AUD',
-          endToEndId: NOT_PROVIDED,
           status: MMS_STATUS[s.transactionStatus],
           reasonCode: s.transactionStatusReasonCode,
           creationDateTime: normaliseDateTime(s.creationDateTime),
         })
-        if (existing) this.repo.saveInstruction(i)
-        else this.repo.insertInstruction(i)
+        const existing = this.repo.instructionById(s.instructionIdentification)
+        if (existing && existing.mandateId !== m.id) throw unprocessable(`DUPLICATE_INSTRUCTION: Payment instruction ${s.instructionIdentification} belongs to mandate ${existing.mandateId}`)
+        if (existing) {
+          this.repo.setStub(existing.id, view)
+          return { ...existing, stub: view }
+        }
+        const i: PaymentInstruction = { id: s.instructionIdentification, mandateId: m.id, origin: 'STUB', currency: 'AUD', endToEndId: NOT_PROVIDED, ...view }
+        this.repo.insertInstruction(i)
         return i
       })
     })()
@@ -1000,16 +1012,25 @@ export class PayToService {
     }
     this.announceDue()
     for (const s of this.repo.dueSchedules(isoUtc(now))) {
-      const m = this.repo.mandateById(s.mandateId)
-      if (!m || m.status === 'CANCELLED') { this.repo.deleteSchedule(s.mandateId); continue }
-      if (m.status !== 'ACTIVE') continue // SUSPENDED: deferred until released
-      const amount = this.scheduledAmount(m, s)
-      const instruction = this.newInstruction(m, 'SCHEDULED', amount ?? { amountCents: 0, currency: 'AUD' }, m.creditor.partyReference ?? NOT_PROVIDED, m.description)
-      this.repo.setLastDueDate(m.id, s.dueDate)
-      if (amount) this.initiate(m, instruction, 'PLATFORM', parseTrajectory(m.description))
-      else this.finish(m, instruction, { status: 'REJECTED', reasonCode: 'AM12' }, 'PLATFORM')
-      this.scheduleNext(m)
+      // each due schedule on its own: one that throws is rolled back, logged and retried on the next tick without blocking the others
+      try {
+        this.ctx.db.transaction(() => this.initiateScheduled(s))()
+      } catch (err) {
+        this.ctx.log.error({ err, mandateId: s.mandateId, notificationId: s.notificationId }, 'payto: scheduled payment initiation failed')
+      }
     }
+  }
+
+  private initiateScheduled(s: ScheduledPayment): void {
+    const m = this.repo.mandateById(s.mandateId)
+    if (!m || m.status === 'CANCELLED') return this.repo.deleteSchedule(s.mandateId)
+    if (m.status !== 'ACTIVE') return // SUSPENDED: deferred until released
+    const amount = this.scheduledAmount(m, s)
+    const instruction = this.newInstruction(m, 'SCHEDULED', amount ?? { amountCents: 0, currency: 'AUD' }, m.creditor.partyReference ?? NOT_PROVIDED, m.description)
+    this.repo.setLastDueDate(m.id, s.dueDate)
+    if (amount) this.initiate(m, instruction, 'PLATFORM', parseTrajectory(m.description))
+    else this.finish(m, instruction, { status: 'REJECTED', reasonCode: 'AM12' }, 'PLATFORM')
+    this.scheduleNext(m)
   }
 
   // ---------------------------------------------------------------- notifications (also for the utilities mocks)

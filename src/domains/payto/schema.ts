@@ -71,7 +71,8 @@ CREATE TABLE IF NOT EXISTS mandate_instructions (
   reason_code         TEXT,
   transaction_id      TEXT,                        -- ledger posting (creditor leg when local, else debtor leg)
   creation_date_time  TEXT NOT NULL,
-  updated_at          TEXT
+  updated_at          TEXT,
+  stub                TEXT                         -- JSON StubView: what a search stub reports for this (non-STUB) instruction
 );
 CREATE INDEX IF NOT EXISTS mandate_instructions_mandate ON mandate_instructions(mandate_id, seq);
 

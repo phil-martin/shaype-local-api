@@ -74,6 +74,11 @@
  *   documented flow sends it with a makeAdhocPayment instructionId: an id already on the mandate is
  *   reconciled (final: no-op, no second debit or webhook; in flight: the RAPAIN finishes it; a stubbed
  *   search entry is superseded); an id of another mandate is 422 DUPLICATE_INSTRUCTION.
+ * - Search stub (addStubInstructions): each call replaces the mandate's previous stub. An entry naming an
+ *   instruction of the mandate (the documented flow stubs a makeAdhocPayment instructionId) is laid over it
+ *   for searchPaymentsInstructions only — the stub's amount / status / reason / time with the instruction's
+ *   own endToEndId (docs example) — and leaves the instruction itself untouched (getMandatePaymentStatus,
+ *   RAPAIN); another mandate's id is 422. New instruction ids skip ids a RAPAIN or a stub already took.
  * - Scheduler (non-ADHOC mandates the client initiates): on activation the next due date (firstPayment.date
  *   or validityStartDate plus n periods, the day clamped once per date so month ends do not drift, bounded
  *   by lastPayment.date / validityEndDate; INTRA_DAY steps daily, pointInTime / countPerPeriod are
@@ -83,7 +88,9 @@
  *   one day before (webhook-matrix), so that setScheduledPaymentInitiationRequestAmount (USAGE_BASED /
  *   VARIABLE only, else 422; unknown notificationId 422; above maximumAmount 422) can set the amount; a
  *   missing amount rejects with AM12. SUSPENDED defers the announcement and the payment until released,
- *   CANCELLED drops the schedule. PayTo schedules emit no SCHEDULED_PAYMENT (webhook-matrix).
+ *   CANCELLED drops the schedule. PayTo schedules emit no SCHEDULED_PAYMENT (webhook-matrix). Each due
+ *   schedule is initiated in its own transaction: one that throws is rolled back, logged and retried on the
+ *   next tick without blocking the others.
  * - Validity: a mandate is cancelled (CTEX, MSCH, PLATFORM) once the UTC date passes validityEndDate;
  *   closing the creditor or debtor account cancels its mandates (AC04, docs:account-closure).
  * - Webhooks: spec property names (mandateEventDto ... , webhook-matrix C5), `description` = the trigger's

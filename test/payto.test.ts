@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { Ajv, type ValidateFunction } from 'ajv'
 import addFormatsModule from 'ajv-formats'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { getOperation, requestComponents } from '../src/contract/index.js'
 import type { components } from '../src/contract/generated/b2b-types.js'
 import { startApp } from './helpers.js'
@@ -1145,6 +1145,59 @@ describe('searchPaymentsInstructions with stubbed instructions', () => {
     expect((await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${id}/search` })).json().paymentInstructions.map((i: { id: string }) => i.id)).toEqual([`${BIC}I20231129000000000093412`, paid.instructionId])
     expect(() => svc.addStubInstructions(UNKNOWN_ID, [stub('413', 'SENT')])).toThrow(expect.objectContaining({ status: 404 }))
     expect((await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${UNKNOWN_ID}/search` })).statusCode).toBe(404)
+  })
+
+  it('the documented flow stubs a makeAdhocPayment instructionId: the search reports the stub (endToEndId joined from the payment), the instruction itself is untouched', async () => {
+    const debtor = await newAccount({ fund: 20 })
+    const { id } = await activeMandate({ debtor })
+    const paid = await adhoc(id, { amount: AUD(3), endToEndId: 'NET-1724' })
+    const search = async () => (await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${id}/search` })).json().paymentInstructions
+    const real = (await search())[0]
+    svc.addStubInstructions(mmsId(id), [{ instructionIdentification: paid.instructionId, instructedAmount: 1.28, creationDateTime: '2023-11-29T12:33:59.833Z', transactionStatus: 'RECV', transactionStatusReasonCode: 'AB01' }])
+    expect(await search()).toEqual([{ id: paid.instructionId, amount: 1.28, creationDateTime: '2023-11-29T12:33:59.833000Z', endToEndId: 'NET-1724', transactionStatus: 'RECEIVED', transactionStatusReasonCode: 'AB01' }])
+    expect(svc.instruction(id, paid.instructionId)).toMatchObject({ origin: 'ADHOC', status: 'ACCEPTED_AND_SETTLED', amountCents: 300 })
+    const status = await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${id}/instructions/${paid.instructionId}/status` })
+    expect(status.json()).toEqual({ transactionStatus: 'ACCEPTED_AND_SETTLED' })
+    // the next stub replaces the earlier one: the real instruction is reported as it is again, not deleted
+    svc.addStubInstructions(id, [{ instructionIdentification: `${BIC}I20231129000000000093420`, instructedAmount: 2, creationDateTime: '2023-11-29T12:33:59.833Z', transactionStatus: 'ACSC' }])
+    expect((await search()).map((i: { id: string }) => i.id)).toEqual([`${BIC}I20231129000000000093420`, paid.instructionId])
+    expect((await search())[1]).toEqual(real)
+  })
+})
+
+describe('instruction ids', () => {
+  it('a new instruction id skips ids already taken (by a RAPAIN or a stub) instead of failing with 500', async () => {
+    const debtor = await newAccount({ fund: 50 })
+    const { id } = await activeMandate({ debtor })
+    const first = await adhoc(id, { amount: AUD(1) })
+    const seq = Number(first.instructionId.slice(-13, -1))
+    const idFor = (n: number) => `${first.instructionId.slice(0, -13)}${String(n).padStart(12, '0')}0`
+    svc.receivePaymentInstruction({ mandateId: id, instructionId: idFor(seq + 1), amountCents: 100, status: 'ACCP' })
+    svc.addStubInstructions(id, [{ instructionIdentification: idFor(seq + 2), instructedAmount: 1, creationDateTime: '2023-11-29T12:33:59.833Z', transactionStatus: 'ACSC' }])
+    const next = await adhoc(id, { amount: AUD(1) })
+    expect(next.transactionStatus).toBe('ACCEPTED_AND_SETTLED')
+    expect([idFor(seq + 1), idFor(seq + 2)]).not.toContain(next.instructionId)
+    expect(svc.instructions(id)).toHaveLength(4)
+  })
+
+  it('a scheduled payment that throws does not block the other due schedules of the tick', async () => {
+    const now = await today()
+    const debtor = await newAccount({ fund: 100 })
+    const terms: CreateMandateBody['paymentTerms'] = { frequency: 'MONTHLY', type: 'FIXED', amount: AUD(1) }
+    const a = await activeMandate({ debtor, terms, overrides: { validityStartDate: plusDays(now, 2) } })
+    const b = await activeMandate({ debtor, terms, overrides: { validityStartDate: plusDays(now, 2) } })
+    const spy = vi.spyOn(svc as unknown as { scheduledAmount: () => unknown }, 'scheduledAmount').mockImplementationOnce(() => { throw new Error('boom') })
+    try {
+      await advanceClock(3 * DAY_MS)
+      // one schedule threw (and stays scheduled); the other was initiated in the same tick
+      expect([svc.instructions(a.id).length, svc.instructions(b.id).length].sort()).toEqual([0, 1])
+      await flush()
+      expect([svc.instructions(a.id).length, svc.instructions(b.id).length]).toEqual([1, 1])
+      expect((await getAccount(debtor.accountHayId!)).availableBalance).toBe(98)
+    } finally {
+      spy.mockRestore()
+      await app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
+    }
   })
 })
 
