@@ -1,8 +1,8 @@
 /**
- * What this domain expects from domains registered after it (accounts, cards). Declared here — not on
+ * What this domain expects from domains registered after it (accounts, cards, kyc). Declared here — not on
  * ServiceMap — so those domains own their ServiceMap entries; the shapes below are the exact call
- * sites in routes.ts. Two guards hold the implementers to them: the `satisfies` checks at the bottom
- * fail typecheck once ServiceMap.accounts / ServiceMap.cards exist and diverge, and assertDeps() fails
+ * sites in routes.ts / service.ts. Two guards hold the implementers to them: the `satisfies` checks at the
+ * bottom fail typecheck once ServiceMap.accounts / .cards / .kyc exist and diverge, and assertDeps() fails
  * startup (onReady) when a registered service lacks one of the methods.
  */
 import type { components } from '../../contract/generated/b2b-types.js'
@@ -31,13 +31,18 @@ export interface CardsDep {
   listForCustomer(customerHayId: string): HayCard[]
 }
 
-const REQUIRED_METHODS: Record<'accounts' | 'cards', string[]> = { accounts: ['create', 'listForHolder'], cards: ['listForCustomer'] }
-
-export function deps(ctx: AppContext): { accounts?: AccountsDep; cards?: CardsDep } {
-  return ctx.services as Partial<{ accounts: AccountsDep; cards: CardsDep }>
+export interface KycDep {
+  /** The identity-verification case createCase returned (scanCase.id); customerId is set once a customer linked it. */
+  findCase(id: string): { customerId?: string } | undefined
 }
 
-/** Runs at app ready (every domain registered): a present accounts/cards service must expose the methods routes.ts calls. */
+const REQUIRED_METHODS: Record<'accounts' | 'cards' | 'kyc', string[]> = { accounts: ['create', 'listForHolder'], cards: ['listForCustomer'], kyc: ['findCase'] }
+
+export function deps(ctx: AppContext): { accounts?: AccountsDep; cards?: CardsDep; kyc?: KycDep } {
+  return ctx.services as Partial<{ accounts: AccountsDep; cards: CardsDep; kyc: KycDep }>
+}
+
+/** Runs at app ready (every domain registered): a present accounts/cards/kyc service must expose the methods customers calls. */
 export function assertDeps(ctx: AppContext): void {
   const services = ctx.services as unknown as Record<string, Record<string, unknown> | undefined>
   const missing: string[] = []
@@ -54,3 +59,4 @@ type Declared<K extends string> = K extends keyof ServiceMap ? ServiceMap[K] : u
 type Satisfies<T, Dep, Name extends string> = [T] extends [undefined] ? true : [T] extends [Dep] ? true : `ServiceMap.${Name} does not satisfy the ${Name} shape customers/routes.ts calls (see customers/deps.ts)`
 true satisfies Satisfies<Declared<'accounts'>, AccountsDep, 'accounts'>
 true satisfies Satisfies<Declared<'cards'>, CardsDep, 'cards'>
+true satisfies Satisfies<Declared<'kyc'>, KycDep, 'kyc'>

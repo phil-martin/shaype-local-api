@@ -116,13 +116,15 @@ describe('createHayCustomer', () => {
   })
 
   it('stores externalCustomerId and the deprecated journeyId (as identityVerificationCaseId) without echoing them', async () => {
-    const journeyId = randomUUID()
+    // identityVerificationCaseId / journeyId must name an unlinked KYC case (scanCase.id from createCase)
+    const newCaseId = async (): Promise<string> => (await app.inject({ method: 'POST', url: '/v1/kyc/identity-verification/cases' })).json().scanCase.id
+    const journeyId = await newCaseId()
     const c = await create({ emailTag: 'pending', journeyId, externalCustomerId: 'ext-123' })
     for (const absent of ['externalCustomerId', 'journeyId', 'identityVerificationCaseId']) expect(c, absent).not.toHaveProperty(absent)
     expect(await get(c.customerHayId!)).not.toHaveProperty('externalCustomerId')
     expect(built.ctx.services.customers.get(c.customerHayId!)).toMatchObject({ externalCustomerId: 'ext-123', identityVerificationCaseId: journeyId })
-    const caseId = randomUUID()
-    const both = await create({ emailTag: 'pending', journeyId, identityVerificationCaseId: caseId })
+    const caseId = await newCaseId()
+    const both = await create({ emailTag: 'pending', journeyId: randomUUID(), identityVerificationCaseId: caseId })
     expect(built.ctx.services.customers.get(both.customerHayId!).identityVerificationCaseId).toBe(caseId)
   })
 
@@ -249,6 +251,17 @@ describe('onboarding (asynchronous outcome)', () => {
     expect(c.status).toBe('ACTIVE')
     expect(c.approvedDateTimeUtc).toMatch(ISO_MICROS)
     expect((await payloadsFor(c.customerHayId!)).map((e) => e.type)).toEqual(['ONBOARDING_PASSED', 'CUSTOMER_STATUS_UPDATED'])
+  })
+
+  it('onlySanctionsCheck (Reduced KYC) fails +referred / +rejected at SANCTIONS_SCAN, the only stage it runs', async () => {
+    for (const [emailTag, status] of [['referred', 'REFERRED'], ['rejected', 'REJECTED']] as const) {
+      const created = await create({ emailTag, onlySanctionsCheck: true })
+      await flush()
+      expect((await get(created.customerHayId!)).status).toBe(status)
+      const events = await payloadsFor(created.customerHayId!)
+      expect(events.map((e) => e.type)).toEqual(['ONBOARDING_FAILED', 'CUSTOMER_STATUS_UPDATED'])
+      expect(events[0].onboardingFailedEvent, emailTag).toEqual({ state: 'SANCTIONS_SCAN', submissionFailure: false })
+    }
   })
 
   it('+pending and skipKyc leave the customer PENDING_APPROVAL for the client to activate', async () => {
