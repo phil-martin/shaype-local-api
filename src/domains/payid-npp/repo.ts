@@ -2,6 +2,7 @@
  * SQL for payids and payid_deregistrations: rows <-> entities, lookups by value / account, timers.
  */
 import { nextSeq, type Db } from '../../db/index.js'
+import { DEREGISTERED_SINCE, LAST_ACTIVITY, PORTABLE_SINCE } from './schema.js'
 
 export type PayIdType = 'EMAIL' | 'TELEPHONE' | 'INDIVIDUAL_AUSTRALIAN_BUSINESS' | 'ORGANISATION'
 export type PayIdStatus = 'ACTIVE' | 'DEREGISTERED' | 'DISABLED' | 'PORTABLE'
@@ -69,6 +70,13 @@ interface DeregRow {
   deregistered_at: string
 }
 
+/** Timer queries (one `?`: the ISO cutoff), each served by its (status, expression) index in schema.ts. */
+export const TIMER_SQL = {
+  portable: `SELECT * FROM payids WHERE status = 'PORTABLE' AND ${PORTABLE_SINCE} <= ? ORDER BY seq`,
+  purge: `SELECT * FROM payids WHERE status = 'DEREGISTERED' AND ${DEREGISTERED_SINCE} <= ? ORDER BY seq`,
+  inactivity: `SELECT * FROM payids WHERE status = 'ACTIVE' AND ${LAST_ACTIVITY} <= ? ORDER BY seq`,
+} as const
+
 /** Lookup priority when several rows share a value: the live one first (ACTIVE, PORTABLE, DISABLED), then the latest DEREGISTERED. */
 const STATUS_RANK = `CASE status WHEN 'ACTIVE' THEN 0 WHEN 'PORTABLE' THEN 1 WHEN 'DISABLED' THEN 2 ELSE 3 END`
 
@@ -127,17 +135,17 @@ export class PayIdRepo {
 
   /** PORTABLE rows whose portability started at or before `cutoff` (ISO strings compare lexicographically). */
   portableSince(cutoff: string): PayId[] {
-    return (this.db.prepare(`SELECT * FROM payids WHERE status = 'PORTABLE' AND coalesce(portable_since, updated_at) <= ? ORDER BY seq`).all(cutoff) as Row[]).map(fromRow)
+    return (this.db.prepare(TIMER_SQL.portable).all(cutoff) as Row[]).map(fromRow)
   }
 
   /** DEREGISTERED rows deregistered at or before `cutoff`. */
   deregisteredSince(cutoff: string): PayId[] {
-    return (this.db.prepare(`SELECT * FROM payids WHERE status = 'DEREGISTERED' AND coalesce(deregistered_at, updated_at) <= ? ORDER BY seq`).all(cutoff) as Row[]).map(fromRow)
+    return (this.db.prepare(TIMER_SQL.purge).all(cutoff) as Row[]).map(fromRow)
   }
 
   /** ACTIVE rows whose last activity (registration, update or resolution) is at or before `cutoff`. */
   inactiveSince(cutoff: string): PayId[] {
-    return (this.db.prepare(`SELECT * FROM payids WHERE status = 'ACTIVE' AND max(registered_at, updated_at, coalesce(last_resolved_at, '')) <= ? ORDER BY seq`).all(cutoff) as Row[]).map(fromRow)
+    return (this.db.prepare(TIMER_SQL.inactivity).all(cutoff) as Row[]).map(fromRow)
   }
 
   insertDeregistration(d: Deregistration): void {

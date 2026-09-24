@@ -28,8 +28,10 @@
  *   DEREGISTERED (reason PART, history entry) and the new one is ACTIVE.
  * - Status machine: ACTIVE -> DISABLED | PORTABLE | DEREGISTERED, DISABLED -> ACTIVE | DEREGISTERED,
  *   PORTABLE -> ACTIVE | DISABLED | DEREGISTERED (explicit PORTABLE -> ACTIVE accepted); same status ->
- *   200 no-op; DISABLED -> PORTABLE and anything else -> 422 INVALID_STATUS_TRANSITION; a DEREGISTERED
- *   PayID -> 422 INVALID_STATE. Any reason goes with any status; null/omitted clears the stored reason.
+ *   200 no-op, except that a non-null reason different from the stored one replaces it (lastUpdated bumped,
+ *   no status change event); DISABLED -> PORTABLE and anything else -> 422 INVALID_STATUS_TRANSITION; a
+ *   DEREGISTERED PayID -> 422 INVALID_STATE. Any reason goes with any status; on a transition null/omitted
+ *   clears the stored reason.
  * - Availability: true when nothing live holds the value (unknown, DEREGISTERED, PORTABLE), false while
  *   ACTIVE or DISABLED; `servicer` (local BIC11 LOCLAU2SXXX) only for a live registration.
  * - resolvePayId: ACTIVE and PORTABLE resolve (lastResolutionDateTimeUtc bumped, also when a PAY_ID
@@ -41,8 +43,7 @@
  *   purged after 90 days (history kept), ACTIVE -> DISABLED (reason PART) after 10 years without activity.
  * - Cross-domain: updateCustomer name change sets ownerName ("<firstName> <lastName>") on the live PayIDs of
  *   the customer's own (not group) accounts unless skipPayIdUpdate; the account-closure cascade deregisters
- *   the account's PayIDs with the closure reason mapped CUSTOMER->CUST, DECEASED->DECD, SUSPICIOUS->FROD,
- *   OPERATIONAL->PART (CUST when none).
+ *   the account's PayIDs with reason CUST whatever the closure reason (docs/map/00-status.md B.4 decision).
  * - verifyBranchIdentifier: every 6-digit BSB is enabled except 999999.
  * - GenericMessage texts: "PayID registered successfully." / "PayID details updated successfully." /
  *   "PayID status updated successfully.".

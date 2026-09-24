@@ -6,6 +6,7 @@ import { assertValidNotification } from './webhook-schema.js'
 import type { BuiltServer } from '../src/server.js'
 import { LOCAL_PRODUCT_ID } from '../src/domains/accounts/index.js'
 import { BRANCH_IDENTIFIER_FORMAT_MESSAGE, LOCAL_SERVICER_BIC, type PayIdService } from '../src/domains/payid-npp/index.js'
+import { TIMER_SQL } from '../src/domains/payid-npp/repo.js'
 
 type S = components['schemas']
 type HayAccount = S['HayAccount']
@@ -190,9 +191,30 @@ describe('postPayIdRegister', () => {
       ['not-an-email', 'EMAIL'], ['two words@example.com', 'EMAIL'], ['@example.com', 'EMAIL'], ['a@b@example.com', 'EMAIL'],
       ['12345678', 'INDIVIDUAL_AUSTRALIAN_BUSINESS'], ['123456789012', 'INDIVIDUAL_AUSTRALIAN_BUSINESS'], ['ABN601428737', 'INDIVIDUAL_AUSTRALIAN_BUSINESS'],
       ['   ', 'ORGANISATION'],
+      [`${'a'.repeat(245)}@example.com`, 'EMAIL'], ['o'.repeat(257), 'ORGANISATION'],
     ]
     for (const [payId, payIdType] of cases) expectError(await register(account.accountHayId!, payId, { payIdType }), 422, /^INVALID_PAY_ID/)
     expect(await listForAccount(account.accountHayId!)).toEqual([])
+  })
+
+  it('long values (over 100 and up to 256 characters) round-trip on every {payId} route', async () => {
+    const account = await newAccount()
+    for (const len of [122, 256]) {
+      const suffix = `${++n}@example.com`
+      const payId = `${'l'.repeat(len - suffix.length)}${suffix}`
+      expect(payId).toHaveLength(len)
+      const res = await register(account.accountHayId!, payId)
+      expect(res.statusCode, res.body).toBe(200)
+      expect((await details(payId)).payIdDetails).toMatchObject({ payIdValue: payId, status: 'ACTIVE' })
+      expect((await availability(payId, 'EMAIL')).json()).toMatchObject({ availability: false })
+      expect((await resolve(payId)).json()).toMatchObject({ payIdValue: payId })
+      expect((await updateDetails(payId, { payIdName: 'Long' })).statusCode).toBe(200)
+      await mustSetStatus(payId, { payIdStatus: 'DEREGISTERED', reason: 'CUST' })
+      expect(await history(payId)).toEqual([expect.objectContaining({ payIdName: 'Long', reason: 'CUST' })])
+    }
+    const org = 'o'.repeat(256)
+    expect((await register(account.accountHayId!, org, { payIdType: 'ORGANISATION' })).statusCode).toBe(200)
+    expect((await details(org, 'ORGANISATION')).payIdDetails).toMatchObject({ payIdValue: org })
   })
 
   it('validates the request: missing / empty body fields and a non-uuid account are 400', async () => {
@@ -306,13 +328,39 @@ describe('updatePayIdStatus (NPP state model)', () => {
 
   it('same status is an idempotent no-op (200, nothing changes); DEREGISTERED -> DEREGISTERED is refused', async () => {
     const payId = await payIdIn('DISABLED')
+    await mustSetStatus(payId, { payIdStatus: 'DISABLED' })
     const before = (await details(payId)).payIdDetails
     await setClock({ advanceMs: 1000 })
-    await mustSetStatus(payId, { payIdStatus: 'DISABLED', reason: 'FROD' })
+    await mustSetStatus(payId, { payIdStatus: 'DISABLED' })
+    await mustSetStatus(payId, { payIdStatus: 'DISABLED', reason: null })
     expect((await details(payId)).payIdDetails).toEqual(before)
     await setClock({ reset: true })
     const gone = await payIdIn('DEREGISTERED')
     expectError(await setStatus(gone, { payIdStatus: 'DEREGISTERED' }), 422, /^INVALID_STATE/)
+  })
+
+  it('same status with a different reason replaces the reason and bumps lastUpdatedDateTimeUtc, without a status change event', async () => {
+    const payId = await payIdIn('DISABLED')
+    await mustSetStatus(payId, { payIdStatus: 'DISABLED', reason: 'FROD' })
+    const before = (await details(payId)).payIdDetails!
+    expect(before.reason).toBe('FROD')
+    const events: unknown[] = []
+    const off = built.ctx.events.on('payid.statusChanged', (e) => events.push(e))
+    try {
+      await setClock({ advanceMs: 1000 })
+      await mustSetStatus(payId, { payIdStatus: 'DISABLED', reason: 'LEGL' })
+      const after = (await details(payId)).payIdDetails!
+      expect(after).toMatchObject({ status: 'DISABLED', reason: 'LEGL' })
+      expect(after.lastUpdatedDateTimeUtc! > before.lastUpdatedDateTimeUtc!).toBe(true)
+      // the same reason again is a no-op
+      await setClock({ advanceMs: 1000 })
+      await mustSetStatus(payId, { payIdStatus: 'DISABLED', reason: 'LEGL' })
+      expect((await details(payId)).payIdDetails).toEqual(after)
+      expect(events).toEqual([])
+    } finally {
+      off()
+      await setClock({ reset: true })
+    }
   })
 
   it('reason: any code with any status; null or omitted clears it', async () => {
@@ -577,6 +625,13 @@ describe('NPP timers on the virtual clock', () => {
     await mustSetStatus(idle, { payIdStatus: 'ACTIVE' })
     expect(await status(idle)).toBe('ACTIVE')
   })
+
+  it('each timer query is served by an index on (status, cutoff expression), not a scan of every row of the status', () => {
+    for (const [timer, sql] of Object.entries(TIMER_SQL)) {
+      const plan = (built.ctx.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all('2026-01-01T00:00:00.000000Z') as { detail: string }[]).map((r) => r.detail).join('; ')
+      expect(plan, timer).toMatch(/USING INDEX \w+ \(status=\? AND <expr><\?\)/)
+    }
+  })
 })
 
 describe('cross-domain', () => {
@@ -616,16 +671,16 @@ describe('cross-domain', () => {
     expect(await notificationCount()).toBe(notifications + 3)
   })
 
-  it('closing an account deregisters its PayIDs with the closure reason (DECEASED -> DECD) and records history', async () => {
+  it('closing an account deregisters its PayIDs with reason CUST whatever the closure reason (00-status B.4 decision) and records history', async () => {
     const account = await newAccount()
     const p1 = (await registered('EMAIL', account)).payId
     const p2 = (await registered('TELEPHONE', account)).payId
-    await mustSetStatus(p2, { payIdStatus: 'DISABLED', payIdType: 'TELEPHONE' })
+    await mustSetStatus(p2, { payIdStatus: 'DISABLED', payIdType: 'TELEPHONE', reason: 'FROD' })
     const res = await app.inject({ method: 'POST', url: `/v0/accounts/${account.accountHayId}/close`, payload: { reason: 'DECEASED' } })
     expect(res.statusCode, res.body).toBe(202)
     await flush()
-    expect((await listForAccount(account.accountHayId!)).map((p) => [p.status, p.reason])).toEqual([['DEREGISTERED', 'DECD'], ['DEREGISTERED', 'DECD']])
-    expect(await history(p1)).toEqual([expect.objectContaining({ reason: 'DECD' })])
+    expect((await listForAccount(account.accountHayId!)).map((p) => [p.status, p.reason])).toEqual([['DEREGISTERED', 'CUST'], ['DEREGISTERED', 'CUST']])
+    expect(await history(p1)).toEqual([expect.objectContaining({ reason: 'CUST' })])
     expect((await availability(p1)).json()).toMatchObject({ availability: true })
     expectError(await resolve(p1), 422, /^INVALID_STATE/)
 
