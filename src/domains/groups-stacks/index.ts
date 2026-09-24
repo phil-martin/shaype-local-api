@@ -16,8 +16,8 @@
  *   union; an empty addCustomers list is a no-op); groupType defaults to PERSONAL and may be changed
  *   later even once an account exists; groupName defaults to "<clientId> Group <n>"; businessIdentifiers
  *   are stored as sent and replaced as a whole on update; "a group should have a single account" is not
- *   enforced — HayJointAccount.hayAccount is the account just created, else the first-created one, and
- *   is omitted while the group has none. createHayAccountForGroup is createAccount with the default
+ *   enforced — HayJointAccount.hayAccount is the account just created, else the first-created open one
+ *   (else the first-created one), and is omitted while the group has none. createHayAccountForGroup is createAccount with the default
  *   product / AUD and its own idempotency scope.
  * - removeCustomerFromGroup: unknown customer 404; not a member 422 NOT_A_MEMBER; final member 422
  *   LAST_GROUP_MEMBER. The cascade is synchronous: every non-INACTIVE card the customer holds on the

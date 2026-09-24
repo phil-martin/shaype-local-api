@@ -334,6 +334,23 @@ describe('createHayAccountForGroup (POST /v0/groups/{groupHayId}/account)', () =
     expect(groups.accounts(g.groupHayId!).map((a) => a.id)).toEqual([first.hayAccount!.accountHayId, second.hayAccount!.accountHayId])
   })
 
+  it('reports the first-created open account once an earlier group account is CLOSED (GET, addCustomers, removeCustomer)', async () => {
+    const [m1, m2, m3] = [await newCustomer(), await newCustomer(), await newCustomer()]
+    for (const m of [m1, m2]) await newAccount(m, { lowRisk: false }) // open personal accounts keep them ACTIVE through the closure
+    const g = await newGroup([m1, m2])
+    const first = await newGroupAccount(g.groupHayId!)
+    expect((await post(`/v0/accounts/${first.accountHayId}/close`)).statusCode).toBe(202)
+    await flush()
+    expect((await getAccount(first.accountHayId!)).status).toBe('CLOSED')
+    expect((await getGroup(g.groupHayId!)).hayAccount).toMatchObject({ accountHayId: first.accountHayId, status: 'CLOSED' }) // only a closed one: still reported
+    const second = await newGroupAccount(g.groupHayId!)
+    expect((await getGroup(g.groupHayId!)).hayAccount).toMatchObject({ accountHayId: second.accountHayId, status: 'APPROVED' })
+    const added = await post(`/v0/groups/${g.groupHayId}/addCustomers`, { customerHayIds: [m3] })
+    expect(added.json().hayAccount.accountHayId).toBe(second.accountHayId)
+    const removed = await post(`/v0/groups/${g.groupHayId}/removeCustomer`, { customerId: m3 })
+    expect(removed.json().hayAccount.accountHayId).toBe(second.accountHayId)
+  })
+
   it('v1 createAccount with a GROUP holder works through the published service and lists under the group', async () => {
     const [m1, m2] = [await newCustomer(), await newCustomer()]
     const g = await newGroup([m1, m2])

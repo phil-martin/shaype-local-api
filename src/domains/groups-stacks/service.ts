@@ -132,10 +132,11 @@ export class GroupsService {
 
   /**
    * HayJointAccount: the group plus its account — `account` when the caller just created one, else the
-   * group's first-created account; omitted while the group has none.
+   * group's first-created non-CLOSED account, else its first-created account; omitted while it has none.
    */
   toJointAccount(g: Group, account?: Account): HayJointAccount {
-    const a = account ?? this.accounts(g.id)[0]
+    const all = account ? [] : this.accounts(g.id)
+    const a = account ?? all.find((x) => x.status !== 'CLOSED') ?? all[0]
     return compact({
       groupHayId: g.id,
       name: g.name,
