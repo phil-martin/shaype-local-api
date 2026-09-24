@@ -1333,9 +1333,9 @@ describe('emitMandateNotification (mock generators)', () => {
     expect(svc.get(id).status).toBe('ACTIVE')
     expect((await actions(id))[0]!.status).toBe('COMPLETED')
     let events = await mandateEvents(id)
-    // the resolution itself informed the Initiator (MCRC, PLATFORM) and the mock sent its own MCRC
-    expect(events.map((e) => [e.customerHayId, e.mandateEventDto.trigger, e.actionOwner])).toEqual([[creditor.accountHolderId, 'MCRC', 'PLATFORM'], [creditor.accountHolderId, 'MCRC', 'PLATFORM']])
-    expect(events[1].mandateEventDto).toEqual({ mandateId: id, actionId: (await actions(id))[0]!.actionIdentification, description: 'Mandate create confirmed', trigger: 'MCRC' })
+    // 1x MANDATE with the requested trigger (webhook-matrix row generateMandateNotificationForInitiator): the state change it implies is silent
+    expect(events.map((e) => [e.customerHayId, e.mandateEventDto.trigger, e.actionOwner])).toEqual([[creditor.accountHolderId, 'MCRC', 'PLATFORM']])
+    expect(events[0].mandateEventDto).toEqual({ mandateId: id, actionId: (await actions(id))[0]!.actionIdentification, description: 'Mandate create confirmed', trigger: 'MCRC' })
     await clearNotifications()
     svc.emitMandateNotification('PAYER', id, 'MSCH', { description: 'Custom text', actionOwner: 'CLIENT' })
     events = await mandateEvents(id)
@@ -1361,20 +1361,24 @@ describe('emitMandateNotification (mock generators)', () => {
     svc.emitMandateNotification('INITIATOR', declined, 'PCRD')
     expect(svc.get(declined)).toMatchObject({ status: 'CANCELLED', cxStatus: 'CANCELLED' })
     expect((await actions(declined))[0]).toMatchObject({ type: 'CREATE', status: 'DECLINED' })
-    expect((await mandateEvents(declined)).map((e) => [e.customerHayId, e.mandateEventDto.trigger, e.actionOwner])).toEqual([[creditor.accountHolderId, 'MCRD', 'PLATFORM'], [creditor.accountHolderId, 'PCRD', 'PLATFORM']])
+    expect((await mandateEvents(declined)).map((e) => [e.customerHayId, e.mandateEventDto.trigger, e.actionOwner])).toEqual([[creditor.accountHolderId, 'PCRD', 'PLATFORM']])
 
     const expired = await createMandate(creditor, { accountId: debtor.accountHayId! })
+    await clearNotifications()
     svc.emitMandateNotification('PAYER', expired, 'MCRX')
     expect(svc.get(expired)).toMatchObject({ status: 'CANCELLED', cxStatus: 'CANCELLED_AUTHORISATION_TIMED_OUT' })
     expect((await actions(expired))[0]).toMatchObject({ status: 'TIMED_OUT' })
+    expect((await mandateEvents(expired)).map((e) => [e.customerHayId, e.mandateEventDto.trigger])).toEqual([[debtor.accountHolderId, 'MCRX']])
 
     const terms: CreateMandateBody['paymentTerms'] = { frequency: 'MONTHLY', type: 'VARIABLE', maximumAmount: AUD(10), firstPayment: { date: '2035-01-10' } }
     const { id } = await activeMandate({ creditor, debtor, terms })
     for (const [trigger, outcome, max] of [['MAMC', 'COMPLETED', AUD(20)], ['MAMD', 'DECLINED', AUD(20)], ['MAMX', 'TIMED_OUT', AUD(20)], ['MAMR', 'RECALLED', AUD(20)]] as const) {
       expect((await patch(`/v1/payto/initiator/mandates/${id}/payment_terms`, { paymentTerms: { ...terms, maximumAmount: AUD(max.amount + (outcome === 'COMPLETED' ? 0 : 5)) } })).statusCode).toBe(200)
+      await clearNotifications()
       svc.emitMandateNotification('INITIATOR', id, trigger)
       expect((await actions(id)).at(-1), trigger).toMatchObject({ type: 'AMEND', status: outcome })
       expect(svc.get(id).status).toBe('ACTIVE')
+      expect((await mandateEvents(id)).map((e) => [e.customerHayId, e.mandateEventDto.trigger]), trigger).toEqual([[creditor.accountHolderId, trigger]])
     }
     expect((await getMandate(id)).paymentTerms.maximumAmount).toEqual(AUD(20))
     await clearNotifications()

@@ -545,7 +545,7 @@ export class PayToService {
     const m = this.requireAsPayer(id)
     const action = this.repo.pendingAction(m.id)
     if (!action) throw unprocessable(`INVALID_STATE: Mandate ${m.id} has no pending action to resolve`)
-    return this.resolvePending(m, action, resolution === 'ACCEPT' ? 'COMPLETED' : 'DECLINED', opts.actionOwner ?? 'CLIENT', opts.reasonCode)
+    return this.resolvePending(m, action, resolution === 'ACCEPT' ? 'COMPLETED' : 'DECLINED', opts.actionOwner ?? 'CLIENT', { reasonCode: opts.reasonCode })
   }
 
   /** resolveMandateByInitiator: recalls the oldest pending action (a recalled CREATE cancels the mandate). */
@@ -556,8 +556,12 @@ export class PayToService {
     return this.resolvePending(m, action, 'RECALLED', opts.actionOwner ?? 'CLIENT')
   }
 
-  /** Applies the outcome of a pending bilateral action and sends the matching MMS trigger. */
-  private resolvePending(m: Mandate, action: MandateAction, outcome: Exclude<ActionStatus, 'PENDING'>, actionOwner: ActionOwner, reasonCode?: string): MandateAction {
+  /**
+   * Applies the outcome of a pending bilateral action and sends the matching MMS trigger, unless `silent`
+   * (a mock notification drives the change and sends only its own requested trigger).
+   */
+  private resolvePending(m: Mandate, action: MandateAction, outcome: Exclude<ActionStatus, 'PENDING'>, actionOwner: ActionOwner, opts: { reasonCode?: string; silent?: boolean } = {}): MandateAction {
+    const { reasonCode } = opts
     const now = this.ctx.clock.now()
     const isCreate = action.type === 'CREATE'
     const names: Record<Exclude<ActionStatus, 'PENDING'>, string> = { COMPLETED: 'authorised', DECLINED: 'declined', RECALLED: 'recalled', TIMED_OUT: 'expired' }
@@ -574,8 +578,8 @@ export class PayToService {
         this.applyProposal(m, action.proposal)
       }
     })()
-    if (isCreate && outcome === 'COMPLETED') this.scheduleNext(m)
-    else if (!isCreate && outcome === 'COMPLETED') this.scheduleNext(m)
+    if (outcome === 'COMPLETED') this.scheduleNext(m)
+    if (opts.silent) return action
     const trigger: MandateTrigger = isCreate
       ? ({ COMPLETED: 'MCRC', DECLINED: 'MCRD', RECALLED: 'MCRR', TIMED_OUT: 'MCRX' } as const)[outcome]
       : ({ COMPLETED: 'MAMC', DECLINED: 'MAMD', RECALLED: 'MAMR', TIMED_OUT: 'MAMX' } as const)[outcome]
@@ -981,9 +985,9 @@ export class PayToService {
   // ---------------------------------------------------------------- notifications (also for the utilities mocks)
 
   /**
-   * Sends a MANDATE notification with `trigger` to one side of the mandate and applies the state the MMS
-   * would have reached (MCRC activates, MCRD/PCRD/MCRX/MCRR cancel a CREATED mandate, MAMC applies a pending
-   * amendment, MAMD/MAMX/MAMR resolve it). An unknown mandate is created from `details.mandateDetails`
+   * Sends one MANDATE notification with `trigger` to one side of the mandate and silently applies the state
+   * the MMS would have reached (MCRC activates, MCRD/PCRD/MCRX/MCRR cancel a CREATED mandate, MAMC applies a
+   * pending amendment, MAMD/MAMX/MAMR resolve it). An unknown mandate is created from `details.mandateDetails`
    * when given (an external Initiator's mandate reaching a local Payer), otherwise 404.
    */
   emitMandateNotification(side: 'INITIATOR' | 'PAYER', mandateId: string, trigger: MandateTrigger, details: NotificationDetails = {}): Mandate {
@@ -994,19 +998,23 @@ export class PayToService {
     }
     const actionOwner = details.actionOwner ?? 'PLATFORM'
     let action: MandateAction | undefined
-    const pending = (type: ActionType) => this.repo.pendingAction(m!.id, type)
-    const effect: Partial<Record<MandateTrigger, () => void>> = {
-      MCRC: () => { const a = pending('CREATE'); if (a) action = this.resolvePending(m!, a, 'COMPLETED', actionOwner); else if (m!.status === 'CREATED') { this.setStatus(m!, 'ACTIVE', 'ACTIVE', 'PAYER'); this.scheduleNext(m!) } },
-      MCRD: () => { const a = pending('CREATE'); if (a) action = this.resolvePending(m!, a, 'DECLINED', actionOwner); else if (m!.status === 'CREATED') this.setStatus(m!, 'CANCELLED', 'CANCELLED', 'PAYER') },
-      PCRD: () => effect.MCRD!(), // docs:payto-staging-testing-suite sends the Payer's decline to the Initiator mock as PCRD
-      MCRX: () => { const a = pending('CREATE'); if (a) action = this.resolvePending(m!, a, 'TIMED_OUT', actionOwner); else if (m!.status === 'CREATED') this.setStatus(m!, 'CANCELLED', 'CANCELLED_AUTHORISATION_TIMED_OUT', 'PLATFORM') },
-      MCRR: () => { const a = pending('CREATE'); if (a) action = this.resolvePending(m!, a, 'RECALLED', actionOwner); else if (m!.status === 'CREATED') this.setStatus(m!, 'CANCELLED', 'CANCELLED_BY_PAYMENT_INITIATOR', 'INITIATOR') },
-      MAMC: () => { const a = pending('AMEND'); if (a) action = this.resolvePending(m!, a, 'COMPLETED', actionOwner) },
-      MAMD: () => { const a = pending('AMEND'); if (a) action = this.resolvePending(m!, a, 'DECLINED', actionOwner) },
-      MAMX: () => { const a = pending('AMEND'); if (a) action = this.resolvePending(m!, a, 'TIMED_OUT', actionOwner) },
-      MAMR: () => { const a = pending('AMEND'); if (a) action = this.resolvePending(m!, a, 'RECALLED', actionOwner) },
+    // the state change is applied silently: the mock sends exactly one MANDATE, with its requested trigger (below)
+    const resolve = (type: ActionType, outcome: Exclude<ActionStatus, 'PENDING'>): boolean => {
+      const a = this.repo.pendingAction(m!.id, type)
+      if (a) action = this.resolvePending(m!, a, outcome, actionOwner, { silent: true })
+      return a !== undefined
     }
-    // resolvePending already notified the side the MMS informs; the mock still sends the requested notification below.
+    const effect: Partial<Record<MandateTrigger, () => void>> = {
+      MCRC: () => { if (!resolve('CREATE', 'COMPLETED') && m!.status === 'CREATED') { this.setStatus(m!, 'ACTIVE', 'ACTIVE', 'PAYER'); this.scheduleNext(m!) } },
+      MCRD: () => { if (!resolve('CREATE', 'DECLINED') && m!.status === 'CREATED') this.setStatus(m!, 'CANCELLED', 'CANCELLED', 'PAYER') },
+      PCRD: () => effect.MCRD!(), // docs:payto-staging-testing-suite sends the Payer's decline to the Initiator mock as PCRD
+      MCRX: () => { if (!resolve('CREATE', 'TIMED_OUT') && m!.status === 'CREATED') this.setStatus(m!, 'CANCELLED', 'CANCELLED_AUTHORISATION_TIMED_OUT', 'PLATFORM') },
+      MCRR: () => { if (!resolve('CREATE', 'RECALLED') && m!.status === 'CREATED') this.setStatus(m!, 'CANCELLED', 'CANCELLED_BY_PAYMENT_INITIATOR', 'INITIATOR') },
+      MAMC: () => { resolve('AMEND', 'COMPLETED') },
+      MAMD: () => { resolve('AMEND', 'DECLINED') },
+      MAMX: () => { resolve('AMEND', 'TIMED_OUT') },
+      MAMR: () => { resolve('AMEND', 'RECALLED') },
+    }
     effect[trigger]?.()
     m = this.get(m.id)
     const actionId = details.actionId ? normaliseMandateId(details.actionId) : (action ?? this.repo.latestAction(m.id))?.id

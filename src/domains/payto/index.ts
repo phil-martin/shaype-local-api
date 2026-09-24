@@ -78,8 +78,9 @@
  *   meaning, the docs-table / mock triggers only (C27), one notification per customer behind the addressed
  *   side's account (Initiator = creditor holders, Payer = debtor holders; a side with no local account
  *   falls back to the other side for mock-driven notifications); actionOwner CLIENT for API-driven changes,
- *   PLATFORM for mocks / scheduler / expiry / asynchronous hops. Mock triggers apply the MMS state they
- *   imply (MCRC activates; MCRD, PCRD, MCRX, MCRR cancel a CREATED mandate; MAM* resolve a pending amend).
+ *   PLATFORM for mocks / scheduler / expiry / asynchronous hops. A mock call sends exactly one MANDATE, with
+ *   the requested trigger to the requested side (webhook-matrix, C14), and silently applies the MMS state
+ *   it implies (MCRC activates; MCRD, PCRD, MCRX, MCRR cancel a CREATED mandate; MAM* resolve a pending amend).
  * - getMandates: accountIds repeated or comma-separated (I11); besides BSB + account numbers, a platform
  *   account id matches the debtor account; only mandates with a local debtor are listed.
  * - checkBsbIsSupportedByPayTo: every 6-digit BSB except 000000 (staging fixture) and 999999 (spec §5.6).
