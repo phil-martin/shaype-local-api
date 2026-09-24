@@ -67,6 +67,8 @@ export interface Mandate {
   paymentTerms: PaymentTerms
   resolutionRequestedBy?: string
   suspendedBy?: MandateSide
+  /** Due date (YYYY-MM-DD) of the last scheduled payment initiated; owned by the scheduler (setLastDueDate), never written by saveMandate */
+  lastDueDate?: string
   registrationDateTime: string
   createdAt: string
   updatedAt?: string
@@ -207,6 +209,10 @@ export class MandateRepo {
     const r = mandateToRow(m)
     const cols = Object.keys(r).filter((k) => k !== 'id')
     this.db.prepare(`UPDATE mandates SET ${cols.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...cols.map((k) => r[k]), m.id)
+  }
+
+  setLastDueDate(mandateId: string, dueDate: string): void {
+    this.db.prepare('UPDATE mandates SET last_due_date = ? WHERE id = ?').run(dueDate, mandateId)
   }
 
   mandateById(id: string): Mandate | undefined {
@@ -406,6 +412,7 @@ function mandateFromRow(r: Row): Mandate {
   if (r.validity_end_date != null) m.validityEndDate = r.validity_end_date as string
   if (r.resolution_requested_by != null) m.resolutionRequestedBy = r.resolution_requested_by as string
   if (r.suspended_by != null) m.suspendedBy = r.suspended_by as MandateSide
+  if (r.last_due_date != null) m.lastDueDate = r.last_due_date as string
   if (r.updated_at != null) m.updatedAt = r.updated_at as string
   return m
 }

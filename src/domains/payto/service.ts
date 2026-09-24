@@ -908,16 +908,18 @@ export class PayToService {
 
   /**
    * (Re)schedules the next payment of an ACTIVE non-ADHOC mandate the client initiates (local creditor): the
-   * first due date on or after today (from firstPayment.date or validityStartDate, stepped by frequency;
-   * `after` skips dates already paid) that is within lastPayment.date / validityEndDate. Initiation happens
-   * at the due date, at least DUE_PAYMENT_LEAD_MS ahead, so that the amount of a USAGE_BASED / VARIABLE
-   * mandate can be set once MANDATE_DUE_PAYMENT has announced it (announceDue()).
+   * first due date on or after today (from firstPayment.date or validityStartDate, stepped by frequency) and
+   * after m.lastDueDate (a due date already initiated is never scheduled again, whoever re-schedules: MCRC,
+   * MAMC, release, tick) that is within lastPayment.date / validityEndDate. Initiation happens at the due
+   * date, at least DUE_PAYMENT_LEAD_MS ahead, so that the amount of a USAGE_BASED / VARIABLE mandate can be
+   * set once MANDATE_DUE_PAYMENT has announced it (announceDue()).
    */
-  scheduleNext(m: Mandate, after?: string): ScheduledPayment | undefined {
+  scheduleNext(m: Mandate): ScheduledPayment | undefined {
     this.repo.deleteSchedule(m.id)
     if (m.status !== 'ACTIVE' || m.paymentTerms.frequency === 'ADHOC' || !m.creditor.accountId) return undefined
     const now = this.ctx.clock.now()
     const today = isoDate(now)
+    const after = this.repo.mandateById(m.id)?.lastDueDate
     let due = m.paymentTerms.firstPayment?.date ?? m.validityStartDate
     for (let guard = 0; (due < today || (after !== undefined && due <= after)) && guard < 100_000; guard++) due = stepDate(due, m.paymentTerms.frequency)
     if (m.paymentTerms.lastPayment?.date && due > m.paymentTerms.lastPayment.date) return undefined
@@ -976,9 +978,10 @@ export class PayToService {
       if (m.status !== 'ACTIVE') continue // SUSPENDED: deferred until released
       const amount = this.scheduledAmount(m, s)
       const instruction = this.newInstruction(m, 'SCHEDULED', amount ?? { amountCents: 0, currency: 'AUD' }, m.creditor.partyReference ?? NOT_PROVIDED, m.description)
+      this.repo.setLastDueDate(m.id, s.dueDate)
       if (amount) this.initiate(m, instruction, 'PLATFORM', parseTrajectory(m.description))
       else this.finish(m, instruction, { status: 'REJECTED', reasonCode: 'AM12' }, 'PLATFORM')
-      this.scheduleNext(m, s.dueDate)
+      this.scheduleNext(m)
     }
   }
 

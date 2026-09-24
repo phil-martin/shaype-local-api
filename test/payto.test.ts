@@ -1251,6 +1251,34 @@ describe('scheduled payments and setScheduledPaymentInitiationRequestAmount', ()
     await app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
   })
 
+  it('never initiates a due date twice: an amendment accepted, or a release, on the day of a payment schedules the next period', async () => {
+    const now = await today()
+    const debtor = await newAccount({ fund: 500 })
+    const due = plusDays(now, 1)
+    const terms: CreateMandateBody['paymentTerms'] = { frequency: 'MONTHLY', type: 'FIXED', amount: AUD(10), maximumAmount: AUD(50) }
+    const { id } = await activeMandate({ debtor, terms, overrides: { validityStartDate: due } })
+    expect(svc.schedule(id)).toMatchObject({ dueDate: due })
+    await advanceClock(DAY_MS)
+    expect(svc.instructions(id).map((i) => i.amountCents)).toEqual([1000])
+    const next = stepDate(due, 'MONTHLY')
+    expect(svc.schedule(id)).toMatchObject({ dueDate: next })
+    // a payment-terms amendment accepted on the (UTC) day of the payment
+    expect((await patch(`/v1/payto/initiator/mandates/${id}/payment_terms`, { paymentTerms: { ...terms, amount: AUD(11) } })).statusCode).toBe(200)
+    expect((await patch(`/v1/payto/payer/mandates/${id}/resolve?resolution=ACCEPT`)).statusCode).toBe(200)
+    expect(svc.schedule(id)).toMatchObject({ dueDate: next })
+    // an amendment accepted while SUSPENDED drops the schedule; the release on the same day re-schedules the next period
+    expect((await patch(`/v1/payto/initiator/mandates/${id}/suspend`, {})).statusCode).toBe(200)
+    expect((await patch(`/v1/payto/initiator/mandates/${id}/payment_terms`, { paymentTerms: { ...terms, amount: AUD(12) } })).statusCode).toBe(200)
+    expect((await patch(`/v1/payto/payer/mandates/${id}/resolve?resolution=ACCEPT`)).statusCode).toBe(200)
+    expect(svc.schedule(id)).toBeUndefined()
+    expect((await patch(`/v1/payto/initiator/mandates/${id}/release`)).statusCode).toBe(200)
+    expect(svc.schedule(id)).toMatchObject({ dueDate: next })
+    await advanceClock(DAY_MS)
+    expect(svc.instructions(id).map((i) => i.amountCents)).toEqual([1000])
+    expect((await getAccount(debtor.accountHayId!)).availableBalance).toBe(490)
+    await app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
+  })
+
   it('stepDate walks the calendar by frequency', () => {
     expect(stepDate('2026-01-31', 'MONTHLY')).toBe('2026-02-28')
     expect(stepDate('2028-01-31', 'MONTHLY')).toBe('2028-02-29')

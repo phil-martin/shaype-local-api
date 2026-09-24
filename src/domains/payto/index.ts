@@ -67,7 +67,8 @@
  * - Scheduler (non-ADHOC mandates the client initiates): on activation the next due date (firstPayment.date
  *   or validityStartDate, stepped by frequency, bounded by lastPayment.date / validityEndDate; INTRA_DAY
  *   steps daily, pointInTime / countPerPeriod are recorded only) is initiated when the virtual clock
- *   reaches it, at least one day after scheduling. USAGE_BASED / VARIABLE mandates get MANDATE_DUE_PAYMENT
+ *   reaches it, at least one day after scheduling. A due date once initiated is never scheduled again
+ *   (the mandate records it), whatever re-schedules the mandate (MAMC, release, mock MCRC). USAGE_BASED / VARIABLE mandates get MANDATE_DUE_PAYMENT
  *   one day before (webhook-matrix), so that setScheduledPaymentInitiationRequestAmount (USAGE_BASED /
  *   VARIABLE only, else 422; unknown notificationId 422; above maximumAmount 422) can set the amount; a
  *   missing amount rejects with AM12. SUSPENDED defers the announcement and the payment until released,

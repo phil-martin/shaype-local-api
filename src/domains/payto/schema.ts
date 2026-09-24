@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS mandates (
   payment_terms           TEXT NOT NULL,           -- JSON PaymentTerms (cents)
   resolution_requested_by TEXT,
   suspended_by            TEXT,                    -- INITIATOR|PAYER|PLATFORM while SUSPENDED
+  last_due_date           TEXT,                    -- due date of the last scheduled payment initiated (never scheduled again)
   registration_date_time  TEXT NOT NULL,
   created_at              TEXT NOT NULL,
   updated_at              TEXT
