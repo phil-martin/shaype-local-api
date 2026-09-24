@@ -134,6 +134,10 @@ class Client {
   async flush(): Promise<void> {
     expect((await this.call('POST', '/_admin/flush')).status).toBe(200)
   }
+  /** Waits for webhook deliveries only: safe while deferred work is pending on the virtual clock. */
+  async flushNotifications(): Promise<void> {
+    expect((await this.call('POST', '/_admin/notifications/flush')).status).toBe(200)
+  }
   async advanceClock(ms: number): Promise<void> {
     expect((await this.call('POST', '/_admin/clock', { advanceMs: ms })).status).toBe(200)
   }
@@ -224,45 +228,56 @@ function summarise(n: any): Record<string, unknown> {
 // ---------------------------------------------------------------------------------------------- card mocks
 
 /**
- * Mock card purchase / refund through the Utilities API. Until the utilities domain is implemented the
- * operations answer from the generic stub (x-shaype-local-stub) and move no money; the journey then drives
- * the same ledger effects the utilities design prescribes (spec §5.5: hold, then settlement after
- * settlementDelayInSeconds on the virtual clock; a refund is one settled CARD_TRANSACTION_REFUND) through
- * the in-process services, so the expectations below are the same either way.
+ * Mock card purchase / refund. Journey (a) runs with either implementation:
+ * - httpMocks: the Utilities API (/v0/utils/*), the way an integrating system drives them.
+ * - inProcessMocks: NOT HTTP. While the utilities domain (C1) is unimplemented its operations answer from the
+ *   generic stub and move no money, so this stand-in drives the ledger effects the design prescribes (spec
+ *   §5.5, docs/map/utilities.md: hold now, settlement after settlementDelayInSeconds on the virtual clock; a
+ *   refund is one settled CARD_TRANSACTION_REFUND with no hold link) through ctx.services. It exists only
+ *   until C1 merges; delete it and its test then.
  */
-async function utilitiesLive(api: Client, operationId: string): Promise<boolean> {
-  const ops = (await api.ok('GET', '/_admin/operations')) as { stubbed: string[] }
-  return !ops.stubbed.includes(operationId)
+interface CardMocks {
+  purchase(cardToken: string, amount: number, settlementDelayInSeconds: number): Promise<void>
+  refund(cardToken: string, amount: number): Promise<void>
 }
 const MERCHANT = { merchantName: 'IGA (Mt Cotton)', merchantId: '000009493578577', merchantCategoryCode: '5411' }
+const CARD_MOCK_OPERATIONS = ['generateCardTransaction', 'generateRefundTransaction']
 
-async function mockPurchase(e: Env, cardToken: string, amount: number, settlementDelayInSeconds: number): Promise<void> {
-  if (await utilitiesLive(e.api, 'generateCardTransaction')) {
-    await e.api.ok('POST', '/v0/utils/generate-card-transaction', { amount: -amount, cardToken, merchantDetails: MERCHANT, settlementDelayInSeconds })
-    return
-  }
-  const { cards, transactions } = e.built.ctx.services
-  const r = cards.authoriseHold(cardToken, {
-    amountCents: Math.round(amount * 100),
-    merchant: { name: MERCHANT.merchantName, merchantId: MERCHANT.merchantId, merchantCategoryCode: Number(MERCHANT.merchantCategoryCode) },
-  })
-  expect(r.outcome).toBe('ACCEPTED')
-  e.built.ctx.scheduler.later(() => { transactions.holds.settle(r.hold!.id) }, settlementDelayInSeconds * 1000)
+/** Whether the server implements the card mocks (GET /_admin/operations lists them as handled, not stubbed). */
+async function utilitiesLive(api: Client): Promise<boolean> {
+  const ops = (await api.ok('GET', '/_admin/operations')) as { stubbed: string[] }
+  return !CARD_MOCK_OPERATIONS.some((id) => ops.stubbed.includes(id))
 }
 
-async function mockRefund(e: Env, cardToken: string, amount: number): Promise<void> {
-  if (await utilitiesLive(e.api, 'generateRefundTransaction')) {
-    await e.api.ok('POST', '/v0/utils/generate-refund-transaction', { amount: -amount, cardToken, merchantDetails: MERCHANT })
-    return
+function httpMocks(api: Client): CardMocks {
+  return {
+    async purchase(cardToken, amount, settlementDelayInSeconds) {
+      await api.ok('POST', '/v0/utils/generate-card-transaction', { amount: -amount, cardToken, merchantDetails: MERCHANT, settlementDelayInSeconds })
+    },
+    async refund(cardToken, amount) {
+      await api.ok('POST', '/v0/utils/generate-refund-transaction', { amount: -amount, cardToken, merchantDetails: MERCHANT })
+    },
   }
+}
+
+function inProcessMocks(e: Env): CardMocks {
   const { cards, transactions } = e.built.ctx.services
-  const card = cards.resolve(cardToken)
   const merchant = { name: MERCHANT.merchantName, merchantId: MERCHANT.merchantId, merchantCategoryCode: Number(MERCHANT.merchantCategoryCode) }
-  const r = transactions.post({
-    accountId: card.accountId, amountCents: Math.round(amount * 100), type: 'CARD_PAYMENT_REVERSAL', channel: 'VISA_REFUND_DOMESTIC',
-    counterpart: { name: merchant.name, merchantDetails: merchant }, cardId: card.id,
-  })
-  expect(r.outcome).toBe('ACCEPTED')
+  return {
+    async purchase(cardToken, amount, settlementDelayInSeconds) {
+      const r = cards.authoriseHold(cardToken, { amountCents: Math.round(amount * 100), merchant })
+      expect(r.outcome).toBe('ACCEPTED')
+      e.built.ctx.scheduler.later(() => { transactions.holds.settle(r.hold!.id) }, settlementDelayInSeconds * 1000)
+    },
+    async refund(cardToken, amount) {
+      const card = cards.resolve(cardToken)
+      const r = transactions.post({
+        accountId: card.accountId, amountCents: Math.round(amount * 100), type: 'CARD_PAYMENT_REVERSAL', channel: 'VISA_REFUND_DOMESTIC',
+        counterpart: { name: merchant.name, merchantDetails: merchant }, cardId: card.id,
+      })
+      expect(r.outcome).toBe('ACCEPTED')
+    },
+  }
 }
 
 // ---------------------------------------------------------------------------------------------- journeys
@@ -310,8 +325,9 @@ describe('onboarding outcomes steered by the email tag', () => {
   })
 })
 
-describe('journey (a): onboard -> account -> risk LOW -> virtual card -> mock purchase -> refund', () => {
-  it('moves the balances step by step and delivers the exact webhook sequence', async () => {
+describe('journey (a): onboard -> account -> risk LOW -> virtual card -> mock purchase -> settlement -> refund', () => {
+  /** Moves the balances step by step and checks the exact webhook sequence; `mocks` makes the card purchase and refund. */
+  async function journey(mocks: CardMocks): Promise<void> {
     const { api, receiver } = env
     // onboarding is asynchronous: PENDING_APPROVAL on create, ACTIVE once the platform outcome arrives
     const customer = await onboard(api)
@@ -337,7 +353,7 @@ describe('journey (a): onboard -> account -> risk LOW -> virtual card -> mock pu
     expect(await balances(api, id)).toEqual({ status: 'ACTIVE', total: 100, available: 100, held: 0, stacks: 0 })
 
     // purchase: the hold is authorised now, the settlement follows 60 s later on the virtual clock
-    await mockPurchase(env, card.cardToken, 25.5, 60)
+    await mocks.purchase(card.cardToken, 25.5, 60)
     const hold = await receiver.waitFor(() => receiver.for(customer).find((n) => n.transactionEvent?.transactionType === 'CARD_TRANSACTION'))
     expect(await balances(api, id)).toEqual({ status: 'ACTIVE', total: 100, available: 74.5, held: 25.5, stacks: 0 })
     const holdId = hold.transactionEvent.transactionHayId as string
@@ -354,7 +370,7 @@ describe('journey (a): onboard -> account -> risk LOW -> virtual card -> mock pu
     const settlement = await api.ok('GET', `/v1/transactions/${settled.transactionEvent.transactionHayId}`)
     expect(settlement).toMatchObject({ accountHayId: id, cardId: card.cardHayId, relatedHoldHayId: holdId, currencyAmount: { amount: -25.5, currency: 'AUD' }, rollingAccountBalance: 74.5 })
 
-    await mockRefund(env, card.cardToken, 5.99)
+    await mocks.refund(card.cardToken, 5.99)
     await api.flush()
     expect(await balances(api, id)).toEqual({ status: 'ACTIVE', total: 80.49, available: 80.49, held: 0, stacks: 0 })
 
@@ -377,6 +393,16 @@ describe('journey (a): onboard -> account -> risk LOW -> virtual card -> mock pu
     expect(received[3].cardStatusChangeEvent).toEqual({ cardHayId: card.cardHayId, accountHayId: id, cardStatus: 'ACTIVE', cardLastFourDigits: card.lastFourDigits })
     expect(new Set(received.map((n) => n.idempotencyKey)).size).toBe(received.length)
     expectWellFormed(receiver)
+  }
+
+  it('over HTTP: the purchase and refund through the Utilities API mocks (/v0/utils/*)', async ({ skip }) => {
+    skip(!(await utilitiesLive(env.api)), 'the utilities domain (C1) is still stubbed: /v0/utils/* move no money')
+    await journey(httpMocks(env.api))
+  })
+
+  it('IN-PROCESS FALLBACK, not HTTP: the purchase and refund driven through ctx.services while utilities is stubbed', async ({ skip }) => {
+    skip(await utilitiesLive(env.api), 'the utilities domain is implemented: the HTTP variant covers this journey; delete this fallback')
+    await journey(inProcessMocks(env))
   })
 })
 
@@ -524,7 +550,8 @@ describe('journey (d): PayID register and transfer by PayID', () => {
 describe('journey (e): direct debit lifecycle driven by the virtual clock', () => {
   // Every asynchronous platform effect waits one virtual hour (--async-delay-ms 3600000): nothing happens
   // until the test moves the clock, so each intermediate status can be observed. /_admin/flush would wait for
-  // that work in real time, so this journey waits on the receiver instead.
+  // that work in real time (and answer 500 after 10 s), so this journey waits on the receiver or on
+  // /_admin/notifications/flush instead.
   let clockEnv: Env
   beforeAll(async () => { clockEnv = await startEnv({ asyncDelayMs: HOUR_MS }) })
   afterAll(async () => { await stopEnv(clockEnv) })
@@ -596,7 +623,7 @@ describe('journey (e): direct debit lifecycle driven by the virtual clock', () =
     const rejectedId = randomUUID()
     const rejected = await api.ok('POST', '/v1/direct-debits', { ...dd, idempotencyKey: randomUUID(), transactionId: rejectedId, recipientBsb: '999999' })
     expect(rejected).toMatchObject({ outcome: 'REJECTED', transactionId: rejectedId, details: 'Invalid recipient BSB 999999' })
-    await api.flush()
+    await api.flushNotifications()
     expect(receiver.for(customer).slice(mark).map(summarise)).toEqual([
       { type: 'DIRECT_ENTRY', actionOwner: 'CLIENT', status: 'RECEIVED' },
       { type: 'DIRECT_ENTRY', actionOwner: 'CLIENT', status: 'REJECTED' },
@@ -692,8 +719,8 @@ describe('journey (g): group account with two members', () => {
   })
 })
 
-describe('journey (h): close account cascade and refusals on a closed account', () => {
-  it('refuses closure with money on it, then closes: cards INACTIVE, customer INACTIVE, every movement refused', async () => {
+describe('journey (h): activate a physical card, close account cascade and refusals on a closed account', () => {
+  it('activates the physical card, refuses closure with money on it, then closes: cards INACTIVE, customer INACTIVE, every movement refused', async () => {
     const { api, receiver } = env
     const customer = await onboard(api)
     const other = await onboard(api)
@@ -703,6 +730,16 @@ describe('journey (h): close account cascade and refusals on a closed account', 
     const virtualCard = await api.ok('POST', '/v0/cards/create', cardBody(id, customer, 'VIRTUAL'))
     const physicalCard = await api.ok('POST', '/v0/cards/create', cardBody(id, customer, 'PHYSICAL'))
     expect(physicalCard.cardStatus).toBe('AWAITING_ACTIVATION')
+    // the cardholder received the card: activate it
+    expect(await api.ok('POST', `/v0/cards/${physicalCard.cardHayId}/activate`)).toEqual({ message: 'Activate Card successful.' })
+    expect((await api.ok('GET', `/v0/cards/${physicalCard.cardHayId}`)).cardStatus).toBe('ACTIVE')
+    await api.flush()
+    const physicalEvents = () => receiver.for(customer).filter((n) => n.cardStatusChangeEvent?.cardHayId === physicalCard.cardHayId)
+    expect(physicalEvents().map(summarise)).toEqual([
+      { type: 'CARD_STATUS_CHANGE', actionOwner: 'CLIENT', cardStatus: 'AWAITING_ACTIVATION' },
+      { type: 'CARD_STATUS_CHANGE', actionOwner: 'CLIENT', cardStatus: 'ACTIVE' },
+    ])
+    expect(physicalEvents()[1].cardStatusChangeEvent).toEqual({ cardHayId: physicalCard.cardHayId, accountHayId: id, cardStatus: 'ACTIVE', cardLastFourDigits: physicalCard.lastFourDigits })
     await credit(api, id, 50)
     await credit(api, payer.accountHayId, 50)
     await api.flush()
