@@ -19,8 +19,9 @@
  *   whose debtor is not local answer 403 `FORBIDDEN: the client is not the <side> of mandate <id>` (A2).
  * - createMandate: the creditor account must exist and not be CLOSED (else the documented 422
  *   `NOT_FOUND: CUS.API.100522 - Creditor account details incorrect ...`); the debtor is identified by
- *   accountId, by accountNumber (BSB + account; the local BSB must resolve to a local account, another BSB
- *   must support PayTo — 422 BSB_NOT_SUPPORTED — and is an external debtor) or by an alias (a PayID or the
+ *   accountId, by accountNumber (BSB + account; the local BSB must resolve to a local account, any other BSB
+ *   is an external debtor — no PayTo-support check: "for the debtor, any BSB can be used when creating a
+ *   mandate", checkBsbIsSupportedByPayTo is advisory) or by an alias (a PayID or the
  *   staging form resolving to a local account, else external), at least one being required (400); it must
  *   differ from the creditor account (422). Amounts must be AUD (422 INVALID_CURRENCY), positive with at
  *   most 2 dp (400) and not above maximumAmount (422). validityEndDate before validityStartDate is 422.

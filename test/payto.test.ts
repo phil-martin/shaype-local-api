@@ -321,6 +321,11 @@ describe('createMandate', () => {
     expect(byNumber.debtorDetails).toMatchObject({ accountId: debtor.accountHayId, accountNumber: `${LOCAL_BSB}${debtor.accountNumber}` })
     const external = await getMandate(await createMandate(creditor, { accountNumber: EXTERNAL_DEBTOR }))
     expect(external.debtorDetails).toEqual({ accountNumber: EXTERNAL_DEBTOR, partyName: 'JOHN MAXIMILLIAN DOE', partyType: 'PERSON' })
+    // "For the debtor, any BSB can be used when creating a mandate": checkBsbIsSupportedByPayTo stays advisory
+    for (const accountNumber of ['00000012345678', '99999912345678']) {
+      const unsupported = await getMandate(await createMandate(creditor, { accountNumber }))
+      expect(unsupported.debtorDetails, accountNumber).toEqual({ accountNumber, partyName: 'JOHN MAXIMILLIAN DOE', partyType: 'PERSON' })
+    }
     const alias = await getMandate(await createMandate(creditor, { accountAliasIdentification: 'john@example.com', accountAliasType: 'EMAIL_ADDRESS' }))
     expect(alias.debtorDetails).toEqual({ partyName: 'JOHN MAXIMILLIAN DOE', partyType: 'PERSON' })
     // an external Payer is never notified and cannot use the Payer-only operations
@@ -338,7 +343,6 @@ describe('createMandate', () => {
     const cases: [object, number, RegExp][] = [
       [mandateBody(creditor, {}), 400, /debtorDetails must identify the debtor/],
       [mandateBody(creditor, { accountAliasIdentification: 'x' }), 400, /accountAliasIdentification and accountAliasType/],
-      [mandateBody(creditor, { accountNumber: '99999912345678' }), 422, /^BSB_NOT_SUPPORTED: Debtor BSB 999999/],
       [mandateBody(creditor, { accountNumber: `${LOCAL_BSB}99999999` }), 422, new RegExp(`^${ACCOUNT_DETAILS_INCORRECT('Debtor').replace(/[()]/g, '\\$&')}`)],
       [mandateBody(creditor, { accountId: UNKNOWN_ID }), 422, /Debtor account details incorrect/],
       [mandateBody(creditor, { accountNumber: '0820161234567A' }), 400, /6-digit BSB followed by/],

@@ -392,7 +392,7 @@ export class PayToService {
 
   /**
    * Debtor identification: accountId (local account) | accountNumber (BSB + account; the local BSB must
-   * resolve to a local account, another BSB is an external debtor and must support PayTo) | alias
+   * resolve to a local account, any other BSB is an external debtor) | alias
    * (resolved through the PayID service when one is loaded, else external).
    */
   private resolveDebtor(d: CreateMandateRequestBody['debtorDetails']): PartyDetails {
@@ -411,10 +411,9 @@ export class PayToService {
     }
     if (d.accountNumber) {
       if (!BSB_ACCOUNT_RE.test(d.accountNumber)) throw badRequest('BAD_REQUEST: debtorDetails.accountNumber must be a 6-digit BSB followed by a 5-9 digit account number')
-      const bsb = d.accountNumber.slice(0, 6)
-      if (!this.bsbSupported(bsb)) throw unprocessable(`BSB_NOT_SUPPORTED: Debtor BSB ${bsb} does not support PayTo`)
+      // no PayTo-support check: "For the debtor, any BSB can be used when creating a mandate" (checkBsbIsSupportedByPayTo is advisory)
       const local = this.localAccountByNumber(d.accountNumber)
-      if (bsb === LOCAL_BSB && !local) throw unprocessable(ACCOUNT_DETAILS_INCORRECT('Debtor'))
+      if (d.accountNumber.startsWith(LOCAL_BSB) && !local) throw unprocessable(ACCOUNT_DETAILS_INCORRECT('Debtor'))
       return local ? { ...out, accountId: local.id, accountNumber: d.accountNumber } : { ...out, accountNumber: d.accountNumber }
     }
     const resolved = this.resolveAlias(d.accountAliasIdentification!, d.accountAliasType!)
