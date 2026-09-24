@@ -15,10 +15,10 @@
  *   scanCase.timestamp uses the docs sample's millisecond form. webLink is an unserved local URL in the shape
  *   of the sample (…?authorizationToken=<mobileToken>&locale=en-US); mobileToken is a JWS-shaped opaque
  *   string (HS512 header, gzip payload). No webhook is emitted for case creation.
- * - Case <-> customer link: customers does not consult this domain on create (no validation of
- *   identityVerificationCaseId there), so the link is made here on customer.created when the id names a
- *   known, unlinked case (journeyId is folded into identityVerificationCaseId by customers). One customer
- *   per case. The case verdict is set once from the platform's first PENDING_APPROVAL exit (ACTIVE -> PASSED,
+ * - Case <-> customer link: createHayCustomer refuses (422, via customers/deps.ts KycDep.findCase) an
+ *   identityVerificationCaseId — or the deprecated journeyId it is folded from — that names no case
+ *   (INVALID_ARGUMENT) or a case already linked (INVALID_STATE); the link itself is made here on
+ *   customer.created. One customer per case. The case verdict is set once from the platform's first PENDING_APPROVAL exit (ACTIVE -> PASSED,
  *   REFERRED -> WARNING, REJECTED -> REJECTED); client status changes and manual approvals never rewrite it.
  * - approve*Check: customer must be REFERRED (422 INVALID_STATE otherwise — ACTIVE, PENDING_APPROVAL incl.
  *   skipKyc, REJECTED, BLOCKED, INACTIVE); unknown customer 404. Each endpoint approves its own stage

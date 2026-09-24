@@ -4,6 +4,7 @@ import type { components } from '../src/contract/generated/b2b-types.js'
 import { startApp } from './helpers.js'
 import { assertValidNotification } from './webhook-schema.js'
 import type { BuiltServer } from '../src/server.js'
+import { assertDeps } from '../src/domains/customers/deps.js'
 
 type CreateBody = components['schemas']['CreateHayCustomerRequestBody']
 type HayCustomer = components['schemas']['HayCustomer']
@@ -78,6 +79,12 @@ describe('kyc domain: registration', () => {
       expect(handled, op).toContain(op)
       expect(stubbed, op).not.toContain(op)
     }
+  })
+
+  it('satisfies the KycDep shape customers calls (findCase), which its startup guard enforces', () => {
+    expect(() => assertDeps(built.ctx)).not.toThrow()
+    const ctx = { ...built.ctx, services: { ...built.ctx.services, kyc: {} } } as unknown as BuiltServer['ctx']
+    expect(() => assertDeps(ctx)).toThrow('customers: dependency methods missing: kyc.findCase')
   })
 })
 
@@ -243,15 +250,23 @@ describe('case <-> customer link', () => {
     expect(built.ctx.services.kyc.findCase(c.scanCase!.id!)).toMatchObject({ customerId: pending.customerHayId, outcome: 'NOT_EXECUTED' })
   })
 
-  it('ignores an unknown case id and never re-links a case already linked to another customer', async () => {
-    const orphan = await createCustomer({ emailTag: 'pending', identityVerificationCaseId: UNKNOWN_ID })
-    expect(built.ctx.services.kyc.caseForCustomer(orphan.customerHayId!)).toBeUndefined()
+  it('createHayCustomer refuses (422, nothing created) an unknown case id and a case already linked to another customer', async () => {
+    const count = () => (built.ctx.db.prepare('SELECT COUNT(*) AS n FROM customers').get() as { n: number }).n
+    const before = count()
+    for (const field of ['identityVerificationCaseId', 'journeyId'] as const) {
+      const res = await app.inject({ method: 'POST', url: '/v0/customers/create', payload: customerBody({ emailTag: 'pending', [field]: UNKNOWN_ID }) })
+      expect(res.statusCode, field).toBe(422)
+      expect(res.json()).toMatchObject({ status: '422', message: `INVALID_ARGUMENT: Identity verification case ${UNKNOWN_ID} not found (identityVerificationCaseId must be a scanCase.id returned by createCase)`, traceId: expect.any(String) })
+    }
+    expect(count()).toBe(before)
 
     const c = await createCase({ userLocationCountry: 'AUS' })
     const first = await createCustomer({ emailTag: 'pending', identityVerificationCaseId: c.scanCase!.id })
-    const second = await createCustomer({ emailTag: 'pending', identityVerificationCaseId: c.scanCase!.id })
+    const second = await app.inject({ method: 'POST', url: '/v0/customers/create', payload: customerBody({ emailTag: 'pending', identityVerificationCaseId: c.scanCase!.id }) })
+    expect(second.statusCode).toBe(422)
+    expect(second.json()).toMatchObject({ status: '422', message: `INVALID_STATE: Identity verification case ${c.scanCase!.id} is already linked to another customer` })
+    expect(count()).toBe(before + 1)
     expect(built.ctx.services.kyc.findCase(c.scanCase!.id!)!.customerId).toBe(first.customerHayId)
-    expect(built.ctx.services.kyc.caseForCustomer(second.customerHayId!)).toBeUndefined()
   })
 })
 
