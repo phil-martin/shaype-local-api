@@ -39,7 +39,8 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext, svc: Trans
   const transfer = (operationId: string): void => {
     defineRoute<ByAccount, never, TransferOutRequestBody>(app, ctx, operationId, async (req) => {
       const b = req.body
-      const r = await withIdempotency(ctx, operationId, b.idempotencyKey, b, () => ({ status: 200, body: svc.transfer(req.params.accountId, b, { actionOwner: 'CLIENT' }) }))
+      // the path account (the one debited) is part of the request, as bpay's makeBpayPayment hashes it
+      const r = await withIdempotency(ctx, operationId, b.idempotencyKey, { ...b, accountId: req.params.accountId }, () => ({ status: 200, body: svc.transfer(req.params.accountId, b, { actionOwner: 'CLIENT' }) }))
       return r.body
     })
   }

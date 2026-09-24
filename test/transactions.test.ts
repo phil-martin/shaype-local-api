@@ -339,6 +339,14 @@ describe('makeTransferV1 / V0 (POST /v1/accounts/{accountId}/transfer)', () => {
     expect(again.json()).toEqual(r)
     expect((await getAccount(sender.accountHayId!)).totalBalance).toBe(75)
     expectError(await post(`/v1/accounts/${sender.accountHayId}/transfer`, { ...body, amount: 26 }), 422, /^IDEMPOTENCY_KEY_REUSED/)
+    // the path account is part of the request: the same key and body sent from another account is a reuse, not a replay
+    const second = await fundedAccount(100, senderCustomer)
+    for (const version of ['v1', 'v0']) {
+      const b = { ...body, idempotencyKey: randomUUID() }
+      expect((await post(`/${version}/accounts/${sender.accountHayId}/transfer`, b)).json().outcome).toBe('ACCEPTED')
+      expectError(await post(`/${version}/accounts/${second.accountHayId}/transfer`, b), 422, /^IDEMPOTENCY_KEY_REUSED/)
+    }
+    expect((await getAccount(second.accountHayId!)).totalBalance).toBe(100)
   })
 
   it('ACCOUNT to the local BSB 636220 is converted to an internal transfer (the recipient leg names the sending customer when senderName is absent); another BSB posts INTERBANK_TRANSFER_OUT (NPP) with basicAccountNumber', async () => {
