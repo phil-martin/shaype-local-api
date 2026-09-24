@@ -57,7 +57,7 @@ export type { Balances, BalanceDeltas, CreateAccountInput, MovementRefusal, Limi
 export type { Account, AccountStatus, AccountRule, CloseReason, HolderType, RiskLevel } from './repo.js'
 export type { CardsDep, GroupsDep } from './deps.js'
 export { LOCAL_PRODUCT_ID, LIMIT_TYPES, SETTABLE_LIMIT_TYPES, LIMIT_OUTCOME, LOCAL_PRODUCT } from './products.js'
-export type { LimitType, InternalLimitType, Product } from './products.js'
+export type { LimitType, InternalLimitType, LimitOutcome, WebhookOutcome, Product } from './products.js'
 
 export function register(app: FastifyInstance, ctx: AppContext): void {
   const svc = new AccountsService(ctx, new AccountRepo(ctx.db))

@@ -5,7 +5,7 @@ import { startApp } from './helpers.js'
 import { assertValidNotification } from './webhook-schema.js'
 import type { BuiltServer } from '../src/server.js'
 import { LOCAL_PRODUCT_ID } from '../src/domains/accounts/index.js'
-import type { AuthoriseHoldInput, CardContext, TransactionsService } from '../src/domains/transactions/index.js'
+import { TAGS_400_MESSAGE, toRestOutcome, type AuthoriseHoldInput, type CardContext, type TransactionsService } from '../src/domains/transactions/index.js'
 import type { PayIdDep } from '../src/domains/transactions/deps.js'
 
 type S = components['schemas']
@@ -341,7 +341,7 @@ describe('makeTransferV1 / V0 (POST /v1/accounts/{accountId}/transfer)', () => {
     expectError(await post(`/v1/accounts/${sender.accountHayId}/transfer`, { ...body, amount: 26 }), 422, /^IDEMPOTENCY_KEY_REUSED/)
   })
 
-  it('ACCOUNT to the local BSB 636220 is converted to an internal transfer; another BSB posts INTERBANK_TRANSFER_OUT (NPP) with basicAccountNumber', async () => {
+  it('ACCOUNT to the local BSB 636220 is converted to an internal transfer (the recipient leg names the sending customer when senderName is absent); another BSB posts INTERBANK_TRANSFER_OUT (NPP) with basicAccountNumber', async () => {
     const senderCustomer = await newCustomer()
     const sender = await fundedAccount(100, senderCustomer)
     const recipient = await newAccount()
@@ -349,6 +349,13 @@ describe('makeTransferV1 / V0 (POST /v1/accounts/{accountId}/transfer)', () => {
     expect(local.json()).toMatchObject({ outcome: 'ACCEPTED' })
     expect((await getTransaction(local.json().transactionId)).type).toBe('INTRABANK_TRANSFER_OUT')
     expect((await getAccount(recipient.accountHayId!)).totalBalance).toBe(25)
+    const { firstName, lastName } = built.ctx.services.customers.get(senderCustomer).customerDetails
+    const senderName = `${firstName} ${lastName}`
+    const [into] = svc.listForAccount(recipient.accountHayId!)
+    expect(svc.toResponse(into!)).toMatchObject({ type: 'INTRABANK_TRANSFER_IN', counterpartName: senderName, counterpartDetails: { accountId: sender.accountHayId, customerId: senderCustomer, name: senderName } })
+    const received = (await txEvents(recipient.accountHayId!)).at(-1)
+    expect(received.transactionEvent).toMatchObject({ transactionType: 'INTRABANK_TRANSFER_IN', counterpartName: senderName, counterpartDetails: { name: senderName } })
+    assertValidNotification(received)
 
     const npp = await post(`/v0/accounts/${sender.accountHayId}/transfer`, transferBody(senderCustomer, { amount: 10, reference: 'INV-42', transferType: 'ACCOUNT', accountTransfer: { bsb: '062000', accountNumber: '12345678', recipientName: 'Andy', senderName: 'Alice' } }))
     expect(npp.json()).toMatchObject({ outcome: 'ACCEPTED' })
@@ -389,7 +396,7 @@ describe('makeTransferV1 / V0 (POST /v1/accounts/{accountId}/transfer)', () => {
     }
   })
 
-  it('recipient refusals: REFUSED_RECIPIENT_ACCOUNT_BLOCKED / _CLOSED and the recipient MAX_BALANCE (REFUSED_MAX_BALANCE_EXCEEDED, REFUSED_LIMIT_BREACH on v0)', async () => {
+  it('recipient refusals: REFUSED_RECIPIENT_ACCOUNT_BLOCKED / _CLOSED and the recipient MAX_BALANCE (REFUSED_MAX_BALANCE_EXCEEDED on v1 and v0 alike)', async () => {
     const senderCustomer = await newCustomer()
     const sender = await fundedAccount(1000, senderCustomer)
     const to = (recipient: HayAccount, amount = 25) => transferBody(senderCustomer, { amount, internalTransfer: { recipientAccountHayId: recipient.accountHayId!, recipientName: 'Bob', senderName: 'Alice' } })
@@ -406,13 +413,13 @@ describe('makeTransferV1 / V0 (POST /v1/accounts/{accountId}/transfer)', () => {
     const capped = await newAccount()
     await app.inject({ method: 'PATCH', url: `/v0/accounts/${capped.accountHayId}/max-balance`, payload: { maxBalanceLimit: 20 } })
     expect((await post(`/v1/accounts/${sender.accountHayId}/transfer`, to(capped))).json()).toEqual({ outcome: 'REFUSED_MAX_BALANCE_EXCEEDED' })
-    expect((await post(`/v0/accounts/${sender.accountHayId}/transfer`, to(capped))).json()).toEqual({ outcome: 'REFUSED_LIMIT_BREACH' })
+    expect((await post(`/v0/accounts/${sender.accountHayId}/transfer`, to(capped))).json()).toEqual({ outcome: 'REFUSED_MAX_BALANCE_EXCEEDED' })
     const highRisk = await newAccount({ risk: 'HIGH' })
     expect((await post(`/v1/accounts/${sender.accountHayId}/transfer`, to(highRisk))).json()).toEqual({ outcome: 'REFUSED_MAX_BALANCE_EXCEEDED' })
     expect((await getAccount(sender.accountHayId!)).totalBalance).toBe(1000)
   })
 
-  it('sender refusals: REFUSED_ACCOUNT_BLOCKED, REFUSED_INSUFFICIENT_FUNDS, PAYMENT_TO_ACCOUNT_NUMBER (REFUSED_LIMIT_BREACH), daily transfers-out, risk HIGH', async () => {
+  it('sender refusals: REFUSED_ACCOUNT_BLOCKED, REFUSED_INSUFFICIENT_FUNDS, PAYMENT_TO_ACCOUNT_NUMBER (REFUSED_LIMIT_BREACH), daily transfers-out (detailed on v0 too), risk HIGH', async () => {
     const senderCustomer = await newCustomer()
     const sender = await fundedAccount(50, senderCustomer)
     const recipient = await newAccount()
@@ -432,7 +439,57 @@ describe('makeTransferV1 / V0 (POST /v1/accounts/{accountId}/transfer)', () => {
     expect((await post(`/v1/accounts/${big.accountHayId}/transfer`, bigTo(50_000))).json()).toMatchObject({ outcome: 'ACCEPTED' })
     expect((await post(`/v1/accounts/${big.accountHayId}/transfer`, bigTo(50_000))).json()).toMatchObject({ outcome: 'ACCEPTED' })
     expect((await post(`/v1/accounts/${big.accountHayId}/transfer`, bigTo(0.01))).json()).toEqual({ outcome: 'REFUSED_DAILY_TRANSFERS_OUT_LIMIT_BREACHED' })
-    expect((await post(`/v0/accounts/${big.accountHayId}/transfer`, bigTo(0.01))).json()).toEqual({ outcome: 'REFUSED_LIMIT_BREACH' })
+    expect((await post(`/v0/accounts/${big.accountHayId}/transfer`, bigTo(0.01))).json()).toEqual({ outcome: 'REFUSED_DAILY_TRANSFERS_OUT_LIMIT_BREACHED' })
+  })
+
+  it('a CLOSED or LOCKED sender is refused before the recipient is resolved (REFUSED_ACCOUNT_CLOSED / _BLOCKED even for an unknown PayID); nothing moves, no webhook', async () => {
+    const holder = await newCustomer()
+    const closed = await newAccount({ holder })
+    expect((await post(`/v0/accounts/${closed.accountHayId}/close`, { reason: 'CUSTOMER' })).statusCode).toBe(202)
+    await flush()
+    const recipient = await newAccount()
+    const internal = transferBody(holder, { internalTransfer: { recipientAccountHayId: recipient.accountHayId!, recipientName: 'Bob', senderName: 'Alice' } })
+    const res = await post(`/v1/accounts/${closed.accountHayId}/transfer`, internal)
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json()).toEqual({ outcome: 'REFUSED_ACCOUNT_CLOSED' })
+    expect((await post(`/v1/accounts/${closed.accountHayId}/transfer`, transferBody(holder, { transferType: 'PAY_ID', payIdTransfer: { payId: 'nobody@example.com', recipientName: 'Bob' } }))).json()).toEqual({ outcome: 'REFUSED_ACCOUNT_CLOSED' })
+
+    const lockedHolder = await newCustomer()
+    const locked = await fundedAccount(50, lockedHolder)
+    await post(`/v0/accounts/${locked.accountHayId}/block`, { note: 'x', accountBlockStyle: 'ACCOUNT_ONLY' })
+    const before = (await txEvents(locked.accountHayId!)).length
+    expect((await post(`/v1/accounts/${locked.accountHayId}/transfer`, transferBody(lockedHolder, { transferType: 'PAY_ID', payIdTransfer: { payId: 'nobody@example.com', recipientName: 'Bob' } }))).json()).toEqual({ outcome: 'REFUSED_ACCOUNT_BLOCKED' })
+    expect((await post(`/v0/accounts/${locked.accountHayId}/transfer`, transferBody(lockedHolder, { transferType: 'ACCOUNT', accountTransfer: { bsb: '062000', accountNumber: '12345678', recipientName: 'Andy' } }))).json()).toEqual({ outcome: 'REFUSED_ACCOUNT_BLOCKED' })
+    expect(await getAccount(locked.accountHayId!)).toMatchObject({ status: 'LOCKED', totalBalance: 50, availableBalance: 50 })
+    expect((await getAccount(recipient.accountHayId!)).totalBalance).toBe(0)
+    expect((await txEvents(locked.accountHayId!)).length).toBe(before)
+    expect(await txEvents(closed.accountHayId!)).toEqual([])
+  })
+
+  it('no FX: an INTERNAL transfer between accounts of different currencies, and any non-INTERNAL transfer from an FX child, are REFUSED_CAPABILITY_NOT_ENABLED before anything moves', async () => {
+    const holder = await newCustomer()
+    const parent = await fundedAccount(100, holder)
+    const created = await post('/v1/accounts', { idempotencyKey: randomUUID(), accountHolderId: holder, accountHolderType: 'CUSTOMER', productId: LOCAL_PRODUCT_ID, currency: 'USD', parentAccountId: parent.accountHayId })
+    expect(created.statusCode, created.body).toBe(200)
+    const child = created.json() as HayAccount
+    expect(child).toMatchObject({ currency: 'USD', parentAccountId: parent.accountHayId })
+    // LOW risk so a refusal cannot be a limit
+    expect((await app.inject({ method: 'PATCH', url: `/v0/accounts/${child.accountHayId}/riskLevel`, payload: { level: 'LOW', reason: 'test' } })).statusCode).toBe(200)
+
+    const toChild = transferBody(holder, { internalTransfer: { recipientAccountHayId: child.accountHayId!, recipientName: 'Me', senderName: 'Me' } })
+    expect((await post(`/v1/accounts/${parent.accountHayId}/transfer`, toChild)).json()).toEqual({ outcome: 'REFUSED_CAPABILITY_NOT_ENABLED' })
+    expect((await post(`/v1/accounts/${parent.accountHayId}/transfer`, transferBody(holder, { transferType: 'ACCOUNT', accountTransfer: { bsb: '636220', accountNumber: child.accountNumber!, recipientName: 'Me' } }))).json()).toEqual({ outcome: 'REFUSED_CAPABILITY_NOT_ENABLED' })
+    expect(await getAccount(parent.accountHayId!)).toMatchObject({ totalBalance: 100, availableBalance: 100 })
+    expect(await getAccount(child.accountHayId!)).toMatchObject({ totalBalance: 0, status: 'APPROVED' })
+
+    const fromChild = (overrides: Partial<TransferBody>) => post(`/v1/accounts/${child.accountHayId}/transfer`, transferBody(holder, { amount: 1, ...overrides }))
+    expect((await fromChild({ transferType: 'ACCOUNT', accountTransfer: { bsb: '062000', accountNumber: '12345678', recipientName: 'Andy' } })).json()).toEqual({ outcome: 'REFUSED_CAPABILITY_NOT_ENABLED' })
+    expect((await fromChild({ transferType: 'ACCOUNT', accountTransfer: { bsb: '636220', accountNumber: parent.accountNumber!, recipientName: 'Me' } })).json()).toEqual({ outcome: 'REFUSED_CAPABILITY_NOT_ENABLED' })
+    // rails before PayID resolution: without a PayID service this would otherwise be REFUSED_INVALID_PAY_ID
+    expect((await fromChild({ transferType: 'PAY_ID', payIdTransfer: { payId: 'andy@other.bank', recipientName: 'Andy' } })).json()).toEqual({ outcome: 'REFUSED_CAPABILITY_NOT_ENABLED' })
+    expect((await fromChild({ internalTransfer: { recipientAccountHayId: parent.accountHayId!, recipientName: 'Me', senderName: 'Me' } })).json()).toEqual({ outcome: 'REFUSED_CAPABILITY_NOT_ENABLED' })
+    expect(await txEvents(child.accountHayId!)).toEqual([])
+    expect(svc.listForAccount(child.accountHayId!)).toEqual([])
   })
 
   it('400 when the transfer-type object is missing or malformed, 404 for unknown sender / customer / recipient, 422 PERMISSION_DENIED for a non-holder, 422 INVALID_RECIPIENT for a self transfer', async () => {
@@ -526,6 +583,89 @@ describe('holds (services.transactions.holds, GET /v1/holds/{holdId}, GET /v0/ac
     const h2 = svc.holds.authorise(holdInput(b.accountHayId!, 1000)).hold!
     svc.holds.settle(h2.id, 700)
     expect(await getAccount(b.accountHayId!)).toMatchObject({ totalBalance: 13, heldBalance: 0, availableBalance: 13 })
+  })
+
+  it('settle: a settlement of 0 is a 400; a settlement larger than the hold funds-checks the excess (REFUSED_NOT_ENOUGH_FUNDS, hold left open, refused CARD_TRANSACTION_SETTLED webhook) and clears once the excess fits', async () => {
+    const holder = await newCustomer()
+    const a = await fundedAccount(10, holder)
+    const hold = svc.holds.authorise(holdInput(a.accountHayId!, 1000)).hold!
+    expect(await getAccount(a.accountHayId!)).toMatchObject({ totalBalance: 10, heldBalance: 10, availableBalance: 0 })
+    expect(() => svc.holds.settle(hold.id, 0)).toThrow(/^BAD_REQUEST: settlement amount must be greater than 0/)
+    expect(() => svc.holds.settle(hold.id, -1)).toThrow(/^BAD_REQUEST/)
+
+    const refused = svc.holds.settle(hold.id, 2500)
+    expect(refused).toMatchObject({ outcome: 'REFUSED_NOT_ENOUGH_FUNDS', hold: { id: hold.id, state: 'AUTHORISED', amount: 1000 } })
+    expect(refused.transaction).toBeUndefined()
+    expect(await getAccount(a.accountHayId!)).toMatchObject({ totalBalance: 10, heldBalance: 10, availableBalance: 0, status: 'ACTIVE' })
+    expect(svc.listForAccount(a.accountHayId!)).toHaveLength(1)
+    const ev = (await txEvents(a.accountHayId!)).at(-1)
+    expect(ev).toMatchObject({ customerHayId: holder, actionOwner: 'PLATFORM', transactionEvent: { transactionHayId: hold.id, holdHayId: hold.id, transactionType: 'CARD_TRANSACTION_SETTLED', outcome: 'REFUSED_NOT_ENOUGH_FUNDS', currencyAmount: AUD(-25), updatedBalance: AUD(0), isPending: false, cardHayId: hold.cardId, counterpartName: 'IGA (Mt Cotton)', accountBalances: { totalBalance: AUD(10), heldBalance: AUD(10), availableBalance: AUD(0) } } })
+    assertValidNotification(ev)
+
+    expect((await credit(a.accountHayId!, 20)).outcome).toBe('ACCEPTED')
+    const settled = svc.holds.settle(hold.id, 2500)
+    expect(settled).toMatchObject({ outcome: 'ACCEPTED', hold: { state: 'SETTLED' }, transaction: { amount: -2500, relatedHoldId: hold.id } })
+    expect(await getAccount(a.accountHayId!)).toMatchObject({ totalBalance: 5, heldBalance: 0, availableBalance: 5 })
+    const settledEv = (await txEvents(a.accountHayId!)).at(-1)
+    expect(settledEv.transactionEvent).toMatchObject({ transactionHayId: settled.transaction!.id, holdHayId: hold.id, transactionType: 'CARD_TRANSACTION_SETTLED', outcome: 'ACCEPTED', currencyAmount: AUD(-25), updatedBalance: AUD(5) })
+    assertValidNotification(settledEv)
+  })
+
+  it('increase refused for funds: the hold keeps its amount, the webhook carries the hold id and the refused increment; the account status gate precedes a caller refusal', async () => {
+    const holder = await newCustomer()
+    const a = await fundedAccount(10, holder)
+    const hold = svc.holds.authorise(holdInput(a.accountHayId!, 800)).hold!
+    expect(svc.holds.increase(hold.id, 201)).toMatchObject({ outcome: 'REFUSED_NOT_ENOUGH_FUNDS', hold: { id: hold.id, amount: 800, state: 'AUTHORISED' } })
+    expect(await getAccount(a.accountHayId!)).toMatchObject({ totalBalance: 10, heldBalance: 8, availableBalance: 2 })
+    expect(svc.holds.get(hold.id).amount).toBe(800)
+    const ev = (await txEvents(a.accountHayId!)).at(-1)
+    expect(ev).toMatchObject({ customerHayId: holder, transactionEvent: { transactionHayId: hold.id, holdHayId: hold.id, transactionType: 'CARD_TRANSACTION', outcome: 'REFUSED_NOT_ENOUGH_FUNDS', currencyAmount: AUD(-2.01), updatedBalance: AUD(2), isPending: false, cardHayId: hold.cardId, accountBalances: { heldBalance: AUD(8), availableBalance: AUD(2) } } })
+    assertValidNotification(ev)
+    expect(svc.holds.increase(hold.id, 200).outcome).toBe('ACCEPTED')
+    expect(await getAccount(a.accountHayId!)).toMatchObject({ heldBalance: 10, availableBalance: 0 })
+
+    await post(`/v0/accounts/${a.accountHayId}/block`, { note: 'x', accountBlockStyle: 'ACCOUNT_ONLY' })
+    expect(svc.holds.authorise(holdInput(a.accountHayId!, 1, { refusal: { outcome: 'REFUSED_CARD_PREFERENCE', cardPreferenceOutcome: 'CONTACTLESS_DISABLED' } }))).toEqual({ outcome: 'REFUSED_ACCOUNT_BLOCKED' })
+    const blockedEv = (await txEvents(a.accountHayId!)).at(-1)
+    expect(blockedEv.transactionEvent).toMatchObject({ outcome: 'REFUSED_ACCOUNT_BLOCKED', transactionType: 'CARD_TRANSACTION' })
+    expect(blockedEv.transactionEvent).not.toHaveProperty('cardPreferenceOutcome')
+    assertValidNotification(blockedEv)
+  })
+
+  it('authorise on a CLOSED account: REFUSED_ACCOUNT_CLOSED, nothing held, webhook CARD_TRANSACTION with the refused outcome', async () => {
+    const holder = await newCustomer()
+    const a = await newAccount({ holder })
+    expect((await post(`/v0/accounts/${a.accountHayId}/close`, { reason: 'CUSTOMER' })).statusCode).toBe(202)
+    await flush()
+    expect((await getAccount(a.accountHayId!)).status).toBe('CLOSED')
+    const c = card()
+    expect(svc.holds.authorise(holdInput(a.accountHayId!, 100, { card: c }))).toEqual({ outcome: 'REFUSED_ACCOUNT_CLOSED' })
+    expect(await getAccount(a.accountHayId!)).toMatchObject({ status: 'CLOSED', totalBalance: 0, heldBalance: 0, availableBalance: 0 })
+    expect((await app.inject({ method: 'GET', url: `/v0/accounts/${a.accountHayId}/holds` })).json()).toEqual([])
+    const ev = (await txEvents(a.accountHayId!)).at(-1)
+    expect(ev).toMatchObject({ customerHayId: holder, actionOwner: 'PLATFORM', transactionEvent: { accountHayId: a.accountHayId, transactionType: 'CARD_TRANSACTION', outcome: 'REFUSED_ACCOUNT_CLOSED', currencyAmount: AUD(-1), updatedBalance: AUD(0), isPending: false, isAtmTransaction: false, cardHayId: c.cardHayId, counterpartName: 'IGA (Mt Cotton)' } })
+    expect(ev.transactionEvent).not.toHaveProperty('holdHayId')
+    assertValidNotification(ev)
+  })
+
+  it('daily card usage windows each authorised portion from its own time: an increment made late in the day still counts after the original authorisation has aged out; a decrease releases the newest portion first', async () => {
+    const a = await fundedAccount(1000)
+    await app.inject({ method: 'PUT', url: `/v1/accounts/${a.accountHayId}/limits/CARD_PAYMENTS_DAILY`, payload: { limitAmount: 50 } })
+    const hold = svc.holds.authorise(holdInput(a.accountHayId!, 3000)).hold!
+    expect(hold.portions).toEqual([{ amount: 3000, at: hold.authorisedAt }])
+    await advanceClock(23 * 60 * 60 * 1000)
+    const increased = svc.holds.increase(hold.id, 2000).hold!
+    expect(increased.portions).toEqual([{ amount: 3000, at: hold.authorisedAt }, { amount: 2000, at: expect.stringMatching(ISO_MICROS) }])
+    expect(increased.portions[1]!.at > hold.authorisedAt).toBe(true)
+    expect(svc.holds.authorise(holdInput(a.accountHayId!, 1))).toEqual({ outcome: 'REFUSED_DAILY_CARD_TRANSACTIONS_LIMIT_BREACHED' })
+    await advanceClock(2 * 60 * 60 * 1000) // the 30.00 is now 25 h old, the 20.00 increment 2 h old
+    expect(svc.holds.authorise(holdInput(a.accountHayId!, 3001))).toEqual({ outcome: 'REFUSED_DAILY_CARD_TRANSACTIONS_LIMIT_BREACHED' })
+    expect(svc.holds.authorise(holdInput(a.accountHayId!, 3000)).outcome).toBe('ACCEPTED')
+    // a decrease releases the newest portion first
+    const decreased = svc.holds.decrease(hold.id, 2500).hold!
+    expect(decreased).toMatchObject({ amount: 2500, portions: [{ amount: 2500, at: hold.authorisedAt }] })
+    expect(svc.holds.authorise(holdInput(a.accountHayId!, 2000)).outcome).toBe('ACCEPTED') // usage: 30.00 (fresh) + 20.00
+    expect(svc.holds.authorise(holdInput(a.accountHayId!, 1))).toEqual({ outcome: 'REFUSED_DAILY_CARD_TRANSACTIONS_LIMIT_BREACHED' })
   })
 
   it('increase keeps the hold id and reports the cumulative amount; decrease releases the delta as CARD_TRANSACTION_REFUND pending; a full decrease is a reversal', async () => {
@@ -670,6 +810,107 @@ describe('services.transactions.post (the engine other domains call)', () => {
     expect(svc.post({ accountId: a.accountHayId!, amountCents: -100, type: 'DIRECT_DEBIT_TRANSFER', channel: 'CUSCAL_DE_DEBIT_IN', limits: ['DIRECT_DEBIT_PER_DAY'] }).transaction).toMatchObject({ limitKinds: ['DIRECT_DEBIT_PER_DAY'] })
     expect(await getAccount(a.accountHayId!)).toMatchObject({ totalBalance: 179, availableBalance: 179 })
     expect(() => svc.post({ accountId: UNKNOWN_ID, amountCents: 1, type: 'GENERAL_CREDIT', channel: 'MANUAL_ADJUSTMENT' })).toThrow(/NOT_FOUND: Account/)
+    expect(() => svc.post({ accountId: a.accountHayId!, amountCents: 1, type: 'GENERAL_CREDIT', channel: 'MANUAL_ADJUSTMENT', transactionTimeUtc: 'yesterday' })).toThrow(/^BAD_REQUEST: transactionTimeUtc must be a valid date-time/)
+  })
+
+  it('a refusal by a limit with no webhook value (PAYMENT_TO_ACCOUNT_NUMBER, every limit on a HIGH-risk account) answers REFUSED_LIMIT_BREACH and emits no webhook even with notifyRefusal', async () => {
+    const a = await fundedAccount(100)
+    await app.inject({ method: 'PUT', url: `/v1/accounts/${a.accountHayId}/limits/PAYMENT_TO_ACCOUNT_NUMBER`, payload: { limitAmount: 10 } })
+    const before = (await txEvents(a.accountHayId!)).length
+    const out = (cents: number) => svc.post({ accountId: a.accountHayId!, amountCents: -cents, type: 'INTERBANK_TRANSFER_OUT', channel: 'CUSCAL_NPP_TRANSFER_OUT', counterpart: { name: 'Andy', basicAccountNumber: { accountNumber: '12345678', branchNumber: '062000' } }, notifyRefusal: true, actionOwner: 'CLIENT' })
+    expect(out(2000)).toEqual({ outcome: 'REFUSED_LIMIT_BREACH' })
+    expect(svc.holds.authorise(holdInput(a.accountHayId!, 2000, { limits: ['PAYMENT_TO_ACCOUNT_NUMBER'] }))).toEqual({ outcome: 'REFUSED_LIMIT_BREACH' })
+    expect((await txEvents(a.accountHayId!)).length).toBe(before)
+    expect(await getAccount(a.accountHayId!)).toMatchObject({ totalBalance: 100, availableBalance: 100, heldBalance: 0 })
+    expect(svc.listForAccount(a.accountHayId!)).toHaveLength(1)
+    // a limit with a webhook value still notifies
+    expect(out(1000).outcome).toBe('ACCEPTED')
+    await app.inject({ method: 'PUT', url: `/v1/accounts/${a.accountHayId}/limits/TOTAL_SPEND_PER_YEAR`, payload: { limitAmount: 10 } })
+    expect(out(1)).toEqual({ outcome: 'REFUSED_ANNUAL_SPENDING_LIMIT_BREACHED' })
+    const ev = (await txEvents(a.accountHayId!)).at(-1)
+    expect(ev).toMatchObject({ actionOwner: 'CLIENT', transactionEvent: { transactionType: 'INTERBANK_TRANSFER_OUT', outcome: 'REFUSED_ANNUAL_SPENDING_LIMIT_BREACHED', currencyAmount: AUD(-0.01), updatedBalance: AUD(90), isPending: false, counterpartName: 'Andy' } })
+    assertValidNotification(ev)
+
+    const high = await newAccount({ risk: 'HIGH' })
+    expect(svc.post({ accountId: high.accountHayId!, amountCents: -100, type: 'INTERBANK_TRANSFER_OUT', channel: 'CUSCAL_NPP_TRANSFER_OUT', notifyRefusal: true })).toEqual({ outcome: 'REFUSED_LIMIT_BREACH' })
+    expect(svc.post({ accountId: high.accountHayId!, amountCents: -100, type: 'INTRABANK_TRANSFER_OUT', channel: 'HAAS_TRANSFER_INTERNAL_OUT', notifyRefusal: true })).toEqual({ outcome: 'REFUSED_LIMIT_BREACH' })
+    expect(await txEvents(high.accountHayId!)).toEqual([])
+  })
+
+  it('ATM stand-in and card refund postings: CARD_TRANSACTION isPending false / isAtmTransaction true, and CARD_TRANSACTION_REFUND isPending false with a positive amount', async () => {
+    const holder = await newCustomer()
+    const a = await fundedAccount(100, holder)
+    const cardHayId = randomUUID()
+    const atm = svc.post({ accountId: a.accountHayId!, amountCents: -2000, type: 'ATM_WITHDRAWAL', channel: 'VISA_ATM', cardId: cardHayId, cardUsage: { isAtmWithdrawal: true, isCardPresent: true }, counterpart: { name: 'ATM George St', merchantDetails: { name: 'ATM George St', merchantId: '000000000000001', merchantCategoryCode: 6011 } }, description: 'Cash withdrawal' })
+    expect(atm.outcome).toBe('ACCEPTED')
+    expect(atm.transaction).toMatchObject({ webhookType: 'CARD_TRANSACTION', limitKinds: ['SINGLE_CARD_TRANSACTION', 'ATM_WITHDRAWAL_PER_DAY', 'CARD_PAYMENTS_DAILY'], customerId: holder })
+    expect(await getTransaction(atm.transaction!.id)).toMatchObject({ type: 'ATM_WITHDRAWAL', transactionChannel: 'VISA_ATM', currencyAmount: AUD(-20), rollingAccountBalance: 80, cardId: cardHayId, counterpartName: 'ATM George St', counterpartDetails: { name: 'ATM George St', merchantDetails: { merchantId: '000000000000001' } } })
+    expect(await getAccount(a.accountHayId!)).toMatchObject({ totalBalance: 80, availableBalance: 80, heldBalance: 0 })
+    let ev = (await txEvents(a.accountHayId!)).at(-1)
+    expect(ev).toMatchObject({ customerHayId: holder, actionOwner: 'PLATFORM', transactionEvent: { transactionHayId: atm.transaction!.id, transactionType: 'CARD_TRANSACTION', isPending: false, isAtmTransaction: true, outcome: 'ACCEPTED', currencyAmount: AUD(-20), updatedBalance: AUD(80), cardHayId, counterpartName: 'ATM George St', merchantId: '000000000000001', cardUsageDetails: { isAtmWithdrawal: true, isCardPresent: true }, description: 'Cash withdrawal' } })
+    expect(ev.transactionEvent).not.toHaveProperty('holdHayId')
+    expect(ev.transactionEvent).not.toHaveProperty('counterpartDetails')
+    assertValidNotification(ev)
+
+    const refund = svc.post({ accountId: a.accountHayId!, amountCents: 599, type: 'CARD_PAYMENT_REVERSAL', channel: 'VISA_CARD_PRESENT', cardId: cardHayId, cardUsage: { isCardPresent: true }, counterpart: { name: 'IGA (Mt Cotton)', merchantDetails: card().merchant }, description: 'Refund' })
+    expect(refund.outcome).toBe('ACCEPTED')
+    expect(refund.transaction).toMatchObject({ webhookType: 'CARD_TRANSACTION_REFUND', limitKinds: ['MAX_BALANCE'] })
+    expect(await getTransaction(refund.transaction!.id)).toMatchObject({ type: 'CARD_PAYMENT_REVERSAL', currencyAmount: AUD(5.99), rollingAccountBalance: 85.99 })
+    expect(await getAccount(a.accountHayId!)).toMatchObject({ totalBalance: 85.99, availableBalance: 85.99 })
+    ev = (await txEvents(a.accountHayId!)).at(-1)
+    expect(ev.transactionEvent).toMatchObject({ transactionHayId: refund.transaction!.id, transactionType: 'CARD_TRANSACTION_REFUND', isPending: false, isAtmTransaction: false, outcome: 'ACCEPTED', currencyAmount: AUD(5.99), updatedBalance: AUD(85.99), cardHayId, counterpartName: 'IGA (Mt Cotton)', merchantId: '000009493578577' })
+    expect(ev.transactionEvent).not.toHaveProperty('holdHayId')
+    assertValidNotification(ev)
+  })
+
+  it('BANK_TRANSFER_TOP_UP_PER_DAY is a rolling 24 h cap on INTERBANK_TRANSFER_IN: REFUSED_DAILY_TOP_UP_LIMIT_BREACHED (REFUSED_LIMIT_BREACH on REST), open again a day later', async () => {
+    const holder = await newCustomer()
+    const a = await newAccount({ holder })
+    expect((await app.inject({ method: 'PUT', url: `/v1/accounts/${a.accountHayId}/limits/BANK_TRANSFER_TOP_UP_PER_DAY`, payload: { limitAmount: 100 } })).statusCode).toBe(200)
+    const topUp = (cents: number, notifyRefusal = false) => svc.post({ accountId: a.accountHayId!, amountCents: cents, type: 'INTERBANK_TRANSFER_IN', channel: 'CUSCAL_NPP_TRANSFER_IN', counterpart: { name: 'Andy', basicAccountNumber: { accountNumber: '12345678', branchNumber: '062000' } }, notifyRefusal })
+    expect(topUp(10_000).outcome).toBe('ACCEPTED')
+    expect(topUp(1)).toEqual({ outcome: 'REFUSED_DAILY_TOP_UP_LIMIT_BREACHED' })
+    expect(toRestOutcome('REFUSED_DAILY_TOP_UP_LIMIT_BREACHED')).toBe('REFUSED_LIMIT_BREACH')
+    expect(await getAccount(a.accountHayId!)).toMatchObject({ totalBalance: 100, availableBalance: 100, status: 'ACTIVE' })
+    expect(await txEvents(a.accountHayId!)).toHaveLength(1)
+    expect(topUp(1, true)).toEqual({ outcome: 'REFUSED_DAILY_TOP_UP_LIMIT_BREACHED' })
+    const ev = (await txEvents(a.accountHayId!)).at(-1)
+    expect(ev).toMatchObject({ customerHayId: holder, actionOwner: 'PLATFORM', transactionEvent: { transactionType: 'INTERBANK_TRANSFER_IN', outcome: 'REFUSED_DAILY_TOP_UP_LIMIT_BREACHED', currencyAmount: AUD(0.01), updatedBalance: AUD(100), isPending: false, counterpartName: 'Andy', counterpartDetails: { name: 'Andy', basicAccountNumber: { accountNumber: '12345678', branchNumber: '062000' } } } })
+    assertValidNotification(ev)
+    expect(svc.listForAccount(a.accountHayId!)).toHaveLength(1)
+    await advanceClock(DAY_MS + 1000)
+    expect(topUp(1).outcome).toBe('ACCEPTED')
+    expect((await getAccount(a.accountHayId!)).totalBalance).toBe(100.01)
+  })
+})
+
+describe('createCreditTransactionV0 (POST /v0/transactions/credit/create) and refused-outcome replay', () => {
+  it('v0 credit ACCEPTED: posts a GENERAL_CREDIT exactly like v1 (transactionId, balances, webhook GENERAL_CREDIT)', async () => {
+    const holder = await newCustomer()
+    const a = await newAccount({ holder })
+    const res = await post('/v0/transactions/credit/create', creditBody(a.accountHayId!, 42.5, { reference: 'V0' }))
+    expect(res.statusCode, res.body).toBe(200)
+    const r = res.json() as { outcome: string; transactionId: string }
+    expect(r).toEqual({ outcome: 'ACCEPTED', transactionId: expect.stringMatching(UUID_RE) })
+    expect(await getTransaction(r.transactionId)).toMatchObject({ type: 'GENERAL_CREDIT', transactionChannel: 'MANUAL_ADJUSTMENT', currencyAmount: AUD(42.5), rollingAccountBalance: 42.5, reference: 'V0', counterpartName: 'Payroll Pty Ltd', customerId: holder })
+    expect(await getAccount(a.accountHayId!)).toMatchObject({ status: 'ACTIVE', totalBalance: 42.5, availableBalance: 42.5 })
+    const ev = (await txEvents(a.accountHayId!)).at(-1)
+    expect(ev).toMatchObject({ customerHayId: holder, actionOwner: 'CLIENT', transactionEvent: { transactionHayId: r.transactionId, transactionType: 'GENERAL_CREDIT', outcome: 'ACCEPTED', currencyAmount: AUD(42.5), updatedBalance: AUD(42.5), isPending: false, reference: 'V0' } })
+    assertValidNotification(ev)
+  })
+
+  it('a refused TransactionOutcome replays under its idempotencyKey without re-evaluating (still refused after funds arrive, nothing posted); a different body is 422', async () => {
+    const a = await fundedAccount(10)
+    const body = creditBody(a.accountHayId!, 20, { counterpartName: 'Fee collector', transactionChannel: 'SERVICE_FEE' })
+    const first = await post('/v1/transactions/debit', body)
+    expect(first.json()).toEqual({ outcome: 'REFUSED_INSUFFICIENT_FUNDS' })
+    expect((await post('/v1/transactions/debit', body)).json()).toEqual({ outcome: 'REFUSED_INSUFFICIENT_FUNDS' })
+    expect((await credit(a.accountHayId!, 100)).outcome).toBe('ACCEPTED')
+    expect((await post('/v1/transactions/debit', body)).json()).toEqual({ outcome: 'REFUSED_INSUFFICIENT_FUNDS' })
+    expect(await getAccount(a.accountHayId!)).toMatchObject({ totalBalance: 110, availableBalance: 110 })
+    expect(svc.listForAccount(a.accountHayId!)).toHaveLength(2)
+    expectError(await post('/v1/transactions/debit', { ...body, amount: 5 }), 422, /^IDEMPOTENCY_KEY_REUSED/)
+    expect((await txEvents(a.accountHayId!)).map((e) => e.transactionEvent.transactionType)).toEqual(['GENERAL_CREDIT', 'GENERAL_CREDIT'])
   })
 })
 
@@ -717,6 +958,14 @@ describe('searchTransactions (POST /v0/transactions/search)', () => {
     // tags ride along
     await post(`/v1/transactions/${ids[0]}/tags`, { operation: 'ADD', tags: [{ category: 'expense-type', value: 'groceries' }] })
     expect((await search({ originChannel: 'POS_DEBIT' })).json()[0].tags).toEqual([{ id: expect.stringMatching(UUID_RE), category: 'expense-type', value: 'groceries' }])
+    // microseconds survive: a client-supplied transaction time keeps its digits and the inclusive `to` bound honours them
+    const micro = `${new Date(new Date(from).getTime() + 700).toISOString().slice(0, -1)}900Z`
+    const precise = svc.post({ accountId: a.accountHayId!, amountCents: 1, type: 'GENERAL_CREDIT', channel: 'MANUAL_ADJUSTMENT', transactionTimeUtc: micro }).transaction!
+    expect((await getTransaction(precise.id)).transactionTimeUtc).toBe(micro)
+    const byTime = (toDateTimeUtc: string) => search({ toDateTimeUtc }, 'limit=10&offset=0&sortBy=TRANSACTION_TIME').then((r) => r.json().map((t: FinancialTransaction) => t.transactionHayId))
+    expect(await byTime(micro)).toEqual([precise.id, backdated.id, ids[0]])
+    expect(await byTime(micro.replace('900Z', '899Z'))).toEqual([backdated.id, ids[0]])
+    expect(await byTime(micro.replace('900Z', '900001Z'))).toEqual([precise.id, backdated.id, ids[0]]) // beyond microseconds is truncated
 
     // validation
     expectError(await search({}, 'limit=0&offset=0'), 400, /^BAD_REQUEST: limit/)
@@ -752,6 +1001,12 @@ describe('tags (GET/POST /v1/transactions/{transactionHayId}/tags)', () => {
     res = await post(`/v1/transactions/${other}/tags`, { operation: 'ADD', tags: [{ id: tags[0]!.id }] })
     expect(res.json().tags).toEqual([{ id: expect.stringMatching(UUID_RE), category: 'expense-type', value: 'groceries' }])
     expect(res.json().tags[0].id).not.toBe(tags[0]!.id)
+    // an id sent with its own pair is fine; with a different pair it is a 400; a REMOVE by an id that belongs to another transaction is a no-op
+    expect((await post(`/v1/transactions/${other}/tags`, { operation: 'ADD', tags: [{ id: tags[0]!.id, category: 'expense-type', value: 'groceries' }] })).json().tags).toHaveLength(1)
+    expectError(await post(`/v1/transactions/${other}/tags`, { operation: 'ADD', tags: [{ id: tags[0]!.id, category: 'project', value: 'groceries' }] }), 400, TAGS_400_MESSAGE)
+    expectError(await post(`/v1/transactions/${other}/tags`, { operation: 'ADD', tags: [{ id: tags[0]!.id, value: 'beer' }] }), 400, TAGS_400_MESSAGE)
+    expect((await post(`/v1/transactions/${other}/tags`, { operation: 'REMOVE', tags: [{ id: tags[0]!.id }] })).json().tags).toHaveLength(1)
+    expect((await getTransaction(id)).tags).toHaveLength(3)
 
     res = await post(url, { operation: 'REMOVE', tags: [{ category: 'project', value: 'alpha' }, { category: 'nope', value: 'absent' }, { id: UNKNOWN_ID }] })
     expect(res.statusCode).toBe(400) // unknown id fails validation before anything is removed

@@ -3,7 +3,17 @@
  * limit-type vocabulary and the outcome each breached limit produces (docs/map/transactions-holds.md
  * §4.4, docs/map/00-balance.md §3.2). Amounts are cents.
  */
+import type { components as whComponents } from '../../contract/generated/webhook-types.js'
 import type { Cents } from '../../lib/money.js'
+
+/** TransactionEventDto.outcome — the webhook vocabulary, the superset of every REST outcome enum. */
+export type WebhookOutcome = NonNullable<whComponents['schemas']['TransactionEventDto']['outcome']>
+
+/**
+ * What a breached limit produces: a webhook outcome, or REFUSED_LIMIT_BREACH for the limits that have
+ * no dedicated value (REST-only; docs/map/00-balance.md §3.2 L3: "no dedicated value -> no webhook").
+ */
+export type LimitOutcome = WebhookOutcome | 'REFUSED_LIMIT_BREACH'
 
 export const LOCAL_PRODUCT_ID = 'a1b2c3d4-0000-4000-8000-000000000001'
 
@@ -54,7 +64,7 @@ export const LIMIT_KIND: Record<InternalLimitType, LimitKind> = {
  * superset). The ledger maps these onto each REST surface's own enum (v0 collapses to
  * REFUSED_LIMIT_BREACH, BPAY uses REFUSED_DAILY_BPAY_LIMIT_BREACHED, …).
  */
-export const LIMIT_OUTCOME: Record<InternalLimitType, string> = {
+export const LIMIT_OUTCOME: Record<InternalLimitType, LimitOutcome> = {
   MAX_BALANCE: 'REFUSED_MAX_BALANCE_EXCEEDED',
   MIN_BALANCE: 'REFUSED_NOT_ENOUGH_FUNDS',
   TOTAL_SPEND_PER_YEAR: 'REFUSED_ANNUAL_SPENDING_LIMIT_BREACHED',

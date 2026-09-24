@@ -34,15 +34,17 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext, svc: Trans
   create('createCreditTransactionV0', 'CREDIT', true)
   create('createDebitTransactionV0', 'DEBIT', true)
 
-  const transfer = (operationId: string, legacy: boolean): void => {
+  // makeTransferV0 is served exactly like V1: its spec description only says "Please use v1 instead"
+  // (the REFUSED_LIMIT_BREACH collapse is documented on the v0 create ops alone).
+  const transfer = (operationId: string): void => {
     defineRoute<ByAccount, never, TransferOutRequestBody>(app, ctx, operationId, async (req) => {
       const b = req.body
-      const r = await withIdempotency(ctx, operationId, b.idempotencyKey, b, () => ({ status: 200, body: svc.transfer(req.params.accountId, b, { legacy, actionOwner: 'CLIENT' }) }))
+      const r = await withIdempotency(ctx, operationId, b.idempotencyKey, b, () => ({ status: 200, body: svc.transfer(req.params.accountId, b, { actionOwner: 'CLIENT' }) }))
       return r.body
     })
   }
-  transfer('makeTransferV1', false)
-  transfer('makeTransferV0', true)
+  transfer('makeTransferV1')
+  transfer('makeTransferV0')
 
   defineRoute<never, SearchQuery, SearchTransactionsRequestBody>(app, ctx, 'searchTransactions', (req) =>
     svc.search(req.body, { limit: req.query.limit, offset: req.query.offset, sortBy: req.query.sortBy }))

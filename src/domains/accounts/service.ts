@@ -13,7 +13,7 @@ import { centsToString, fromCents, hasAtMostTwoDecimals, toCents, type Cents } f
 import { deps } from './deps.js'
 import {
   FX_CURRENCIES, HOME_CURRENCY, LIMIT_KIND, LIMIT_OUTCOME, LIMIT_TYPES, LOCAL_PRODUCT_ID, PRODUCTS, SETTABLE_LIMIT_TYPES, findProduct,
-  type InternalLimitType, type LimitType, type Product,
+  type InternalLimitType, type LimitOutcome, type LimitType, type Product,
 } from './products.js'
 import type { Account, AccountRepo, AccountRule, AccountStatus, BlockedBy, CloseReason, HolderType, RiskLevel, RuleDetails, RuleType } from './repo.js'
 
@@ -425,7 +425,7 @@ export class AccountsService {
    * compare the amount; MAX_BALANCE compares ledger + amount; daily / yearly types add the provider's
    * rolling-window usage (24 h / 365 d). `unused` and `floor` types never refuse here.
    */
-  checkLimit(id: string, type: InternalLimitType, amountCents: Cents): null | string {
+  checkLimit(id: string, type: InternalLimitType, amountCents: Cents): null | LimitOutcome {
     const a = this.get(id)
     const kind = LIMIT_KIND[type]
     if (kind === 'unused' || kind === 'floor') return null

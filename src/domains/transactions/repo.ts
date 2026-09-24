@@ -19,7 +19,7 @@ export type ExternalMerchantDetails = S['ExternalMerchantDetails']
 export type ExternalIdentifier = S['ExternalIdentifier']
 export type MandatePaymentDetails = S['ExternalMandatePaymentDetails']
 export type WebhookTransactionType = NonNullable<whComponents['schemas']['TransactionEventDto']['transactionType']>
-export type WebhookOutcome = NonNullable<whComponents['schemas']['TransactionEventDto']['outcome']>
+export type { WebhookOutcome } from '../accounts/products.js'
 export type CardUsageDetails = whComponents['schemas']['CardUsageDetails']
 export type ReturnReason = whComponents['schemas']['ReturnReason']
 export type BpayDetails = whComponents['schemas']['BpayDetails']
@@ -73,6 +73,14 @@ export interface LedgerTransaction {
   createdAt: string
 }
 
+/** A dated slice of a hold's amount: the authorisation and each increment, windowed separately by the daily limits. */
+export interface HoldPortion {
+  /** positive cents */
+  amount: Cents
+  /** when this portion was authorised (isoUtc) */
+  at: string
+}
+
 export interface Hold {
   id: string
   accountId: string
@@ -84,8 +92,10 @@ export interface Hold {
   state: HoldState
   type: HoldType
   channel: TransactionChannel
-  /** current hold amount, positive cents */
+  /** current hold amount, positive cents (== the sum of `portions`) */
   amount: Cents
+  /** the amount split by authorisation time; decreases release the newest portions first */
+  portions: HoldPortion[]
   currency: string
   originalAmount?: Cents
   originalCurrency?: string
@@ -163,14 +173,19 @@ export class TransactionRepo {
 
   /**
    * Cents (positive) counted against `limitType` on the account since `since`: posted transactions
-   * (by transaction time) plus open card holds (by authorisation time) whose limit kinds include it.
+   * (by transaction time) plus the portions of open card holds authorised since then (the original
+   * authorisation and each increment carry their own time) whose limit kinds include it.
    */
   usage(accountId: string, limitType: InternalLimitType, since: string): Cents {
     const posted = this.db
       .prepare(`SELECT COALESCE(SUM(ABS(amount)), 0) AS n FROM transactions WHERE account_id = ? AND transaction_time >= ? AND EXISTS (SELECT 1 FROM json_each(transactions.limit_kinds) WHERE json_each.value = ?)`)
       .get(accountId, since, limitType) as { n: number }
     const held = this.db
-      .prepare(`SELECT COALESCE(SUM(amount), 0) AS n FROM holds WHERE account_id = ? AND state = 'AUTHORISED' AND authorised_at >= ? AND EXISTS (SELECT 1 FROM json_each(holds.limit_kinds) WHERE json_each.value = ?)`)
+      .prepare(
+        `SELECT COALESCE(SUM(json_extract(p.value, '$.amount')), 0) AS n FROM holds, json_each(holds.portions) AS p
+         WHERE holds.account_id = ? AND holds.state = 'AUTHORISED' AND json_extract(p.value, '$.at') >= ?
+           AND EXISTS (SELECT 1 FROM json_each(holds.limit_kinds) WHERE json_each.value = ?)`,
+      )
       .get(accountId, since, limitType) as { n: number }
     return posted.n + held.n
   }
@@ -179,6 +194,20 @@ export class TransactionRepo {
 
   tagsFor(transactionId: string): TagRow[] {
     return (this.db.prepare('SELECT * FROM transaction_tags WHERE transaction_id = ? ORDER BY seq ASC').all(transactionId) as Row[]).map(tagFromRow)
+  }
+
+  /** Tags of many transactions in one query (search pages), creation order within each transaction. */
+  tagsForMany(transactionIds: string[]): Map<string, TagRow[]> {
+    const out = new Map<string, TagRow[]>()
+    if (!transactionIds.length) return out
+    const rows = this.db.prepare(`SELECT * FROM transaction_tags WHERE transaction_id IN (${transactionIds.map(() => '?').join(',')}) ORDER BY seq ASC`).all(...transactionIds) as Row[]
+    for (const r of rows) {
+      const t = tagFromRow(r)
+      let list = out.get(t.transactionId)
+      if (!list) out.set(t.transactionId, (list = []))
+      list.push(t)
+    }
+    return out
   }
 
   tagById(id: string): TagRow | undefined {
@@ -303,6 +332,7 @@ function holdToRow(h: Hold): Row {
     type: h.type,
     channel: h.channel,
     amount: h.amount,
+    portions: JSON.stringify(h.portions),
     currency: h.currency,
     original_amount: h.originalAmount ?? null,
     original_currency: h.originalCurrency ?? null,
@@ -331,6 +361,7 @@ function holdFromRow(r: Row): Hold {
     type: r.type as HoldType,
     channel: r.channel as TransactionChannel,
     amount: r.amount as number,
+    portions: JSON.parse(r.portions as string) as HoldPortion[],
     currency: r.currency as string,
     limitKinds: JSON.parse(r.limit_kinds as string) as InternalLimitType[],
     authorisedAt: r.authorised_at as string,

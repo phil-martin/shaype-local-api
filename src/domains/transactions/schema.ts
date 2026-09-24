@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS holds (
   type                   TEXT NOT NULL,             -- CARD_PRESENT_PAYMENT | CARD_NOT_PRESENT_PAYMENT | ATM_WITHDRAWAL
   channel                TEXT NOT NULL,
   amount                 INTEGER NOT NULL,          -- current hold amount, positive cents
+  portions               TEXT NOT NULL,             -- JSON array of {amount, at}: the amount split by authorisation time (daily-limit windows)
   currency               TEXT NOT NULL,
   original_amount        INTEGER,
   original_currency      TEXT,

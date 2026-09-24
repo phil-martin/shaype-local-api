@@ -13,14 +13,15 @@ import { isoUtc } from '../../lib/clock.js'
 import { badRequest, notFound, unprocessable } from '../../lib/errors.js'
 import { LOCAL_BSB, uuid } from '../../lib/ids.js'
 import { fromCents, hasAtMostTwoDecimals, toCents, type Cents } from '../../lib/money.js'
-import type { InternalLimitType } from '../accounts/products.js'
+import type { InternalLimitType, LimitOutcome } from '../accounts/products.js'
 import type { Account } from '../accounts/repo.js'
 import { computeBalances, type Balances } from '../accounts/service.js'
+import type { Customer } from '../customers/repo.js'
 import { deps } from './deps.js'
 import type { HoldChangeKind, RefusedAttempt } from './events.js'
 import type {
   AuthorisationHold, CardUsageDetails, CounterpartDetails, CountryOfExpenditure, ExternalIdentifier, ExternalMerchantDetails, FinancialTransaction, Hold,
-  HoldType, LedgerTransaction, LedgerType, MandatePaymentDetails, OriginChannel, OriginType, ReturnReason, SortBy, TagRow, TransactionChannel,
+  HoldPortion, HoldType, LedgerTransaction, LedgerType, MandatePaymentDetails, OriginChannel, OriginType, ReturnReason, SortBy, TagRow, TransactionChannel,
   TransactionRepo, WebhookOutcome, WebhookTransactionType,
 } from './repo.js'
 
@@ -34,8 +35,19 @@ export type ModifyTagsRequestBody = S['ModifyTagsRequestBody']
 export type TagsResponseBody = S['TagsResponseBody']
 export type Tag = S['Tag']
 
-/** Ledger outcome vocabulary = the webhook TransactionEventDto.outcome enum (the superset of every REST surface). */
-export type LedgerOutcome = WebhookOutcome
+/**
+ * Ledger outcome vocabulary: the webhook TransactionEventDto.outcome enum (the superset of every REST
+ * surface) plus the two REST-only values the ledger produces — REFUSED_LIMIT_BREACH (limits with no
+ * dedicated value) and REFUSED_INVALID_PAY_ID. Only WebhookOutcome values reach a TRANSACTION webhook.
+ */
+export type LedgerOutcome = WebhookOutcome | RestOnlyOutcome
+type RestOnlyOutcome = 'REFUSED_LIMIT_BREACH' | 'REFUSED_INVALID_PAY_ID'
+const REST_ONLY_OUTCOMES: ReadonlySet<string> = new Set<RestOnlyOutcome>(['REFUSED_LIMIT_BREACH', 'REFUSED_INVALID_PAY_ID'])
+
+/** docs/map/00-balance.md §3.2 L3: an outcome with no webhook value produces no webhook. */
+export function isWebhookOutcome(outcome: LedgerOutcome): outcome is WebhookOutcome {
+  return !REST_ONLY_OUTCOMES.has(outcome)
+}
 
 export interface Money { amountCents: Cents; currency: string }
 
@@ -55,7 +67,7 @@ export interface PostInput {
   originId?: string
   originChannel?: OriginChannel
   relatedHoldId?: string
-  /** ISO date-time; defaults to now. clearingTimeUtc is always now. */
+  /** ISO date-time (microseconds preserved); defaults to now. clearingTimeUtc is always now. 400 when malformed. */
   transactionTimeUtc?: string
   cardId?: string
   cardUsage?: CardUsageDetails
@@ -72,7 +84,7 @@ export interface PostInput {
   releaseHeldCents?: Cents
   /** Webhook actionOwner: CLIENT when an API call caused the posting, PLATFORM (default) otherwise. */
   actionOwner?: ActionOwner
-  /** Emit a TRANSACTION webhook with the refused outcome (card authorisations do; the general ops do not). */
+  /** Emit a TRANSACTION webhook with the refused outcome (card authorisations do; the general ops do not). Skipped when the outcome has no webhook value. */
   notifyRefusal?: boolean
 }
 
@@ -89,7 +101,7 @@ export interface CardContext {
 
 /** Refusal decided by the caller (card status, preferences, processor decline): nothing is held, the refused webhook is emitted. */
 export interface CallerRefusal {
-  outcome: LedgerOutcome
+  outcome: WebhookOutcome
   cardPreferenceOutcome?: RefusedAttempt['cardPreferenceOutcome']
   cardProcessorResponse?: RefusedAttempt['cardProcessorResponse']
 }
@@ -121,6 +133,9 @@ export interface HoldOptions { actionOwner?: ActionOwner }
 
 export interface SearchPage { limit: number; offset: number; sortBy?: SortBy }
 
+/** What a refusal webhook needs beyond the account snapshot and the outcome. */
+export type RefusalDetails = Omit<RefusedAttempt, 'account' | 'balances' | 'actionOwner' | 'outcome'>
+
 declare module '../../context.js' {
   interface ServiceMap {
     transactions: TransactionsService
@@ -131,6 +146,8 @@ export const TAGS_400_MESSAGE = 'BAD_REQUEST: Invalid request - tag validation f
 const TAG_RE = /^\S(.*\S)?$/
 const BSB_RE = /^\d{6}$/
 const ACCOUNT_NUMBER_RE = /^\d{5,9}$/
+/** Fractional seconds of an ISO date-time (before the zone designator, if any). */
+const ISO_FRACTION_RE = /[.,](\d+)(?:Z|[+-]\d{2}:?\d{2})?$/i
 
 /** TransactionOutcome.outcome — the 21 REST values. */
 const REST_OUTCOMES: ReadonlySet<string> = new Set([
@@ -143,8 +160,8 @@ const REST_OUTCOMES: ReadonlySet<string> = new Set([
 
 /**
  * Ledger outcome -> TransactionOutcome.outcome: the funds check is REFUSED_INSUFFICIENT_FUNDS on REST,
- * limits without a REST value collapse to REFUSED_LIMIT_BREACH, and the deprecated v0 ops (`legacy`)
- * also collapse the two detailed limit outcomes to REFUSED_LIMIT_BREACH (spec v0 description).
+ * limits without a REST value collapse to REFUSED_LIMIT_BREACH, and the deprecated v0 create ops
+ * (`legacy`) also collapse the two detailed limit outcomes to REFUSED_LIMIT_BREACH (spec v0 description).
  */
 export function toRestOutcome(outcome: LedgerOutcome, opts: { legacy?: boolean } = {}): RestOutcome {
   let o: string = outcome
@@ -154,7 +171,11 @@ export function toRestOutcome(outcome: LedgerOutcome, opts: { legacy?: boolean }
   return o as RestOutcome
 }
 
-/** TRANSACTION webhook transactionType per ledger type (an NPP return is emitted under INTERBANK_TRANSFER_OUT like the docs sample). */
+/**
+ * TRANSACTION webhook transactionType per ledger type. An NPP return is emitted under INTERBANK_TRANSFER_OUT
+ * like the docs sample; BPAY_TRANSFER_IN (a BPAY-funded top-up, no docs sample) maps to HAY_TOP_UP ("An
+ * account top-up") [decision].
+ */
 export const WEBHOOK_TYPE: Record<LedgerType, WebhookTransactionType> = {
   CARD_PRESENT_PAYMENT: 'CARD_TRANSACTION_SETTLED',
   CARD_NOT_PRESENT_PAYMENT: 'CARD_TRANSACTION_SETTLED',
@@ -231,8 +252,8 @@ export class TransactionsService {
     return this.repo.usage(accountId, limitType, since)
   }
 
-  /** FinancialTransaction body (tags always present). */
-  toResponse(t: LedgerTransaction): FinancialTransaction {
+  /** FinancialTransaction body (tags always present; pass `tags` when already loaded for a page). */
+  toResponse(t: LedgerTransaction, tags: TagRow[] = this.repo.tagsFor(t.id)): FinancialTransaction {
     const cp = t.counterpart
     return compact({
       transactionHayId: t.id,
@@ -260,7 +281,7 @@ export class TransactionsService {
       externalIdentifiers: t.externalIdentifiers,
       mandatePaymentDetails: t.mandatePayment,
       reportedFraudulent: false,
-      tags: this.repo.tagsFor(t.id).map(tagToResponse),
+      tags: tags.map(tagToResponse),
     }) as FinancialTransaction
   }
 
@@ -271,18 +292,36 @@ export class TransactionsService {
    * order (detailed LIMIT_OUTCOME), then funds for a debit (REFUSED_NOT_ENOUGH_FUNDS); on ACCEPTED the
    * ledger moves through accounts.adjust (APPROVED -> ACTIVE, arrears), rollingAccountBalance is the
    * totalBalance after, and transaction.posted is emitted. Refusals post nothing.
-   * @throws 404 when the account is unknown
+   * @throws 404 when the account is unknown; 400 when transactionTimeUtc is malformed
    */
   post(input: PostInput): PostResult {
     const outcome = this.evaluate(input)
     if (outcome !== 'ACCEPTED') {
-      if (input.notifyRefusal) this.refuse(input, outcome)
+      if (input.notifyRefusal) {
+        this.notifyRefused(this.accounts.get(input.accountId), input.actionOwner ?? 'PLATFORM', outcome, compact({
+          amountCents: input.amountCents,
+          originalAmount: input.originalAmount,
+          webhookType: input.webhookType ?? WEBHOOK_TYPE[input.type],
+          transactionTime: input.transactionTimeUtc ? normaliseTime(input.transactionTimeUtc, 'transactionTimeUtc') : isoUtc(this.ctx.clock.now()),
+          isPending: false,
+          isAtm: input.type === 'ATM_WITHDRAWAL',
+          cardId: input.cardId,
+          cardUsage: input.cardUsage,
+          merchant: input.counterpart?.merchantDetails,
+          counterpart: input.counterpart,
+          description: input.description,
+          category: input.category,
+          reference: input.reference,
+          originType: input.originType,
+          originId: input.originId,
+        }))
+      }
       return { outcome }
     }
     return { outcome, transaction: this.apply(input) }
   }
 
-  /** The checks of post() without the posting; 'ACCEPTED' when the movement fits. */
+  /** The checks of post() without the posting: status -> limits -> funds; 'ACCEPTED' when the movement fits. */
   evaluate(input: PostInput): LedgerOutcome {
     if (input.checks === false) {
       this.accounts.get(input.accountId)
@@ -290,17 +329,27 @@ export class TransactionsService {
     }
     const gate = this.accounts.requireOpenForMovement(input.accountId)
     if (typeof gate === 'string') return gate
+    return this.checkLimits(input) ?? this.checkFunds(input) ?? 'ACCEPTED'
+  }
+
+  /** The posting's limits in order (input.limits, else defaultLimits): the first breached outcome, or null. */
+  checkLimits(input: PostInput): LimitOutcome | null {
     const magnitude = Math.abs(input.amountCents)
     for (const type of input.limits ?? defaultLimits(input.type, input.amountCents)) {
       const breached = this.accounts.checkLimit(input.accountId, type, magnitude)
-      if (breached) return breached as LedgerOutcome
+      if (breached) return breached
     }
-    if (input.amountCents < 0 && this.accounts.checkFunds(input.accountId, magnitude)) return 'REFUSED_NOT_ENOUGH_FUNDS'
-    return 'ACCEPTED'
+    return null
+  }
+
+  /** Funds check for a debit posting (credits always fit). */
+  checkFunds(input: PostInput): 'REFUSED_NOT_ENOUGH_FUNDS' | null {
+    return input.amountCents < 0 && this.accounts.checkFunds(input.accountId, -input.amountCents) ? 'REFUSED_NOT_ENOUGH_FUNDS' : null
   }
 
   /** The posting of post() without the checks (callers that evaluated every leg first, e.g. transfers). Atomic. */
   apply(input: PostInput): LedgerTransaction {
+    const transactionTime = input.transactionTimeUtc ? normaliseTime(input.transactionTimeUtc, 'transactionTimeUtc') : undefined
     return this.ctx.db.transaction(() => {
       const before = this.accounts.get(input.accountId)
       const now = isoUtc(this.ctx.clock.now())
@@ -319,7 +368,7 @@ export class TransactionsService {
         originalAmount: input.originalAmount?.amountCents,
         originalCurrency: input.originalAmount?.currency,
         rollingBalance: balances.totalBalance,
-        transactionTime: input.transactionTimeUtc ? normaliseTime(input.transactionTimeUtc) : now,
+        transactionTime: transactionTime ?? now,
         clearingTime: now,
         description: input.description,
         category: input.category,
@@ -345,29 +394,14 @@ export class TransactionsService {
     })()
   }
 
-  private refuse(input: PostInput, outcome: LedgerOutcome): void {
-    const account = this.accounts.get(input.accountId)
-    this.ctx.events.emit('transaction.refused', compact({
-      account,
-      balances: computeBalances(account),
-      actionOwner: input.actionOwner ?? 'PLATFORM',
-      outcome,
-      amountCents: input.amountCents,
-      originalAmount: input.originalAmount,
-      webhookType: input.webhookType ?? WEBHOOK_TYPE[input.type],
-      transactionTime: input.transactionTimeUtc ? normaliseTime(input.transactionTimeUtc) : isoUtc(this.ctx.clock.now()),
-      isPending: false,
-      isAtm: input.type === 'ATM_WITHDRAWAL',
-      cardId: input.cardId,
-      cardUsage: input.cardUsage,
-      merchant: input.counterpart?.merchantDetails,
-      counterpart: input.counterpart,
-      description: input.description,
-      category: input.category,
-      reference: input.reference,
-      originType: input.originType,
-      originId: input.originId,
-    }))
+  /**
+   * Emits transaction.refused (-> TRANSACTION webhook with the refused outcome and the account's
+   * unchanged balances) — unless the outcome has no webhook value (REFUSED_LIMIT_BREACH), in which
+   * case nothing is emitted (docs/map/00-balance.md §3.2 L3).
+   */
+  notifyRefused(account: Account, actionOwner: ActionOwner, outcome: LedgerOutcome, details: RefusalDetails): void {
+    if (!isWebhookOutcome(outcome)) return
+    this.ctx.events.emit('transaction.refused', compact({ account, balances: computeBalances(account), actionOwner, outcome, ...details }))
   }
 
   /** The customer a posting is attributed to: the holder, or the first member of a group. */
@@ -386,7 +420,6 @@ export class TransactionsService {
    */
   createGeneral(direction: 'CREDIT' | 'DEBIT', body: CreateTransactionRequestBody, opts: { legacy?: boolean } = {}): TransactionOutcome {
     const cents = requestCents(body.amount, 'amount')
-    this.accounts.get(body.accountHayId)
     const r = this.post(compact({
       accountId: body.accountHayId,
       amountCents: direction === 'CREDIT' ? cents : -cents,
@@ -404,7 +437,7 @@ export class TransactionsService {
     return this.outcomeBody(r, opts)
   }
 
-  private outcomeBody(r: PostResult, opts: { legacy?: boolean }): TransactionOutcome {
+  private outcomeBody(r: PostResult, opts: { legacy?: boolean } = {}): TransactionOutcome {
     const body: TransactionOutcome = { outcome: toRestOutcome(r.outcome, opts) }
     if (r.transaction) body.transactionId = r.transaction.id
     return body
@@ -413,25 +446,36 @@ export class TransactionsService {
   // ---------------------------------------------------------------- transfers
 
   /**
-   * makeTransferV1/V0 from `accountId`. INTERNAL, and ACCOUNT with the local BSB, post both legs
-   * atomically (INTRABANK_TRANSFER_OUT / _IN); ACCOUNT with another BSB posts INTERBANK_TRANSFER_OUT
-   * immediately (NPP); PAY_ID resolves through services.payid (REFUSED_INVALID_PAY_ID when unknown or
-   * no PayID service is loaded). Sender: status, PAYMENT_TO_ACCOUNT_NUMBER, daily transfers-out,
-   * TOTAL_SPEND_PER_YEAR, funds; recipient: REFUSED_RECIPIENT_ACCOUNT_BLOCKED / _CLOSED, MAX_BALANCE.
+   * makeTransferV1/V0 (served identically) from `accountId`. INTERNAL, and ACCOUNT with the local BSB,
+   * post both legs atomically (INTRABANK_TRANSFER_OUT / _IN); ACCOUNT with another BSB posts
+   * INTERBANK_TRANSFER_OUT immediately (NPP); PAY_ID resolves through services.payid
+   * (REFUSED_INVALID_PAY_ID when unknown or no PayID service is loaded).
+   *
+   * Check order (docs/map/00-balance.md §3.2): request shape (400/422) -> sender status -> rails (an FX
+   * child may only transfer INTERNAL; no FX: the recipient must share the sender's currency ->
+   * REFUSED_CAPABILITY_NOT_ENABLED) -> recipient resolution -> recipient status
+   * (REFUSED_RECIPIENT_ACCOUNT_BLOCKED / _CLOSED) -> sender limits (PAYMENT_TO_ACCOUNT_NUMBER, daily
+   * transfers-out, TOTAL_SPEND_PER_YEAR) -> recipient MAX_BALANCE -> sender funds.
    * @throws 404 unknown sender account / customer / recipient account; 422 PERMISSION_DENIED when the
    * customer does not hold the account; 400 when the transfer-type object is missing or malformed
    */
-  transfer(accountId: string, body: TransferOutRequestBody, opts: { legacy?: boolean; actionOwner?: ActionOwner } = {}): TransactionOutcome {
+  transfer(accountId: string, body: TransferOutRequestBody, opts: { actionOwner?: ActionOwner } = {}): TransactionOutcome {
     const cents = requestCents(body.amount, 'amount')
     const sender = this.accounts.get(accountId)
-    this.ctx.services.customers.get(body.senderCustomerHayId)
+    const senderCustomer = this.ctx.services.customers.get(body.senderCustomerHayId)
     if (!this.accounts.holderCustomerIds(sender).includes(body.senderCustomerHayId)) {
       throw unprocessable(`PERMISSION_DENIED: Customer ${body.senderCustomerHayId} does not hold account ${accountId}`)
     }
-    const target = this.resolveRecipient(sender, body)
-    if ('outcome' in target) return { outcome: toRestOutcome(target.outcome, opts) }
+    const spec = transferSpec(body)
+    const refused = (outcome: LedgerOutcome): TransactionOutcome => ({ outcome: toRestOutcome(outcome) })
+
+    const gate = this.accounts.requireOpenForMovement(sender.id)
+    if (typeof gate === 'string') return refused(gate)
+    if (sender.parentAccountId && spec.transferType !== 'INTERNAL') return refused('REFUSED_CAPABILITY_NOT_ENABLED')
+    const target = this.resolveTarget(sender, spec)
+    if ('outcome' in target) return refused(target.outcome)
     const actionOwner = opts.actionOwner ?? 'CLIENT'
-    const common = { description: body.description, category: body.category, reference: body.reference ?? target.reference, originType: 'CUSTOMER' as const, actionOwner }
+    const common = { description: body.description, category: body.category, reference: body.reference ?? spec.reference, originType: 'CUSTOMER' as const, actionOwner }
 
     if (target.kind === 'external') {
       const r = this.post(compact({
@@ -440,19 +484,23 @@ export class TransactionsService {
         amountCents: -cents,
         type: 'INTERBANK_TRANSFER_OUT',
         channel: 'CUSCAL_NPP_TRANSFER_OUT',
-        counterpart: { name: target.recipientName, basicAccountNumber: { accountNumber: target.accountNumber, branchNumber: target.bsb } },
+        counterpart: { name: spec.recipientName, basicAccountNumber: { accountNumber: target.accountNumber, branchNumber: target.bsb } },
       }))
-      return this.outcomeBody(r, opts)
+      return this.outcomeBody(r)
     }
 
     const recipient = target.account
+    if (recipient.currency !== sender.currency) return refused('REFUSED_CAPABILITY_NOT_ENABLED')
+    const recipientGate = this.accounts.requireOpenForMovement(recipient.id)
+    if (recipientGate === 'REFUSED_ACCOUNT_BLOCKED') return refused('REFUSED_RECIPIENT_ACCOUNT_BLOCKED')
+    if (recipientGate === 'REFUSED_ACCOUNT_CLOSED') return refused('REFUSED_RECIPIENT_ACCOUNT_CLOSED')
     const out: PostInput = compact({
       ...common,
       accountId: sender.id,
       amountCents: -cents,
       type: 'INTRABANK_TRANSFER_OUT',
       channel: 'HAAS_TRANSFER_INTERNAL_OUT',
-      counterpart: { accountId: recipient.id, customerId: this.primaryCustomer(recipient), name: target.recipientName },
+      counterpart: { accountId: recipient.id, customerId: this.primaryCustomer(recipient), name: spec.recipientName },
     })
     const into: PostInput = compact({
       ...common,
@@ -460,22 +508,11 @@ export class TransactionsService {
       amountCents: cents,
       type: 'INTRABANK_TRANSFER_IN',
       channel: 'HAAS_TRANSFER_INTERNAL_IN',
-      counterpart: { accountId: sender.id, customerId: body.senderCustomerHayId, name: target.senderName },
+      counterpart: { accountId: sender.id, customerId: senderCustomer.id, name: spec.senderName ?? customerName(senderCustomer) },
       limits: ['MAX_BALANCE'],
     })
-    // sender status -> recipient status -> sender limits -> recipient MAX_BALANCE -> sender funds
-    const gate = this.accounts.requireOpenForMovement(sender.id)
-    if (typeof gate === 'string') return { outcome: toRestOutcome(gate, opts) }
-    const recipientGate = this.accounts.requireOpenForMovement(recipient.id)
-    if (recipientGate === 'REFUSED_ACCOUNT_BLOCKED') return { outcome: 'REFUSED_RECIPIENT_ACCOUNT_BLOCKED' }
-    if (recipientGate === 'REFUSED_ACCOUNT_CLOSED') return { outcome: 'REFUSED_RECIPIENT_ACCOUNT_CLOSED' }
-    for (const type of out.limits ?? defaultLimits(out.type, out.amountCents)) {
-      const breached = this.accounts.checkLimit(sender.id, type, cents)
-      if (breached) return { outcome: toRestOutcome(breached as LedgerOutcome, opts) }
-    }
-    const maxBalance = this.accounts.checkLimit(recipient.id, 'MAX_BALANCE', cents)
-    if (maxBalance) return { outcome: toRestOutcome(maxBalance as LedgerOutcome, opts) }
-    if (this.accounts.checkFunds(sender.id, cents)) return { outcome: toRestOutcome('REFUSED_NOT_ENOUGH_FUNDS', opts) }
+    const breached = this.checkLimits(out) ?? this.checkLimits(into) ?? this.checkFunds(out)
+    if (breached) return refused(breached)
 
     const sent = this.ctx.db.transaction(() => {
       const t = this.apply(out)
@@ -485,69 +522,60 @@ export class TransactionsService {
     return { outcome: 'ACCEPTED', transactionId: sent.id }
   }
 
-  private resolveRecipient(sender: Account, body: TransferOutRequestBody): TransferTarget | { outcome: LedgerOutcome } {
-    switch (body.transferType) {
-      case 'INTERNAL': {
-        const it = body.internalTransfer
-        if (!it) throw badRequest('BAD_REQUEST: internalTransfer is required when transferType is INTERNAL')
-        return this.internalTarget(sender, this.accounts.get(it.recipientAccountHayId), it.recipientName, it.senderName)
-      }
-      case 'ACCOUNT': {
-        const at = body.accountTransfer
-        if (!at) throw badRequest('BAD_REQUEST: accountTransfer is required when transferType is ACCOUNT')
-        if (!BSB_RE.test(at.bsb)) throw badRequest('BAD_REQUEST: accountTransfer/bsb must be 6 digits')
-        if (!ACCOUNT_NUMBER_RE.test(at.accountNumber)) throw badRequest('BAD_REQUEST: accountTransfer/accountNumber must be 5-9 digits')
-        return this.accountTarget(sender, at.bsb, at.accountNumber, at.recipientName, at.senderName, at.reference)
-      }
+  private resolveTarget(sender: Account, spec: TransferSpec): TransferTarget | { outcome: LedgerOutcome } {
+    switch (spec.transferType) {
+      case 'INTERNAL':
+        return this.internalTarget(sender, this.accounts.get(spec.recipientAccountId))
+      case 'ACCOUNT':
+        return this.accountTarget(sender, spec.bsb, spec.accountNumber)
       case 'PAY_ID': {
-        const pt = body.payIdTransfer
-        if (!pt) throw badRequest('BAD_REQUEST: payIdTransfer is required when transferType is PAY_ID')
-        const resolved = deps(this.ctx).payid?.resolve(pt.payId)
-        if (!resolved) return { outcome: 'REFUSED_INVALID_PAY_ID' as LedgerOutcome }
-        return this.accountTarget(sender, resolved.branchNumber, resolved.accountNumber, pt.recipientName, pt.senderName, pt.reference)
+        const resolved = deps(this.ctx).payid?.resolve(spec.payId)
+        if (!resolved) return { outcome: 'REFUSED_INVALID_PAY_ID' }
+        return this.accountTarget(sender, resolved.branchNumber, resolved.accountNumber)
       }
     }
   }
 
   /** A local BSB is converted to an internal transfer (the account number must exist); any other BSB goes out through NPP. */
-  private accountTarget(sender: Account, bsb: string, accountNumber: string, recipientName: string, senderName: string | undefined, reference: string | undefined): TransferTarget {
-    if (bsb !== LOCAL_BSB) return compact({ kind: 'external', bsb, accountNumber, recipientName, senderName, reference })
+  private accountTarget(sender: Account, bsb: string, accountNumber: string): TransferTarget {
+    if (bsb !== LOCAL_BSB) return { kind: 'external', bsb, accountNumber }
     const account = this.ctx.services.accounts.search(accountNumber).map((a) => this.accounts.get(a.accountHayId!))[0]
     if (!account) throw unprocessable(`INVALID_RECIPIENT: No account with number ${accountNumber} at BSB ${bsb}`)
-    return this.internalTarget(sender, account, recipientName, senderName, reference)
+    return this.internalTarget(sender, account)
   }
 
-  private internalTarget(sender: Account, account: Account, recipientName: string, senderName: string | undefined, reference?: string): TransferTarget {
+  private internalTarget(sender: Account, account: Account): TransferTarget {
     if (account.id === sender.id) throw unprocessable(`INVALID_RECIPIENT: Account ${sender.id} cannot transfer to itself`)
-    return compact({ kind: 'internal', account, recipientName, senderName, reference })
+    return { kind: 'internal', account }
   }
 
   // ---------------------------------------------------------------- search
 
   /**
    * searchTransactions: posted transactions whose clearing time (sortBy CLEARING_TIME, default) or
-   * transaction time (TRANSACTION_TIME) lies within [from, to] (both inclusive), filters AND-ed exact,
-   * newest first, paged (limit 1..1000, offset >= 0, else 400). from > to is a 400.
+   * transaction time (TRANSACTION_TIME) lies within [from, to] (both inclusive, compared at microsecond
+   * precision), filters AND-ed exact, newest first, paged (limit 1..1000, offset >= 0, else 400).
+   * from > to is a 400.
    */
   search(body: SearchTransactionsRequestBody, page: SearchPage): FinancialTransaction[] {
     if (!Number.isInteger(page.limit) || page.limit < 1 || page.limit > 1000) throw badRequest('BAD_REQUEST: limit must be a value between 1 and 1000')
     if (!Number.isInteger(page.offset) || page.offset < 0) throw badRequest('BAD_REQUEST: offset must be 0 or greater')
-    const from = parseTime(body.fromDateTimeUtc, 'fromDateTimeUtc')
-    const to = parseTime(body.toDateTimeUtc, 'toDateTimeUtc')
+    const from = normaliseTime(body.fromDateTimeUtc, 'fromDateTimeUtc')
+    const to = normaliseTime(body.toDateTimeUtc, 'toDateTimeUtc')
     if (from > to) throw badRequest('BAD_REQUEST: fromDateTimeUtc must not be after toDateTimeUtc')
-    return this.repo
-      .search(compact({
-        accountId: body.accountId,
-        originChannel: body.originChannel,
-        originId: body.originId,
-        originType: body.originType,
-        from: isoUtc(from),
-        to: isoUtc(to),
-        sortBy: page.sortBy ?? 'CLEARING_TIME',
-        limit: page.limit,
-        offset: page.offset,
-      }))
-      .map((t) => this.toResponse(t))
+    const rows = this.repo.search(compact({
+      accountId: body.accountId,
+      originChannel: body.originChannel,
+      originId: body.originId,
+      originType: body.originType,
+      from,
+      to,
+      sortBy: page.sortBy ?? 'CLEARING_TIME',
+      limit: page.limit,
+      offset: page.offset,
+    }))
+    const tags = this.repo.tagsForMany(rows.map((t) => t.id))
+    return rows.map((t) => this.toResponse(t, tags.get(t.id) ?? []))
   }
 
   // ---------------------------------------------------------------- tags
@@ -560,17 +588,20 @@ export class TransactionsService {
 
   /**
    * modifyTagsForTransaction. ADD is idempotent per (category, value); a tag `id` references an existing
-   * association (on this transaction: no-op; on another: its category/value pair is added here; unknown:
-   * 400). REMOVE by id or pair; absent tags are a no-op. Returns the full list after the change.
+   * association (on this transaction: no-op; on another: its category/value pair is added here; unknown,
+   * or sent with a category/value that disagrees with it: 400). REMOVE by id (an association on this
+   * transaction; one on another transaction is a no-op) or by pair; absent tags are a no-op. Returns the
+   * full list after the change.
    * @throws 404 unknown transaction; 400 (TAGS_400_MESSAGE) on validation failure
    */
   modifyTags(transactionId: string, body: ModifyTagsRequestBody): TagsResponseBody {
     validateTagsBody(body)
     this.get(transactionId)
     const now = isoUtc(this.ctx.clock.now())
-    const pairs = body.tags.map((tag) => this.resolveTagPair(tag)) // every id must resolve before anything changes
+    const pairs = body.tags.map((tag) => this.resolveTagPair(transactionId, tag, body.operation)) // every id must resolve before anything changes
     this.ctx.db.transaction(() => {
       for (const pair of pairs) {
+        if (!pair) continue
         const existing = this.repo.findTag(transactionId, pair.category, pair.value)
         if (body.operation === 'ADD') {
           if (!existing) this.repo.insertTag({ id: uuid(), transactionId, category: pair.category, value: pair.value, createdAt: now })
@@ -582,19 +613,54 @@ export class TransactionsService {
     return { tags: this.repo.tagsFor(transactionId).map(tagToResponse) }
   }
 
-  private resolveTagPair(tag: Tag): { category: string; value: string } {
-    if (tag.id) {
-      const ref = this.repo.tagById(tag.id)
-      if (!ref) throw badRequest(TAGS_400_MESSAGE)
-      return { category: ref.category, value: ref.value }
-    }
-    return { category: tag.category!, value: tag.value! }
+  /** The (category, value) a tag entry denotes; null when a REMOVE names an association that is not on this transaction. */
+  private resolveTagPair(transactionId: string, tag: Tag, operation: ModifyTagsRequestBody['operation']): { category: string; value: string } | null {
+    if (!tag.id) return { category: tag.category!, value: tag.value! }
+    const ref = this.repo.tagById(tag.id)
+    if (!ref) throw badRequest(TAGS_400_MESSAGE)
+    if ((tag.category != null && tag.category !== ref.category) || (tag.value != null && tag.value !== ref.value)) throw badRequest(TAGS_400_MESSAGE)
+    if (operation === 'REMOVE' && ref.transactionId !== transactionId) return null
+    return { category: ref.category, value: ref.value }
   }
 }
 
+/** The transfer request's type-specific object, shape-validated (400) but not yet resolved. */
+type TransferSpec = { recipientName: string; senderName?: string; reference?: string } & (
+  | { transferType: 'INTERNAL'; recipientAccountId: string }
+  | { transferType: 'ACCOUNT'; bsb: string; accountNumber: string }
+  | { transferType: 'PAY_ID'; payId: string }
+)
+
 type TransferTarget =
-  | { kind: 'internal'; account: Account; recipientName: string; senderName?: string; reference?: string }
-  | { kind: 'external'; bsb: string; accountNumber: string; recipientName: string; senderName?: string; reference?: string }
+  | { kind: 'internal'; account: Account }
+  | { kind: 'external'; bsb: string; accountNumber: string }
+
+function transferSpec(body: TransferOutRequestBody): TransferSpec {
+  switch (body.transferType) {
+    case 'INTERNAL': {
+      const it = body.internalTransfer
+      if (!it) throw badRequest('BAD_REQUEST: internalTransfer is required when transferType is INTERNAL')
+      return compact({ transferType: 'INTERNAL', recipientAccountId: it.recipientAccountHayId, recipientName: it.recipientName, senderName: it.senderName })
+    }
+    case 'ACCOUNT': {
+      const at = body.accountTransfer
+      if (!at) throw badRequest('BAD_REQUEST: accountTransfer is required when transferType is ACCOUNT')
+      if (!BSB_RE.test(at.bsb)) throw badRequest('BAD_REQUEST: accountTransfer/bsb must be 6 digits')
+      if (!ACCOUNT_NUMBER_RE.test(at.accountNumber)) throw badRequest('BAD_REQUEST: accountTransfer/accountNumber must be 5-9 digits')
+      return compact({ transferType: 'ACCOUNT', bsb: at.bsb, accountNumber: at.accountNumber, recipientName: at.recipientName, senderName: at.senderName, reference: at.reference })
+    }
+    case 'PAY_ID': {
+      const pt = body.payIdTransfer
+      if (!pt) throw badRequest('BAD_REQUEST: payIdTransfer is required when transferType is PAY_ID')
+      return compact({ transferType: 'PAY_ID', payId: pt.payId, recipientName: pt.recipientName, senderName: pt.senderName, reference: pt.reference })
+    }
+  }
+}
+
+/** The sending customer's name, used as the recipient leg's counterpart when the request names no senderName. */
+function customerName(c: Customer): string {
+  return [c.customerDetails.firstName, c.customerDetails.lastName].filter(Boolean).join(' ')
+}
 
 // ---------------------------------------------------------------- holds
 
@@ -646,11 +712,11 @@ export class HoldsService {
   }
 
   /**
-   * Authorise a card hold: caller refusal (card checks) -> account status -> account rules
-   * (REFUSED_RULES) -> limits (SINGLE_CARD_TRANSACTION, CARD_PAYMENTS_DAILY, ATM_WITHDRAWAL_PER_DAY for
-   * ATM) -> funds. Accepted: held +a, hold AUTHORISED, webhook CARD_TRANSACTION isPending true. Refused:
-   * nothing held, webhook CARD_TRANSACTION with the refused outcome.
-   * @throws 404 unknown account; 400 non-positive amount
+   * Authorise a card hold: account status -> caller refusal (card status / preferences / processor) ->
+   * account rules (REFUSED_RULES) -> limits (SINGLE_CARD_TRANSACTION, CARD_PAYMENTS_DAILY,
+   * ATM_WITHDRAWAL_PER_DAY for ATM) -> funds. Accepted: held +a, hold AUTHORISED, webhook CARD_TRANSACTION
+   * isPending true. Refused: nothing held, webhook CARD_TRANSACTION with the refused outcome.
+   * @throws 404 unknown account; 400 non-positive amount or malformed transactionTimeUtc
    */
   authorise(input: AuthoriseHoldInput): HoldResult {
     if (!(input.amountCents > 0)) throw badRequest('BAD_REQUEST: hold amount must be greater than 0')
@@ -660,14 +726,11 @@ export class HoldsService {
     const channel = input.channel ?? cardChannel(type, usage, input.originalAmount !== undefined && input.originalAmount.currency !== account.currency)
     const limits = input.limits ?? (type === 'ATM_WITHDRAWAL' ? ATM_LIMITS : CARD_LIMITS)
     const now = isoUtc(this.ctx.clock.now())
-    const transactionTime = input.transactionTimeUtc ? normaliseTime(input.transactionTimeUtc) : now
+    const transactionTime = input.transactionTimeUtc ? normaliseTime(input.transactionTimeUtc, 'transactionTimeUtc') : now
     const actionOwner = input.actionOwner ?? 'PLATFORM'
-    const refuse = (outcome: LedgerOutcome, extra: Partial<RefusedAttempt> = {}): HoldResult => {
-      this.ctx.events.emit('transaction.refused', compact({
-        account,
-        balances: computeBalances(account),
-        actionOwner,
-        outcome,
+    const m = input.card.merchant
+    const refuse = (outcome: LedgerOutcome, extra: Partial<RefusalDetails> = {}): HoldResult => {
+      this.ledger.notifyRefused(account, actionOwner, outcome, compact({
         amountCents: -input.amountCents,
         originalAmount: input.originalAmount,
         webhookType: 'CARD_TRANSACTION',
@@ -676,7 +739,7 @@ export class HoldsService {
         isAtm: type === 'ATM_WITHDRAWAL',
         cardId: input.card.cardHayId,
         cardUsage: usage,
-        merchant: input.card.merchant,
+        merchant: m,
         description: input.description,
         category: input.category,
         ...extra,
@@ -684,15 +747,14 @@ export class HoldsService {
       return { outcome }
     }
 
-    if (input.refusal) return refuse(input.refusal.outcome, { cardPreferenceOutcome: input.refusal.cardPreferenceOutcome, cardProcessorResponse: input.refusal.cardProcessorResponse })
     const gate = this.accounts.requireOpenForMovement(account.id)
     if (typeof gate === 'string') return refuse(gate)
-    const m = input.card.merchant
+    if (input.refusal) return refuse(input.refusal.outcome, { cardPreferenceOutcome: input.refusal.cardPreferenceOutcome, cardProcessorResponse: input.refusal.cardProcessorResponse })
     const rule = this.accounts.evaluateRules(account.id, { mcc: m?.merchantCategoryCode, merchantId: m?.merchantId, merchantName: m?.name })
     if (rule) return refuse('REFUSED_RULES', { ruleDetails: rule })
     for (const limitType of limits) {
       const breached = this.accounts.checkLimit(account.id, limitType, input.amountCents)
-      if (breached) return refuse(breached as LedgerOutcome)
+      if (breached) return refuse(breached)
     }
     if (this.accounts.checkFunds(account.id, input.amountCents)) return refuse('REFUSED_NOT_ENOUGH_FUNDS')
 
@@ -710,6 +772,7 @@ export class HoldsService {
         type,
         channel,
         amount: input.amountCents,
+        portions: [{ amount: input.amountCents, at: transactionTime }],
         currency: after.currency,
         originalAmount: input.originalAmount?.amountCents,
         originalCurrency: input.originalAmount?.currency,
@@ -732,7 +795,8 @@ export class HoldsService {
   /**
    * Incremental authorisation: the increment is checked against the account status, the hold's limits
    * (SINGLE_CARD_TRANSACTION on the increment, daily caps on the running usage) and funds; accepted ->
-   * held +d, same hold id, webhook CARD_TRANSACTION with the new total. @throws 404; 422 INVALID_STATE
+   * held +d, same hold id, a new dated portion (windowed from now by the daily limits), webhook
+   * CARD_TRANSACTION with the new total. @throws 404; 422 INVALID_STATE
    */
   increase(holdId: string, deltaCents: Cents, opts: HoldOptions = {}): HoldResult {
     const hold = this.requireOpen(holdId)
@@ -740,24 +804,22 @@ export class HoldsService {
     const actionOwner = opts.actionOwner ?? 'PLATFORM'
     const account = this.accounts.get(hold.accountId)
     const refuse = (outcome: LedgerOutcome): HoldResult => {
-      this.ctx.events.emit('transaction.refused', compact({
-        account, balances: computeBalances(account), actionOwner, outcome, amountCents: -deltaCents, webhookType: 'CARD_TRANSACTION',
-        transactionTime: hold.authorisedAt, isPending: false, isAtm: hold.type === 'ATM_WITHDRAWAL', holdId: hold.id, cardId: hold.cardId, cardUsage: hold.cardUsage,
-        merchant: hold.merchant, description: hold.description, category: hold.category,
-      }))
+      this.ledger.notifyRefused(account, actionOwner, outcome, holdRefusalDetails(hold, -deltaCents, 'CARD_TRANSACTION'))
       return { outcome, hold }
     }
     const gate = this.accounts.requireOpenForMovement(account.id)
     if (typeof gate === 'string') return refuse(gate)
     for (const limitType of hold.limitKinds) {
       const breached = this.accounts.checkLimit(account.id, limitType, deltaCents)
-      if (breached) return refuse(breached as LedgerOutcome)
+      if (breached) return refuse(breached)
     }
     if (this.accounts.checkFunds(account.id, deltaCents)) return refuse('REFUSED_NOT_ENOUGH_FUNDS')
     this.ctx.db.transaction(() => {
       const after = this.accounts.adjust(account.id, { heldDelta: deltaCents })
+      const now = isoUtc(this.ctx.clock.now())
       hold.amount += deltaCents
-      hold.updatedAt = isoUtc(this.ctx.clock.now())
+      hold.portions = [...hold.portions, { amount: deltaCents, at: now }]
+      hold.updatedAt = now
       this.repo.saveHold(hold)
       this.emitChange(hold, 'INCREASED', deltaCents, after, actionOwner)
     })()
@@ -765,8 +827,9 @@ export class HoldsService {
   }
 
   /**
-   * Partial reversal: held -d, same hold id, webhook CARD_TRANSACTION_REFUND (+d, pending). A decrease
-   * by the whole amount is a full reversal. @throws 404; 422 INVALID_STATE / INVALID_AMOUNT
+   * Partial reversal: held -d, same hold id, webhook CARD_TRANSACTION_REFUND (+d, pending); the newest
+   * portions are released first. A decrease by the whole amount is a full reversal.
+   * @throws 404; 422 INVALID_STATE / INVALID_AMOUNT
    */
   decrease(holdId: string, deltaCents: Cents, opts: HoldOptions = {}): HoldResult {
     const hold = this.requireOpen(holdId)
@@ -776,6 +839,7 @@ export class HoldsService {
     this.ctx.db.transaction(() => {
       const after = this.accounts.adjust(hold.accountId, { heldDelta: -deltaCents })
       hold.amount -= deltaCents
+      hold.portions = releasePortions(hold.portions, deltaCents)
       hold.updatedAt = isoUtc(this.ctx.clock.now())
       this.repo.saveHold(hold)
       this.emitChange(hold, 'DECREASED', deltaCents, after, opts.actionOwner ?? 'PLATFORM')
@@ -809,14 +873,22 @@ export class HoldsService {
 
   /**
    * Settlement: releases the whole hold (held -h) and posts -s (default s = h) as a new
-   * FinancialTransaction with relatedHoldHayId, bypassing the checks already made at authorisation
-   * (total -s, available -s + h). Webhook CARD_TRANSACTION_SETTLED with the new transactionHayId and
-   * holdHayId. @throws 404; 422 INVALID_STATE
+   * FinancialTransaction with relatedHoldHayId (total -s, available -s + h), bypassing the status and
+   * limit checks already made at authorisation. Only h was reserved: a settlement larger than the hold
+   * funds-checks the excess (s - h <= availableBalance, else REFUSED_NOT_ENOUGH_FUNDS with a refused
+   * CARD_TRANSACTION_SETTLED webhook and the hold left AUTHORISED). Webhook CARD_TRANSACTION_SETTLED with
+   * the new transactionHayId and holdHayId.
+   * @throws 404; 422 INVALID_STATE; 400 for a settlement of 0 or less (reverse() releases a hold)
    */
   settle(holdId: string, settleCents?: Cents, opts: HoldOptions = {}): HoldResult {
     const hold = this.requireOpen(holdId)
     const s = settleCents ?? hold.amount
-    if (s < 0) throw badRequest('BAD_REQUEST: settlement amount must be 0 or greater')
+    if (!(s > 0)) throw badRequest('BAD_REQUEST: settlement amount must be greater than 0 (reverse the hold to release it)')
+    const actionOwner = opts.actionOwner ?? 'PLATFORM'
+    if (s > hold.amount && this.accounts.checkFunds(hold.accountId, s - hold.amount)) {
+      this.ledger.notifyRefused(this.accounts.get(hold.accountId), actionOwner, 'REFUSED_NOT_ENOUGH_FUNDS', holdRefusalDetails(hold, -s, 'CARD_TRANSACTION_SETTLED'))
+      return { outcome: 'REFUSED_NOT_ENOUGH_FUNDS', hold }
+    }
     const transaction = this.ctx.db.transaction(() => {
       const t = this.ledger.apply(compact({
         accountId: hold.accountId,
@@ -837,7 +909,7 @@ export class HoldsService {
         limits: hold.limitKinds,
         checks: false,
         releaseHeldCents: hold.amount,
-        actionOwner: opts.actionOwner ?? 'PLATFORM',
+        actionOwner,
       }))
       const now = isoUtc(this.ctx.clock.now())
       hold.state = 'SETTLED'
@@ -861,6 +933,37 @@ export class HoldsService {
   }
 }
 
+/** Refusal webhook details for a movement on an existing hold (increment, settlement): the hold id, card and merchant ride along. */
+function holdRefusalDetails(hold: Hold, amountCents: Cents, webhookType: WebhookTransactionType): RefusalDetails {
+  return compact({
+    amountCents,
+    webhookType,
+    transactionTime: hold.authorisedAt,
+    isPending: false,
+    isAtm: hold.type === 'ATM_WITHDRAWAL',
+    holdId: hold.id,
+    cardId: hold.cardId,
+    cardUsage: hold.cardUsage,
+    merchant: hold.merchant,
+    description: hold.description,
+    category: hold.category,
+  })
+}
+
+/** Releases `cents` from the newest portions first (a partial reversal corrects the latest authorisation) [decision]. */
+export function releasePortions(portions: HoldPortion[], cents: Cents): HoldPortion[] {
+  const out = [...portions]
+  let left = cents
+  while (left > 0 && out.length) {
+    const last = out[out.length - 1]!
+    const take = Math.min(last.amount, left)
+    left -= take
+    if (take === last.amount) out.pop()
+    else out[out.length - 1] = { ...last, amount: last.amount - take }
+  }
+  return out
+}
+
 // ---------------------------------------------------------------- helpers
 
 /** Card channel from usage (Apple/Google wallet -> APPLE_PAY_*, contactless -> VISA_CONTACTLESS, present -> VISA_CARD_PRESENT, ATM -> VISA_ATM, else VISA_CARD_NOT_PRESENT), _INTERNATIONAL for FX spend. */
@@ -881,17 +984,19 @@ export function requestCents(amount: number, field: string): Cents {
   return toCents(amount)
 }
 
-function parseTime(value: string, field: string): Date {
+/**
+ * Any ISO date-time -> the isoUtc rendering (comparable with stored timestamps). Fractional seconds
+ * beyond the millisecond that Date keeps are preserved from the input (microsecond precision, further
+ * digits truncated), so a client-supplied stamp round-trips and an inclusive search bound stays inclusive.
+ * @throws 400 `<field> must be a valid date-time`
+ */
+export function normaliseTime(value: string, field = 'date-time'): string {
   const d = new Date(value)
   if (typeof value !== 'string' || Number.isNaN(d.getTime())) throw badRequest(`BAD_REQUEST: ${field} must be a valid date-time`)
-  return d
-}
-
-/** Any ISO date-time -> the isoUtc rendering (comparable with stored timestamps). */
-export function normaliseTime(value: string): string {
-  const d = new Date(value)
-  if (Number.isNaN(d.getTime())) throw new TypeError(`Invalid date-time: ${value}`)
-  return isoUtc(d)
+  const rendered = isoUtc(d)
+  const digits = ISO_FRACTION_RE.exec(value)?.[1]
+  if (!digits || digits.length <= 3) return rendered
+  return rendered.replace(/\.\d{6}Z$/, `.${digits.padEnd(6, '0').slice(0, 6)}Z`)
 }
 
 function tagToResponse(t: TagRow): Tag {
