@@ -113,7 +113,10 @@ export class AccountsService {
   private usageProvider: LimitUsageProvider = () => 0
   private readonly closureCheckers: ClosureChecker[] = []
 
-  constructor(private readonly ctx: AppContext, private readonly repo: AccountRepo) {}
+  constructor(private readonly ctx: AppContext, private readonly repo: AccountRepo) {
+    ctx.scheduler.define<{ parentId: string; currency: string }>('accounts.provisionChild', ({ parentId, currency }) => this.provisionChild(parentId, currency))
+    ctx.scheduler.define<{ id: string; reason?: CloseReason }>('accounts.closure', ({ id, reason }) => this.completeClosure(id, reason))
+  }
 
   // ---------------------------------------------------------------- products
 
@@ -350,18 +353,21 @@ export class AccountsService {
     const wanted = child.initMode === 'ALL' ? FX_CURRENCIES : [...new Set(child.currencies ?? [])]
     for (const currency of wanted) {
       if (currency === HOME_CURRENCY) continue
-      this.ctx.scheduler.later(() => {
-        const p = this.repo.byId(parent.id)
-        if (!p || p.status === 'CLOSED' || p.closeRequestedAt || this.repo.children(p.id).some((c) => c.currency === currency)) return
-        this.ctx.db.transaction(() => {
-          const c = this.createEntity({ accountHolderType: p.holderType, accountHolderId: p.holderId, productId: p.productId, currency, parentAccountId: p.id }, { provisioning: true })
-          if (p.status === 'LOCKED') {
-            if (p.blockNote !== undefined) c.blockNote = p.blockNote
-            this.transition(c, 'LOCKED', { actionOwner: 'PLATFORM', blockedBy: p.blockedBy })
-          }
-        })()
-      })
+      this.ctx.scheduler.defer('accounts.provisionChild', { parentId: parent.id, currency })
     }
+  }
+
+  /** One deferred child of provisionChildren (skipped when the parent is gone, closing or already has that currency). */
+  private provisionChild(parentId: string, currency: string): void {
+    const p = this.repo.byId(parentId)
+    if (!p || p.status === 'CLOSED' || p.closeRequestedAt || this.repo.children(p.id).some((c) => c.currency === currency)) return
+    this.ctx.db.transaction(() => {
+      const c = this.createEntity({ accountHolderType: p.holderType, accountHolderId: p.holderId, productId: p.productId, currency, parentAccountId: p.id }, { provisioning: true })
+      if (p.status === 'LOCKED') {
+        if (p.blockNote !== undefined) c.blockNote = p.blockNote
+        this.transition(c, 'LOCKED', { actionOwner: 'PLATFORM', blockedBy: p.blockedBy })
+      }
+    })()
   }
 
   // ---------------------------------------------------------------- balances and the ledger-driven status flips
@@ -782,7 +788,7 @@ export class AccountsService {
     if (!a.closeRequestedAt) {
       a.closeRequestedAt = isoUtc(this.ctx.clock.now())
       this.repo.save(a)
-      this.ctx.scheduler.later(() => this.completeClosure(id, reason ?? undefined))
+      this.ctx.scheduler.defer('accounts.closure', reason ? { id, reason } : { id })
     }
     return { result: 'SUCCESS', description: 'Account closure request accepted.', errors: [] }
   }

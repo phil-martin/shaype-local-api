@@ -69,7 +69,7 @@
  * - Staging trajectories (F21, docs:payto-staging-testing-suite): `paymentstatus:<mms>[&<mms>]` or
  *   `paymentstatus:timeout_rjct` in the payment's description, else the mandate's, forces the outcome after
  *   the agreement checks: the first status is answered at once; a non-final one then moves asynchronously
- *   (scheduler.later; test knob paymentProgressDelayMs, reset by /_admin/reset) to the second status,
+ *   (scheduler.defer; test knob paymentProgressDelayMs, reset by /_admin/reset) to the second status,
  *   settlement by default; RJCT is reason AB01. Without a hint the outcome is final at once. A hop that
  *   would settle on a mandate no longer ACTIVE (cancelled / suspended meanwhile) rejects with AG01 instead.
  * - Inbound RAPAIN (receivePaymentInstruction): ACCP debits the local debtor only (the creditor leg is the

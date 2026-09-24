@@ -5,7 +5,7 @@
 
 **Full-fidelity operations: 143 / 143 (100%)**  `████████████████████`
 
-All 169 operations of the spec are routed and schema-validated; the 26 stub-only operations answer with deterministic spec-shaped data. Test files: 16. Updated 2026-09-24 at `a45b164`.
+All 169 operations of the spec are routed and schema-validated; the 26 stub-only operations answer with deterministic spec-shaped data. Test files: 16. Updated 2026-09-24 at `d7d62e6`.
 
 | Section | Implemented | Progress | Status |
 |---|---|---|---|
@@ -161,7 +161,7 @@ node -e "require('node:http').createServer((req, res) => { let b = ''; req.on('d
 
 ## Asynchronous effects and the virtual clock
 
-Effects Shaype performs asynchronously happen asynchronously here too: the onboarding outcome, the account-closure cascade (account `CLOSED`, cards `INACTIVE`, customer `INACTIVE`; from the `202` on, the account refuses money movements with `REFUSED_ACCOUNT_CLOSED`), direct-debit progress (`ACCEPTED` → `SUBMITTED` → `COMPLETE`, one step at a time), FX child-account provisioning, PayTo payment progress and the card settlement of the mock purchase. By default (`--async-delay-ms 0`) they run right after the response; `POST /_admin/flush` waits for them and for the resulting webhooks.
+Effects Shaype performs asynchronously happen asynchronously here too: the onboarding outcome, the account-closure cascade (account `CLOSED`, cards `INACTIVE`, customer `INACTIVE`; from the `202` on, the account refuses money movements with `REFUSED_ACCOUNT_CLOSED`), direct-debit progress (`ACCEPTED` → `SUBMITTED` → `COMPLETE`, one step at a time), FX child-account provisioning, PayTo payment progress and the card settlement of the mock purchase. By default (`--async-delay-ms 0`) they run right after the response; `POST /_admin/flush` waits for them and for the resulting webhooks. With a file `--db`, effects still pending when the server stops run after it restarts (the virtual clock itself starts again at real time).
 
 Every such effect is also due on the **virtual clock**. Start the server with a large delay (e.g. `--async-delay-ms 3600000`) and nothing happens until your test moves the clock, so every intermediate state can be observed:
 

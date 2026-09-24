@@ -34,7 +34,7 @@
  *   account refuses without it) it also moves the card state (W5): WRONG_CVV / INCORRECT_PIN spend a try,
  *   CVV_BLOCKED / ALLOWED_PIN_RETRIES_EXCEEDED block. Nothing is held and nothing settles after a decline.
  * - Delays: settlementDelayInSeconds / updateHoldDelayInSeconds are honoured on the virtual clock
- *   (ctx.scheduler.later; POST /_admin/clock advanceMs fires them); an omitted delay is config.asyncDelayMs
+ *   (ctx.scheduler.defer; POST /_admin/clock advanceMs fires them); an omitted delay is config.asyncDelayMs
  *   (spec §5.5). The settlement of the hold + update mock is due settlementDelayInSeconds after the update
  *   was due, so one clock jump past both runs both. POST /_admin/flush waits only for steps whose real timer
  *   fires within ~9 s and reports the later ones as `deferred` (they stay pending until the clock passes

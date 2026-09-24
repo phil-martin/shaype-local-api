@@ -4,7 +4,7 @@
  * and drives them — cards (card-side checks, expiry), transactions (holds, the posting engine: every money
  * movement and TRANSACTION webhook), direct-entry (returns of outbound direct debits) and payto (MANDATE /
  * MANDATE_PAYMENT, RAPAIN, search stubs). Deferred steps (settlement, hold update) run through
- * ctx.scheduler.later on the virtual clock.
+ * ctx.scheduler.defer on the virtual clock (kept across a restart on a file database).
  */
 import type { components } from '../../contract/generated/b2b-types.js'
 import type { AppContext } from '../../context.js'
@@ -127,7 +127,14 @@ const BBAN_RE = /^(\d{6})(\d{5,9})$/
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
 export class UtilitiesService {
-  constructor(private readonly ctx: AppContext) {}
+  constructor(private readonly ctx: AppContext) {
+    ctx.scheduler.define<{ holdId: string }>('utilities.settle', ({ holdId }) => this.settle(holdId))
+    ctx.scheduler.define<{ holdId: string; updateCents: Cents; settleAt: number }>('utilities.updateHold', ({ holdId, updateCents, settleAt }) => {
+      this.updateHold(holdId, updateCents)
+      // measured from when the update was due, so one clock jump past both runs both
+      this.settleAt(settleAt, holdId)
+    })
+  }
 
   private get cards() { return this.ctx.services.cards }
   private get accounts() { return this.ctx.services.accounts }
@@ -148,7 +155,7 @@ export class UtilitiesService {
     const r = this.authorise(body)
     if (r.holdId) {
       const holdId = r.holdId
-      this.ctx.scheduler.later(() => this.settle(holdId), this.delayMs(body.settlementDelayInSeconds))
+      this.ctx.scheduler.defer('utilities.settle', { holdId }, this.delayMs(body.settlementDelayInSeconds))
     }
     return { message: MESSAGES.generateCardTransaction }
   }
@@ -172,11 +179,7 @@ export class UtilitiesService {
       const updateDelay = this.delayMs(body.updateHoldDelayInSeconds)
       const settleDelay = this.delayMs(body.settlementDelayInSeconds)
       const updateDue = this.ctx.clock.now().getTime() + updateDelay
-      this.ctx.scheduler.later(() => {
-        this.updateHold(holdId, updateCents)
-        // measured from when the update was due, so one clock jump past both runs both
-        this.at(updateDue + settleDelay, () => this.settle(holdId))
-      }, updateDelay)
+      this.ctx.scheduler.defer('utilities.updateHold', { holdId, updateCents, settleAt: updateDue + settleDelay }, updateDelay)
     }
     return { message: MESSAGES.generateHoldAndUpdateHoldTransactions }
   }
@@ -606,11 +609,11 @@ export class UtilitiesService {
     return seconds === undefined ? this.ctx.config.asyncDelayMs : seconds * 1000
   }
 
-  /** Runs `fn` when the virtual clock reaches `dueAt` (epoch ms): inline when already due, else through the scheduler. */
-  private at(dueAt: number, fn: () => void): void {
+  /** Settles the hold when the virtual clock reaches `dueAt` (epoch ms): inline when already due, else through the scheduler. */
+  private settleAt(dueAt: number, holdId: string): void {
     const delay = dueAt - this.ctx.clock.now().getTime()
-    if (delay <= 0) fn()
-    else this.ctx.scheduler.later(fn, delay)
+    if (delay <= 0) this.settle(holdId)
+    else this.ctx.scheduler.defer('utilities.settle', { holdId }, delay)
   }
 }
 

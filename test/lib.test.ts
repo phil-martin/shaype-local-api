@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -132,6 +133,61 @@ describe('database migrations', () => {
       const cols = (reopened.prepare('PRAGMA table_info(accounts)').all() as { name: string }[]).map((c) => c.name)
       reopened.close()
       expect(cols).toContain('close_requested_at')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('scheduler: deferred platform steps survive a restart on a file database', () => {
+  it('onboarding outcome, card settlement and the closure cascade still run after the server restarts on the same --db file', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'shaype-jobs-'))
+    const db = join(dir, 'jobs.db')
+    const HOUR = 3_600_000
+    const config = { db, asyncDelayMs: HOUR, defaultRiskLevel: 'LOW' as const }
+    try {
+      const run1 = await startApp(config)
+      const a1 = run1.app
+      const post = (url: string, payload: object) => a1.inject({ method: 'POST', url, payload })
+      const newCustomer = async (n: number) => (await post('/v0/customers/create', {
+        idempotencyKey: randomUUID(), email: `restart${n}@example.com`, customerTier: 'STANDARD', phoneNumber: { countryCodePrefix: '+61', numberAfterPrefix: `48888888${n}` },
+        address: { line1: '1 Test St', townOrCity: 'Sydney', administrativeRegion: 'NSW', postcode: '2000', countryCodeIso: 'AUS' },
+        customerDetails: { firstName: 'Restart', lastName: `Holder${n}`, dateOfBirth: '1990-01-01' },
+      })).json().customerHayId as string
+      const customer = await newCustomer(1)
+      await a1.inject({ method: 'POST', url: '/_admin/clock', payload: { advanceMs: HOUR + 1000 } }) // onboarded
+      const lateCustomer = await newCustomer(2) // its outcome is still pending at the restart
+      const openAccount = async () => (await post('/v1/accounts', { idempotencyKey: randomUUID(), accountHolderId: customer, accountHolderType: 'CUSTOMER', productId: 'a1b2c3d4-0000-4000-8000-000000000001' })).json().accountHayId as string
+      const accountId = await openAccount()
+      const closingId = await openAccount()
+      expect((await post('/v1/transactions/credit', { idempotencyKey: randomUUID(), accountHayId: accountId, amount: 100, counterpartName: 'x', description: 'fund', transactionChannel: 'MANUAL_ADJUSTMENT' })).json().outcome).toBe('ACCEPTED')
+      const card = await post('/v0/cards/create', {
+        idempotencyKey: randomUUID(), accountId, customerHayId: customer, firstName: 'Restart', lastName: 'Holder', email: 'restart@example.com',
+        phoneNumber: { countryCodePrefix: '61', numberAfterPrefix: '412345678' }, cardType: 'VIRTUAL', pin: '1234',
+        deliveryAddress: { line1: '9 Fifth Ave', townOrCity: 'Adelaide', administrativeRegion: 'SA', postcode: '5012', countryCodeIso: 'AUS' },
+      })
+      expect(card.statusCode, card.body).toBe(200)
+      const purchase = await post('/v0/utils/generate-card-transaction', {
+        amount: -25.5, cardToken: card.json().cardToken, settlementDelayInSeconds: 120,
+        merchantDetails: { merchantName: 'IGA (Mt Cotton)', merchantId: '000009493578577', merchantCategoryCode: '5411' },
+      })
+      expect(purchase.statusCode, purchase.body).toBe(200)
+      expect((await a1.inject({ method: 'POST', url: `/v0/accounts/${closingId}/close`, payload: { reason: 'CUSTOMER' } })).statusCode).toBe(202)
+      expect((await a1.inject({ method: 'GET', url: `/v0/customers/${lateCustomer}` })).json().status).toBe('PENDING_APPROVAL')
+      await a1.close()
+
+      const run2 = await startApp(config)
+      const a2 = run2.app
+      expect(run2.ctx.scheduler.pending()).toBe(3)
+      await a2.inject({ method: 'POST', url: '/_admin/clock', payload: { advanceMs: 2 * HOUR } })
+      await a2.inject({ method: 'POST', url: '/_admin/flush' })
+      expect((await a2.inject({ method: 'GET', url: `/v0/customers/${lateCustomer}` })).json().status).toBe('ACTIVE')
+      expect((await a2.inject({ method: 'GET', url: `/v0/accounts/${accountId}` })).json()).toMatchObject({ totalBalance: 74.5, heldBalance: 0 })
+      expect((await a2.inject({ method: 'GET', url: `/v0/accounts/${closingId}` })).json().status).toBe('CLOSED')
+      const types = ((await a2.inject({ method: 'GET', url: '/_admin/notifications?limit=1000' })).json() as { type: string; payload: any }[])
+      expect(types.filter((n) => n.type === 'ONBOARDING_PASSED' && n.payload.customerHayId === lateCustomer)).toHaveLength(1)
+      expect(run2.ctx.scheduler.pending()).toBe(0)
+      await a2.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

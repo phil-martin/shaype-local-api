@@ -175,7 +175,9 @@ declare module '../../context.js' {
 }
 
 export class PayToService {
-  constructor(private readonly ctx: AppContext, private readonly repo: MandateRepo) {}
+  constructor(private readonly ctx: AppContext, private readonly repo: MandateRepo) {
+    ctx.scheduler.define<{ mandateId: string; instructionId: string; final?: InstructionStatus }>('payto.progress', ({ mandateId, instructionId, final }) => this.progress(mandateId, instructionId, final))
+  }
 
   /**
    * Delay of the asynchronous hop of a staging payment trajectory (non-final -> final status). Undefined =
@@ -819,7 +821,7 @@ export class PayToService {
    * Initiates a payment instruction (adhoc or scheduled): the consistency checks against the agreement
    * (REJECTED with a PaymentReasonCode), then either settlement or, when a staging trajectory is given
    * (`paymentstatus:<initial>[&<final>]`, parseTrajectory), its initial status. A non-final initial status
-   * progresses asynchronously (scheduler.later, actionOwner PLATFORM) to the trajectory's final status,
+   * progresses asynchronously (scheduler.defer, actionOwner PLATFORM) to the trajectory's final status,
    * ACCEPTED_AND_SETTLED (settlement) by default; MANDATE_PAYMENT is sent once, when the status is final.
    */
   private initiate(m: Mandate, i: PaymentInstruction, actionOwner: ActionOwner, trajectory?: Trajectory): void {
@@ -828,18 +830,20 @@ export class PayToService {
     if (!trajectory) return this.finish(m, i, this.settle(m, i, actionOwner), actionOwner)
     if (isFinalStatus(trajectory.initial)) return this.finish(m, i, this.reach(m, i, trajectory.initial, actionOwner), actionOwner)
     this.finish(m, i, { status: trajectory.initial }, actionOwner)
-    const hop = (): void => {
-      const current = this.repo.instructionById(i.id)
-      const mandate = this.repo.mandateById(m.id)
-      if (!current || !mandate || isFinalStatus(current.status)) return
-      const final = trajectory.final ?? 'ACCEPTED_AND_SETTLED'
-      // the mandate was cancelled / suspended while the payment was in flight: no settlement against it
-      const outcome: PaymentOutcome = final === 'ACCEPTED_AND_SETTLED' && mandate.status !== 'ACTIVE' ? { status: 'REJECTED', reasonCode: 'AG01' } : this.reach(mandate, current, final, 'PLATFORM')
-      this.finish(mandate, current, outcome, 'PLATFORM')
-    }
+    const args = trajectory.final ? { mandateId: m.id, instructionId: i.id, final: trajectory.final } : { mandateId: m.id, instructionId: i.id }
     const delayMs = this.paymentProgressDelayMs
-    if (delayMs === undefined) this.ctx.scheduler.later(hop)
-    else this.ctx.scheduler.later(hop, delayMs)
+    if (delayMs === undefined) this.ctx.scheduler.defer('payto.progress', args)
+    else this.ctx.scheduler.defer('payto.progress', args, delayMs)
+  }
+
+  /** The asynchronous hop of initiate(): an in-flight instruction reaches its final status (default ACCEPTED_AND_SETTLED). */
+  private progress(mandateId: string, instructionId: string, final: InstructionStatus = 'ACCEPTED_AND_SETTLED'): void {
+    const current = this.repo.instructionById(instructionId)
+    const mandate = this.repo.mandateById(mandateId)
+    if (!current || !mandate || isFinalStatus(current.status)) return
+    // the mandate was cancelled / suspended while the payment was in flight: no settlement against it
+    const outcome: PaymentOutcome = final === 'ACCEPTED_AND_SETTLED' && mandate.status !== 'ACTIVE' ? { status: 'REJECTED', reasonCode: 'AG01' } : this.reach(mandate, current, final, 'PLATFORM')
+    this.finish(mandate, current, outcome, 'PLATFORM')
   }
 
   /** Agreement checks (docs:payto-payment "Shaype confirms the request is consistent with the PayTo agreement"). */

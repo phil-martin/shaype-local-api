@@ -26,6 +26,16 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE INDEX IF NOT EXISTS notifications_status ON notifications(status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS notifications_type ON notifications(type, seq);
 
+-- Deferred platform steps (Scheduler.defer): kept so a file database resumes them after a restart.
+CREATE TABLE IF NOT EXISTS scheduled_jobs (
+  id       TEXT PRIMARY KEY,
+  kind     TEXT NOT NULL,                     -- handler registered with Scheduler.define
+  args     TEXT NOT NULL,                     -- JSON
+  due_at   INTEGER NOT NULL,                  -- virtual-clock epoch ms (tick() runs it once the clock passes)
+  fires_at INTEGER NOT NULL,                  -- wall-clock epoch ms of its real timer
+  seq      INTEGER NOT NULL
+);
+
 -- Idempotency replay cache for request bodies carrying idempotencyKey (scoped per operation).
 CREATE TABLE IF NOT EXISTS idempotency (
   scope        TEXT NOT NULL,

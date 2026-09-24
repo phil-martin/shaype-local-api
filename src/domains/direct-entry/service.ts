@@ -2,7 +2,7 @@
  * Outbound Direct Entry instructions (spec §5.8, docs/map/de-dd-scheduled.md §1, §3.2, §4.3):
  * createDirectDebitV1/V0 pulls funds from an external (recipient) account into a local (sender)
  * account. RECEIVED -> ACCEPTED happen synchronously with the request; ACCEPTED -> SUBMITTED ->
- * COMPLETE run through ctx.scheduler.later() (one hop each, config.asyncDelayMs apart, each due one
+ * COMPLETE run through ctx.scheduler.defer() (one hop each, config.asyncDelayMs apart, each due one
  * hop after the previous one was due, so a clock jump past both runs both); COMPLETE
  * posts the DIRECT_DEBIT_TRANSFER credit through the ledger. One directEntry.statusChanged event per
  * transition (events.ts maps it to the DIRECT_ENTRY webhook). Publishes ctx.services.directEntry.
@@ -104,6 +104,8 @@ export class DirectEntryService {
 
   constructor(private readonly ctx: AppContext, private readonly repo: DirectEntryRepo) {
     this.schedules = new ScheduledPaymentsService(ctx, repo)
+    ctx.scheduler.define<{ id: string; dueAt: number }>('directEntry.submit', ({ id, dueAt }) => { this.submit(id, dueAt) })
+    ctx.scheduler.define<{ id: string }>('directEntry.complete', ({ id }) => { this.complete(id) })
   }
 
   private get accounts() {
@@ -255,7 +257,7 @@ export class DirectEntryService {
     if (stored.status === 'ACCEPTED') {
       const delay = this.hopDelayMs()
       // always deferred, even with no delay: the request answers ACCEPTED before the batch runs
-      this.ctx.scheduler.later(() => { this.submit(stored.id, now.getTime() + delay) }, delay)
+      this.ctx.scheduler.defer('directEntry.submit', { id: stored.id, dueAt: now.getTime() + delay }, delay)
     }
     if (opts.version === 'v0') return { status: stored.status === 'REJECTED' ? 422 : 200, body: this.responseV0(stored) }
     return { status: 200, body: this.responseV1(stored) }
@@ -277,7 +279,9 @@ export class DirectEntryService {
     const r = this.repo.instructionById(transactionId)
     if (!r || r.status !== 'ACCEPTED') return r
     const updated = this.transition(r, 'SUBMITTED', 'PLATFORM')
-    this.at(dueAt + this.hopDelayMs(), () => this.complete(transactionId))
+    const completeAt = dueAt + this.hopDelayMs()
+    if (completeAt <= this.ctx.clock.now().getTime()) this.complete(transactionId)
+    else this.ctx.scheduler.defer('directEntry.complete', { id: transactionId }, completeAt - this.ctx.clock.now().getTime())
     return updated
   }
 
@@ -362,17 +366,6 @@ export class DirectEntryService {
 
   private hopDelayMs(): number {
     return this.progressDelayMs ?? this.ctx.config.asyncDelayMs
-  }
-
-  /**
-   * Run `fn` when the virtual clock reaches `dueAt` (epoch ms). Already due -> run now, inline: a hop that
-   * falls due inside a clock jump must not wait for another tick (scheduler.tick only fires entries that
-   * existed when it started).
-   */
-  private at(dueAt: number, fn: () => void): void {
-    const delay = dueAt - this.ctx.clock.now().getTime()
-    if (delay <= 0) fn()
-    else this.ctx.scheduler.later(fn, delay)
   }
 
   private transition(r: DeInstruction, status: DeStatus, actionOwner: ActionOwner, patch: { details?: string; ledgerTransactionId?: string; returnReason?: string; processingDate?: string } = {}): DeInstruction {

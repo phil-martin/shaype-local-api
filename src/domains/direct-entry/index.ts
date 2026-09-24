@@ -18,7 +18,7 @@
  *   with another idempotencyKey, or naming an existing ledger transaction with it, is 422
  *   DUPLICATE_TRANSACTION_ID; the same key replays (rejections too).
  * - Lifecycle: RECEIVED and ACCEPTED are recorded and notified synchronously (create answers ACCEPTED);
- *   ACCEPTED -> SUBMITTED -> COMPLETE run through scheduler.later() one hop apart, each due one hop after
+ *   ACCEPTED -> SUBMITTED -> COMPLETE run through scheduler.defer() one hop apart, each due one hop after
  *   the previous one was due (a clock jump past both runs both) (actionOwner PLATFORM;
  *   CLIENT for the synchronous statuses). REJECTED (create) when the sender BSB + account number is not
  *   an open local account (no DIRECT_ENTRY webhook when there is no local account, hence no customer)

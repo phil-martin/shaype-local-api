@@ -48,7 +48,7 @@ export async function buildServer(overrides: Partial<Config> = {}, deps: { fetch
   const db = openDatabase(config.db)
   const events = new DomainEvents()
   const webhooks = new WebhookDispatcher(db, config, clock, app.log, deps.fetch)
-  const scheduler = new Scheduler(clock, config.asyncDelayMs, app.log)
+  const scheduler = new Scheduler(clock, config.asyncDelayMs, app.log, db)
   const ctx: AppContext = { config, db, clock, log: app.log, events, webhooks, scheduler, services: {} as AppContext['services'], handled: new Set() }
   const tokens = new TokenService(clock, config.tokenTtlSeconds)
 
@@ -95,6 +95,7 @@ export async function buildServer(overrides: Partial<Config> = {}, deps: { fetch
   })
   registerAuthRoutes(app, ctx, tokens)
   registerDomains(app, ctx)
+  scheduler.restore() // steps a file database kept from an earlier run (every handler is defined by now)
   const stubbed = registerStubs(app, ctx)
   registerAdminRoutes(app, ctx, { version: pkg.version, stubbed })
 

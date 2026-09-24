@@ -32,7 +32,9 @@ declare module '../../context.js' {
 }
 
 export class CustomersService {
-  constructor(private readonly ctx: AppContext, private readonly repo: CustomerRepo) {}
+  constructor(private readonly ctx: AppContext, private readonly repo: CustomerRepo) {
+    ctx.scheduler.define<{ customerId: string }>('customers.onboarding', ({ customerId }) => this.completeOnboarding(customerId))
+  }
 
   find(id: string): Customer | undefined {
     return this.repo.byId(id)
@@ -132,7 +134,7 @@ export class CustomersService {
     this.repo.insert(c)
     this.ctx.events.emit('customer.created', { customer: structuredClone(c) })
     if (!c.skipKyc && !emailTags(c.email).has('pending')) {
-      this.ctx.scheduler.later(() => this.completeOnboarding(c.id))
+      this.ctx.scheduler.defer('customers.onboarding', { customerId: c.id })
     }
     return c
   }
