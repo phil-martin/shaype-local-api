@@ -73,6 +73,43 @@ describe('scheduler', () => {
     await built.app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
   })
 
+  it('a clock jump runs the deferred steps it makes due in due order, not creation order (due steps they schedule included)', async () => {
+    const ran: string[] = []
+    built.ctx.scheduler.later(() => { ran.push('+300s') }, 300_000)
+    // a step scheduled by a step is due from the clock's time at that point (+400 s): still in this tick, last
+    built.ctx.scheduler.later(() => { ran.push('+60s'); built.ctx.scheduler.later(() => { ran.push('chained') }, 0) }, 60_000)
+    built.ctx.scheduler.later(() => { ran.push('+120s') }, 120_000)
+    await built.app.inject({ method: 'POST', url: '/_admin/clock', payload: { advanceMs: 400_000 } })
+    expect(ran).toEqual(['+60s', '+120s', '+300s', 'chained'])
+    await built.app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
+  })
+
+  it('a delay beyond the 32-bit timer range waits (virtual clock) instead of firing after 1 ms', async () => {
+    const ran: string[] = []
+    built.ctx.scheduler.later(() => { ran.push('30 days') }, 30 * 24 * 3600 * 1000)
+    await new Promise((r) => setTimeout(r, 50))
+    expect(ran).toEqual([])
+    await built.app.inject({ method: 'POST', url: '/_admin/clock', payload: { advanceMs: 31 * 24 * 3600 * 1000 } })
+    expect(ran).toEqual(['30 days'])
+    await built.app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
+  })
+
+  it('/_admin/reset releases a /_admin/flush that was waiting for the work it cancelled', async () => {
+    const other = await startApp({ asyncDelayMs: 2_000 })
+    try {
+      other.ctx.scheduler.later(() => {})
+      const started = Date.now()
+      const flushing = other.app.inject({ method: 'POST', url: '/_admin/flush' })
+      await new Promise((r) => setTimeout(r, 50))
+      expect((await other.app.inject({ method: 'POST', url: '/_admin/reset' })).statusCode).toBe(200)
+      const res = await flushing
+      expect(res.statusCode, res.body).toBe(200)
+      expect(Date.now() - started).toBeLessThan(1_000)
+    } finally {
+      await other.app.close()
+    }
+  })
+
   it('runs tick jobs on requests and on /_admin/flush', async () => {
     let ticks = 0
     built.ctx.scheduler.onTick(() => { ticks++ })
