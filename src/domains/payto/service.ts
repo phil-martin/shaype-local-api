@@ -504,7 +504,7 @@ export class PayToService {
     const current = this.accounts.find(m.debtor.accountId!)
     const next = this.requireAmendTarget(body.debtorAccountId, current, m, 'debtor')
     if (next.id === m.creditor.accountId) throw unprocessable(SAME_ACCOUNT)
-    m.debtor ={ ...m.debtor, accountId: next.id, accountNumber: next.bsb + next.accountNumber }
+    m.debtor = { ...m.debtor, accountId: next.id, accountNumber: next.bsb + next.accountNumber }
     m.updatedAt = isoUtc(this.ctx.clock.now())
     const action = this.ctx.db.transaction(() => {
       this.repo.saveMandate(m)
