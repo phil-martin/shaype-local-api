@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS payids (
 CREATE INDEX IF NOT EXISTS payids_seq ON payids(seq);
 CREATE INDEX IF NOT EXISTS payids_value ON payids(pay_id_value COLLATE NOCASE, pay_id_type);
 CREATE INDEX IF NOT EXISTS payids_account ON payids(account_id);
+CREATE INDEX IF NOT EXISTS payids_status ON payids(status);
 CREATE UNIQUE INDEX IF NOT EXISTS payids_live ON payids(pay_id_value COLLATE NOCASE, pay_id_type) WHERE status <> 'DEREGISTERED';
 
 CREATE TABLE IF NOT EXISTS payid_deregistrations (

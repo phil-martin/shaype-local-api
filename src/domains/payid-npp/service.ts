@@ -285,8 +285,8 @@ export class PayIdService {
   tick(): void {
     const nowMs = this.ctx.clock.now().getTime()
     const now = isoUtc(new Date(nowMs))
-    for (const p of this.repo.byStatus('PORTABLE')) {
-      if (Date.parse(p.portableSince ?? p.updatedAt) + PORTABLE_REVERT_DAYS * DAY_MS > nowMs) continue
+    const cutoff = (ms: number) => isoUtc(new Date(nowMs - ms))
+    for (const p of this.repo.portableSince(cutoff(PORTABLE_REVERT_DAYS * DAY_MS))) {
       p.status = 'ACTIVE'
       delete p.reason
       delete p.portableSince
@@ -294,13 +294,8 @@ export class PayIdService {
       this.repo.save(p)
       this.changed(p, 'PORTABLE')
     }
-    for (const p of this.repo.byStatus('DEREGISTERED')) {
-      if (Date.parse(p.deregisteredAt ?? p.updatedAt) + DEREGISTERED_PURGE_DAYS * DAY_MS > nowMs) continue
-      this.repo.delete(p.id)
-    }
-    for (const p of this.repo.byStatus('ACTIVE')) {
-      const lastActivity = Math.max(Date.parse(p.registeredAt), Date.parse(p.updatedAt), p.lastResolvedAt ? Date.parse(p.lastResolvedAt) : 0)
-      if (lastActivity + INACTIVITY_DISABLE_YEARS * 365 * DAY_MS > nowMs) continue
+    for (const p of this.repo.deregisteredSince(cutoff(DEREGISTERED_PURGE_DAYS * DAY_MS))) this.repo.delete(p.id)
+    for (const p of this.repo.inactiveSince(cutoff(INACTIVITY_DISABLE_YEARS * 365 * DAY_MS))) {
       p.status = 'DISABLED'
       p.reason = 'PART'
       p.updatedAt = now

@@ -125,8 +125,19 @@ export class PayIdRepo {
     return (this.db.prepare(`SELECT * FROM payids WHERE account_id IN (${marks}) AND status <> 'DEREGISTERED' ORDER BY seq`).all(...accountIds) as Row[]).map(fromRow)
   }
 
-  byStatus(status: PayIdStatus): PayId[] {
-    return (this.db.prepare('SELECT * FROM payids WHERE status = ? ORDER BY seq').all(status) as Row[]).map(fromRow)
+  /** PORTABLE rows whose portability started at or before `cutoff` (ISO strings compare lexicographically). */
+  portableSince(cutoff: string): PayId[] {
+    return (this.db.prepare(`SELECT * FROM payids WHERE status = 'PORTABLE' AND coalesce(portable_since, updated_at) <= ? ORDER BY seq`).all(cutoff) as Row[]).map(fromRow)
+  }
+
+  /** DEREGISTERED rows deregistered at or before `cutoff`. */
+  deregisteredSince(cutoff: string): PayId[] {
+    return (this.db.prepare(`SELECT * FROM payids WHERE status = 'DEREGISTERED' AND coalesce(deregistered_at, updated_at) <= ? ORDER BY seq`).all(cutoff) as Row[]).map(fromRow)
+  }
+
+  /** ACTIVE rows whose last activity (registration, update or resolution) is at or before `cutoff`. */
+  inactiveSince(cutoff: string): PayId[] {
+    return (this.db.prepare(`SELECT * FROM payids WHERE status = 'ACTIVE' AND max(registered_at, updated_at, coalesce(last_resolved_at, '')) <= ? ORDER BY seq`).all(cutoff) as Row[]).map(fromRow)
   }
 
   insertDeregistration(d: Deregistration): void {
