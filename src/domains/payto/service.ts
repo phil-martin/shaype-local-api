@@ -499,9 +499,13 @@ export class PayToService {
     return m
   }
 
-  /** The replacement account must exist (404), be ACTIVE and belong to the same holder as the current one (422). */
+  /**
+   * The replacement account must exist (404), be ACTIVE and belong to the same holder as the current one (422).
+   * Re-sending the current account (to change only the ultimate party name) skips the status check.
+   */
   private requireAmendTarget(accountId: string, current: Account | undefined, m: Mandate, party: 'creditor' | 'debtor'): Account {
     const next = this.accounts.get(accountId)
+    if (current && next.id === current.id) return next
     if (next.status !== 'ACTIVE' && next.status !== 'ACTIVE_IN_ARREARS') throw unprocessable(`INVALID_ACCOUNT_STATUS: Account ${next.id} must be ACTIVE to become the ${party} account of mandate ${m.id}`)
     if (current && (next.holderType !== current.holderType || next.holderId !== current.holderId)) {
       throw unprocessable(`PERMISSION_DENIED: Account ${next.id} does not belong to the holder of the ${party} account of mandate ${m.id}`)
@@ -1031,6 +1035,8 @@ export class PayToService {
       creditor: party(d.creditorInformation?.accountIdentification),
       debtor: party(d.debtorInformation.accountIdentification),
       description: d.description,
+      // required by GetMandateSummaryDto; the notification DTO carries none
+      purposeCode: 'OTHER' as const,
       validityStartDate: d.validityStartDate,
       validityEndDate: d.validityEndDate,
       paymentTerms: compact({
@@ -1100,11 +1106,12 @@ export class PayToService {
       debtorInformation: partyInformation(m.debtor, this.partyName(m.debtor, m.debtor.accountId ? this.accounts.find(m.debtor.accountId) : undefined) ?? 'Debtor'),
       description: m.description || undefined,
       establishmentScheme: 'AUTHORISED_PAYMENT_MANDATE' as const,
-      initiationRequestIdentification: uuid(),
+      // ^[ -~]{1,35}$: ids go in their 32-hex form
+      initiationRequestIdentification: uuid().replace(/-/g, ''),
       mandatePurposeCode: m.purposeCode,
       mandateType: 'DIRECT_DEBIT' as const,
       paymentInformation: paymentInformation(m.paymentTerms),
-      paymentInitiatorInformation: { partyIdentification: m.creditor.accountId ?? mmsId(m.id), partyIdentificationTypeCode: 'BANK_PARTY_ID' as const, partyLegalName: initiatorName, partyName: initiatorName, partyServicerBic: BIC },
+      paymentInitiatorInformation: { partyIdentification: (m.creditor.accountId ?? m.id).replace(/-/g, ''), partyIdentificationTypeCode: 'BANK_PARTY_ID' as const, partyLegalName: initiatorName, partyName: initiatorName, partyServicerBic: BIC },
       resolutionRequestedBy: body?.resolutionRequestedBy,
       transferArrangement: m.transferArrangement,
       validityEndDate: m.validityEndDate,
