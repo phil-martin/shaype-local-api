@@ -1,15 +1,18 @@
 /**
- * The 22 "PayTo API" operations. Input arrives validated against the spec schemas (mandate ids in
- * paths and bodies are `format: uuid`, so the hyphenated form is the one the contract admits there);
- * the response is serialized through the success schema by defineRoute().
+ * The 22 "PayTo API" operations. Input arrives validated against the spec schemas after the
+ * preValidation hook below has normalised it: a `mandateId` in the path or body may use either
+ * encoding (hyphenated UUID or the 32-hex MMS form, which the contract's `format: uuid` would otherwise
+ * refuse), and a createMandate creditor identified by alias only gets the local account it resolves to.
+ * The response is serialized through the success schema by defineRoute().
  */
 import type { FastifyInstance } from 'fastify'
 import { defineRoute } from '../../contract/route.js'
 import type { AppContext } from '../../context.js'
 import { withIdempotency } from '../../lib/idempotency.js'
-import type { MandateStatus } from './repo.js'
+import type { AccountAliasType, MandateStatus } from './repo.js'
 import {
   SUCCESS_MESSAGE,
+  normaliseMandateId,
   type ActionsQuery,
   type AmendMandateByInitiatorRequestBody,
   type AmendMandateByPayerRequestBody,
@@ -26,7 +29,23 @@ import {
 type ByMandate = { mandateId: string }
 type MandatesQuery = { accountIds: string[]; statuses?: MandateStatus[]; pageNumber: number; pageSize: number }
 
+const TAG = 'PayTo API'
+
 export function registerRoutes(app: FastifyInstance, ctx: AppContext, svc: PayToService): void {
+  app.addHook('preValidation', async (req) => {
+    if ((req.routeOptions.config as { tag?: string } | undefined)?.tag !== TAG) return
+    const params = req.params as Record<string, unknown> | undefined
+    if (typeof params?.mandateId === 'string') params.mandateId = normaliseMandateId(params.mandateId)
+    const body = req.body as Record<string, unknown> | null | undefined
+    if (!body || typeof body !== 'object') return
+    if (typeof body.mandateId === 'string') body.mandateId = normaliseMandateId(body.mandateId)
+    // createMandate: "instead of providing account_id to identify creditor or debtor, an alias might be used instead" (docs)
+    const creditor = body.creditorDetails as Record<string, unknown> | undefined
+    if (creditor && typeof creditor === 'object' && creditor.accountId === undefined && typeof creditor.accountAliasIdentification === 'string' && typeof creditor.accountAliasType === 'string') {
+      creditor.accountId = svc.resolveCreditorAlias(creditor.accountAliasIdentification, creditor.accountAliasType as AccountAliasType)
+    }
+  })
+
   // ---------------------------------------------------------------- initiator
 
   defineRoute<never, { creditorAccountId: string }>(app, ctx, 'getMandateIdsByInitiator', (req) => svc.mandateIdsForCreditorAccount(req.query.creditorAccountId))
@@ -41,14 +60,20 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext, svc: PayTo
     return { message: SUCCESS_MESSAGE.amended }
   })
 
-  defineRoute<ByMandate, ActionsQuery>(app, ctx, 'getMandateActionsByInitiator', (req) => ({ actions: svc.actions(req.params.mandateId, req.query).map((a) => svc.actionToResponse(a)) }))
+  defineRoute<ByMandate, ActionsQuery>(app, ctx, 'getMandateActionsByInitiator', (req) => {
+    svc.requireAsInitiator(req.params.mandateId)
+    return { actions: svc.actions(req.params.mandateId, req.query).map((a) => svc.actionToResponse(a)) }
+  })
 
   defineRoute<ByMandate, never, CancelMandateRequestBody>(app, ctx, 'cancelMandateByInitiator', (req) => {
     svc.cancel(req.params.mandateId, 'INITIATOR', req.body)
     return { message: SUCCESS_MESSAGE.cancelled }
   })
 
-  defineRoute<ByMandate & { instructionId: string }>(app, ctx, 'getMandatePaymentStatus', (req) => svc.paymentStatus(req.params.mandateId, req.params.instructionId))
+  defineRoute<ByMandate & { instructionId: string }>(app, ctx, 'getMandatePaymentStatus', (req) => {
+    svc.requireAsInitiator(req.params.mandateId)
+    return svc.paymentStatus(req.params.mandateId, req.params.instructionId)
+  })
 
   defineRoute<ByMandate, never, AmendMandatePaymentTermsRequestBody>(app, ctx, 'amendMandatePaymentTerms', (req) => {
     svc.amendPaymentTerms(req.params.mandateId, req.body)
@@ -70,7 +95,10 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext, svc: PayTo
     return { message: SUCCESS_MESSAGE.recalled }
   })
 
-  defineRoute<ByMandate>(app, ctx, 'searchPaymentsInstructions', (req) => ({ paymentInstructions: svc.instructions(req.params.mandateId).map((i) => svc.instructionToResponse(i)) }))
+  defineRoute<ByMandate>(app, ctx, 'searchPaymentsInstructions', (req) => {
+    svc.requireAsInitiator(req.params.mandateId)
+    return { paymentInstructions: svc.instructions(req.params.mandateId).map((i) => svc.instructionToResponse(i)) }
+  })
 
   defineRoute<ByMandate, never, SuspendMandateRequestBody>(app, ctx, 'suspendMandateByInitiator', (req) => {
     svc.suspend(req.params.mandateId, 'INITIATOR', req.body)

@@ -162,6 +162,13 @@ declare module '../../context.js' {
 }
 
 export class PayToService {
+  /**
+   * Delay of the asynchronous hop of a staging payment trajectory (non-final -> final status). Undefined =
+   * the scheduler's default (config.asyncDelayMs). Tests raise it to observe the non-final status and drive
+   * the hop with the virtual clock.
+   */
+  paymentProgressDelayMs: number | undefined = undefined
+
   constructor(private readonly ctx: AppContext, private readonly repo: MandateRepo) {}
 
   private get accounts() { return this.ctx.services.accounts }
@@ -186,11 +193,22 @@ export class PayToService {
     return this.get(id)
   }
 
-  /** The client is the Payer only for a local debtor account. @throws 403 otherwise */
+  /** The client is the Payer only for a local debtor account. @throws 404 unknown, 403 otherwise */
   requireAsPayer(id: string): Mandate {
     const m = this.get(id)
     if (!m.debtor.accountId) throw forbidden(`FORBIDDEN: the client is not the Payer of mandate ${m.id}`)
     return m
+  }
+
+  /** The client is the Initiator only for a local creditor account (not for a mandate an external Initiator sent). @throws 404 unknown, 403 otherwise */
+  requireAsInitiator(id: string): Mandate {
+    const m = this.get(id)
+    if (!m.creditor.accountId) throw forbidden(`FORBIDDEN: the client is not the Initiator of mandate ${m.id}`)
+    return m
+  }
+
+  requireAs(id: string, side: 'INITIATOR' | 'PAYER'): Mandate {
+    return side === 'PAYER' ? this.requireAsPayer(id) : this.requireAsInitiator(id)
   }
 
   actions(id: string, q: ActionsQuery = {}): MandateAction[] {
@@ -217,10 +235,15 @@ export class PayToService {
     return this.repo.mandateIdsForCreditorAccount(accountId)
   }
 
-  /** getMandates: Payer-side search by debtor BSB+account numbers, 1-based pages of at most 50. */
-  search(accountNumbers: string[], statuses: MandateStatus[] | undefined, page: MandatePage): { result: Mandate[]; totalCount: number } {
-    const numbers = [...new Set(accountNumbers.flatMap((s) => s.split(',')).map((s) => s.trim()).filter(Boolean))]
-    return this.repo.searchMandates({ debtorAccountNumbers: numbers, statuses }, { offset: (page.pageNumber - 1) * page.pageSize, limit: page.pageSize })
+  /**
+   * getMandates: Payer-side search by debtor BSB + account numbers (repeated or comma-separated; a platform
+   * account id is accepted too, matching the debtor account), 1-based pages of at most 50.
+   */
+  search(accountIds: string[], statuses: MandateStatus[] | undefined, page: MandatePage): { result: Mandate[]; totalCount: number } {
+    const values = [...new Set(accountIds.flatMap((s) => s.split(',')).map((s) => s.trim()).filter(Boolean))]
+    const debtorAccountIds = values.filter((v) => UUID36.test(v)).map((v) => v.toLowerCase())
+    const debtorAccountNumbers = values.filter((v) => !UUID36.test(v)).map((v) => v.replace(/[\s-]/g, ''))
+    return this.repo.searchMandates({ debtorAccountNumbers, debtorAccountIds, statuses }, { offset: (page.pageNumber - 1) * page.pageSize, limit: page.pageSize })
   }
 
   instructions(mandateId: string): PaymentInstruction[] {
@@ -331,6 +354,7 @@ export class PayToService {
       ultimatePartyName: body.creditorDetails.ultimatePartyName,
     })
     const debtor = this.resolveDebtor(body.debtorDetails)
+    if (debtor.accountId === creditor.accountId) throw unprocessable('INVALID_ARGUMENT: the debtor account must differ from the creditor account')
     const paymentTerms = parseTerms(body.paymentTerms)
     if (body.validityEndDate && body.validityEndDate < body.validityStartDate) throw unprocessable('INVALID_ARGUMENT: validityEndDate must not precede validityStartDate')
     if (body.resolutionRequestedBy !== undefined && !ISO_DATETIME_RE.test(body.resolutionRequestedBy)) throw badRequest('BAD_REQUEST: resolutionRequestedBy must be a UTC date-time like 2023-09-10T10:00:00.000Z')
@@ -405,22 +429,39 @@ export class PayToService {
     return hit?.accountHayId ? this.accounts.find(hit.accountHayId) : undefined
   }
 
-  /** BSB + account number of a PayID alias when the PayID service knows it, else undefined (external). */
+  /**
+   * BSB + account number behind an account alias: a PayID registered on the platform (PayID service), else
+   * the staging alias form `<bsb><account number>@<domain>` (EMAIL_ADDRESS), else undefined (external).
+   */
   private resolveAlias(alias: string, type: AccountAliasType): string | undefined {
     const payIdType: Record<AccountAliasType, PayIdType> = { EMAIL_ADDRESS: 'EMAIL', PHONE_NUMBER: 'TELEPHONE', AUSTRALIAN_BUSINESS_NUMBER: 'INDIVIDUAL_AUSTRALIAN_BUSINESS', ORGANISATION_ID: 'ORGANISATION' }
     try {
       const r = this.payid?.resolve(alias, payIdType[type])
-      return r ? r.branchNumber + r.accountNumber : undefined
+      if (r) return r.branchNumber + r.accountNumber
     } catch {
-      return undefined
+      // an unknown / malformed PayID is not an error here: the alias may still be external
     }
+    const staging = type === 'EMAIL_ADDRESS' ? /^(\d{11,15})@[^@\s]+$/.exec(alias) : null
+    return staging?.[1]
+  }
+
+  /**
+   * createMandate with a creditor identified by alias instead of accountId (docs:payto-staging-testing-suite
+   * "an alias might be used instead"): the alias must resolve to a local account that is not CLOSED.
+   * @throws 422 the documented `Creditor account details incorrect` rejection otherwise
+   */
+  resolveCreditorAlias(alias: string, type: AccountAliasType): string {
+    const number = this.resolveAlias(alias, type)
+    const account = number ? this.localAccountByNumber(number) : undefined
+    if (!account || account.status === 'CLOSED') throw unprocessable(ACCOUNT_DETAILS_INCORRECT('Creditor'))
+    return account.id
   }
 
   // ---------------------------------------------------------------- amendments
 
   /** amendMandateByInitiator: unilateral change of the creditor account (same holder, ACTIVE) and/or ultimate party name; MAMN to the Payer. */
   amendByInitiator(id: string, body: AmendMandateByInitiatorRequestBody): Mandate {
-    const m = this.get(id)
+    const m = this.requireAsInitiator(id)
     this.requireStatus(m, ['ACTIVE', 'SUSPENDED'], 'amend')
     const current = m.creditor.accountId ? this.accounts.find(m.creditor.accountId) : undefined
     const next = this.requireAmendTarget(body.creditorAccountId, current, m, 'creditor')
@@ -470,7 +511,7 @@ export class PayToService {
 
   /** amendMandatePaymentTerms: a bilateral AMEND action awaiting the Payer (MAMP); frequency and type are immutable. */
   amendPaymentTerms(id: string, body: AmendMandatePaymentTermsRequestBody): MandateAction {
-    const m = this.get(id)
+    const m = this.requireAsInitiator(id)
     this.requireStatus(m, ['ACTIVE', 'SUSPENDED'], 'amend')
     if (!body.paymentTerms && body.validityEndDate === undefined) throw badRequest('BAD_REQUEST: paymentTerms or validityEndDate is required')
     if (body.resolutionRequestedBy !== undefined && !ISO_DATETIME_RE.test(body.resolutionRequestedBy)) throw badRequest('BAD_REQUEST: resolutionRequestedBy must be a UTC date-time like 2023-09-10T10:00:00.000Z')
@@ -506,7 +547,7 @@ export class PayToService {
 
   /** resolveMandateByInitiator: recalls the oldest pending action (a recalled CREATE cancels the mandate). */
   recallByInitiator(id: string, opts: { actionOwner?: ActionOwner } = {}): MandateAction {
-    const m = this.get(id)
+    const m = this.requireAsInitiator(id)
     const action = this.repo.pendingAction(m.id)
     if (!action) throw unprocessable(`INVALID_STATE: Mandate ${m.id} has no pending action to recall`)
     return this.resolvePending(m, action, 'RECALLED', opts.actionOwner ?? 'CLIENT')
@@ -551,13 +592,13 @@ export class PayToService {
   // ---------------------------------------------------------------- status changes
 
   suspend(id: string, side: 'INITIATOR' | 'PAYER', body: SuspendMandateRequestBody = {}): Mandate {
-    const m = side === 'PAYER' ? this.requireAsPayer(id) : this.get(id)
+    const m = this.requireAs(id, side)
     if (m.status !== 'ACTIVE') throw unprocessable(`Validation of the request for suspension mandate with id: ${m.id}: To suspend a mandate it must be in active status.`)
     return this.transition(m, 'SUSPENDED', { side, change: 'SUSPEND', reasonCode: body.reasonCode, reasonDescription: body.reasonDescription, actionOwner: 'CLIENT' })
   }
 
   release(id: string, side: 'INITIATOR' | 'PAYER'): Mandate {
-    const m = side === 'PAYER' ? this.requireAsPayer(id) : this.get(id)
+    const m = this.requireAs(id, side)
     if (m.status !== 'SUSPENDED') throw unprocessable(`Validation of the request for releasing mandate with id: ${m.id} failed. To release a mandate it must be in suspended status.`)
     if (m.suspendedBy && m.suspendedBy !== side) {
       const who = m.suspendedBy === 'INITIATOR' ? 'Initiator' : m.suspendedBy === 'PAYER' ? 'Payer' : "debtor's institution"
@@ -567,7 +608,7 @@ export class PayToService {
   }
 
   cancel(id: string, side: 'INITIATOR' | 'PAYER', body: CancelMandateRequestBody = {}): Mandate {
-    const m = side === 'PAYER' ? this.requireAsPayer(id) : this.get(id)
+    const m = this.requireAs(id, side)
     if (m.status === 'CANCELLED') throw unprocessable(`INVALID_STATE: Mandate ${m.id} is already cancelled`)
     if (m.status === 'CREATED' && side === 'INITIATOR') {
       throw unprocessable(`INVALID_STATE: Validation of the request for cancelling mandate with id: ${m.id} failed. A mandate in CREATED status cannot be cancelled by the Initiator; recall it instead.`)
@@ -630,14 +671,21 @@ export class PayToService {
 
   // ---------------------------------------------------------------- payments
 
-  /** makeAdhocPayment (the route owns idempotency): records the instruction, settles it through the ledger when possible and notifies MANDATE_PAYMENT. */
+  /**
+   * makeAdhocPayment (the route owns idempotency): records the instruction and initiates it (initiate()).
+   * Only malformed amounts are HTTP errors (400); every business refusal is a REJECTED instruction.
+   */
   adhocPayment(body: MakeAdhocPaymentRequestBody, opts: { actionOwner?: ActionOwner } = {}): MakeAdhocPaymentResponseBody {
-    const m = this.get(body.mandateId)
-    if (body.amount !== undefined) validateAmount(body.amount, 'amount')
-    const amount = body.amount ? parseMoney(body.amount, 'amount') : m.paymentTerms.amount
+    const m = this.requireAsInitiator(body.mandateId)
+    const actionOwner = opts.actionOwner ?? 'CLIENT'
+    if (body.amount !== undefined) {
+      if (!hasAtMostTwoDecimals(body.amount.amount)) throw badRequest('BAD_REQUEST: amount.amount must have at most 2 decimal places')
+      if (body.amount.amount < 0) throw badRequest('BAD_REQUEST: amount.amount must not be negative')
+    }
+    const amount: Money | undefined = body.amount ? { amountCents: toCents(body.amount.amount), currency: body.amount.currency } : m.paymentTerms.amount
     const instruction = this.newInstruction(m, 'ADHOC', amount ?? { amountCents: 0, currency: 'AUD' }, body.endToEndId ?? NOT_PROVIDED, body.description)
-    const outcome = amount ? this.executePayment(m, instruction, opts.actionOwner ?? 'CLIENT') : { status: 'REJECTED' as const, reasonCode: 'AM12' }
-    this.finish(m, instruction, outcome, opts.actionOwner ?? 'CLIENT')
+    if (amount) this.initiate(m, instruction, actionOwner, parseTrajectory(body.description, m.description))
+    else this.finish(m, instruction, { status: 'REJECTED', reasonCode: 'AM12' }, actionOwner)
     return {
       mandateId: m.id,
       instructionId: instruction.id,
@@ -699,11 +747,30 @@ export class PayToService {
   }
 
   /**
-   * Consistency checks against the agreement, then settlement: the debtor leg (INTERBANK_TRANSFER_OUT) and,
-   * when the creditor is local, the creditor leg (INTERBANK_TRANSFER_IN), both carrying mandatePaymentDetails
-   * and originType MANDATE_PAYMENT. An external debtor is the staging default: RJCT AB01.
+   * Initiates a payment instruction (adhoc or scheduled): the consistency checks against the agreement
+   * (REJECTED with a PaymentReasonCode), then either settlement or, when a staging trajectory is given
+   * (`paymentstatus:<initial>[&<final>]`, parseTrajectory), its initial status. A non-final initial status
+   * progresses asynchronously (scheduler.later, actionOwner PLATFORM) to the trajectory's final status,
+   * ACCEPTED_AND_SETTLED (settlement) by default; MANDATE_PAYMENT is sent once, when the status is final.
    */
-  private executePayment(m: Mandate, i: PaymentInstruction, actionOwner: ActionOwner): PaymentOutcome {
+  private initiate(m: Mandate, i: PaymentInstruction, actionOwner: ActionOwner, trajectory?: Trajectory): void {
+    const refused = this.checkAgreement(m, i)
+    if (refused) return this.finish(m, i, refused, actionOwner)
+    if (!trajectory) return this.finish(m, i, this.settle(m, i, actionOwner), actionOwner)
+    if (isFinalStatus(trajectory.initial)) return this.finish(m, i, this.reach(m, i, trajectory.initial, actionOwner), actionOwner)
+    this.finish(m, i, { status: trajectory.initial }, actionOwner)
+    const hop = (): void => {
+      const current = this.repo.instructionById(i.id)
+      const mandate = this.repo.mandateById(m.id)
+      if (!current || !mandate || isFinalStatus(current.status)) return
+      this.finish(mandate, current, this.reach(mandate, current, trajectory.final ?? 'ACCEPTED_AND_SETTLED', 'PLATFORM'), 'PLATFORM')
+    }
+    if (this.paymentProgressDelayMs === undefined) this.ctx.scheduler.later(hop)
+    else this.ctx.scheduler.later(hop, this.paymentProgressDelayMs)
+  }
+
+  /** Agreement checks (docs:payto-payment "Shaype confirms the request is consistent with the PayTo agreement"). */
+  private checkAgreement(m: Mandate, i: PaymentInstruction): PaymentOutcome | undefined {
     const reject = (reasonCode: string): PaymentOutcome => ({ status: 'REJECTED', reasonCode })
     const today = isoDate(this.ctx.clock.now())
     if (m.status !== 'ACTIVE') return reject('AG01')
@@ -713,7 +780,23 @@ export class PayToService {
     if (i.amountCents <= 0) return reject('AM01')
     if (i.currency !== 'AUD') return reject('AM03')
     if (m.paymentTerms.maximumAmount && i.amountCents > m.paymentTerms.maximumAmount.amountCents) return reject('AM21')
-    if (!m.debtor.accountId) return reject('AB01')
+    return undefined
+  }
+
+  /** The outcome of a forced (trajectory) status: settlement for ACCEPTED_AND_SETTLED, AB01 for REJECTED, else the status itself. */
+  private reach(m: Mandate, i: PaymentInstruction, status: InstructionStatus, actionOwner: ActionOwner): PaymentOutcome {
+    if (status === 'ACCEPTED_AND_SETTLED') return this.settle(m, i, actionOwner)
+    if (status === 'REJECTED') return { status, reasonCode: 'AB01' }
+    return { status }
+  }
+
+  /**
+   * Settlement: the debtor leg (INTERBANK_TRANSFER_OUT) and, when the creditor is local, the creditor leg
+   * (INTERBANK_TRANSFER_IN), both carrying mandatePaymentDetails and originType MANDATE_PAYMENT. An external
+   * debtor is the staging default ("will receive a RJCT PSR notification"): REJECTED AB01.
+   */
+  private settle(m: Mandate, i: PaymentInstruction, actionOwner: ActionOwner): PaymentOutcome {
+    if (!m.debtor.accountId) return { status: 'REJECTED', reasonCode: 'AB01' }
     return this.debit(m, i, undefined, actionOwner)
   }
 
@@ -803,7 +886,7 @@ export class PayToService {
 
   /** setScheduledPaymentInitiationRequestAmount: the amount of the next scheduled PIR of a USAGE_BASED / VARIABLE mandate. */
   setScheduledAmount(mandateId: string, body: SetScheduledPaymentInitiationAmountRequestBody): ScheduledPayment {
-    const m = this.get(mandateId)
+    const m = this.requireAsInitiator(mandateId)
     if (m.paymentTerms.type !== 'USAGE_BASED' && m.paymentTerms.type !== 'VARIABLE') {
       throw unprocessable(`INVALID_ARGUMENT: Mandate ${m.id} has ${m.paymentTerms.type} payment terms; the amount can only be set for USAGE_BASED and VARIABLE mandates`)
     }
@@ -817,14 +900,15 @@ export class PayToService {
   }
 
   /**
-   * (Re)schedules the next payment of an ACTIVE non-ADHOC mandate: the first due date on or after today
-   * (from firstPayment.date or validityStartDate, stepped by frequency; `after` skips dates already paid)
-   * that is within lastPayment.date / validityEndDate. Initiation happens at the due date, at least one
-   * day ahead so the amount of a USAGE_BASED / VARIABLE mandate can be set; MANDATE_DUE_PAYMENT announces it.
+   * (Re)schedules the next payment of an ACTIVE non-ADHOC mandate the client initiates (local creditor): the
+   * first due date on or after today (from firstPayment.date or validityStartDate, stepped by frequency;
+   * `after` skips dates already paid) that is within lastPayment.date / validityEndDate. Initiation happens
+   * at the due date, at least DUE_PAYMENT_LEAD_MS ahead, so that the amount of a USAGE_BASED / VARIABLE
+   * mandate can be set once MANDATE_DUE_PAYMENT has announced it (announceDue()).
    */
   scheduleNext(m: Mandate, after?: string): ScheduledPayment | undefined {
     this.repo.deleteSchedule(m.id)
-    if (m.status !== 'ACTIVE' || m.paymentTerms.frequency === 'ADHOC') return undefined
+    if (m.status !== 'ACTIVE' || m.paymentTerms.frequency === 'ADHOC' || !m.creditor.accountId) return undefined
     const now = this.ctx.clock.now()
     const today = isoDate(now)
     let due = m.paymentTerms.firstPayment?.date ?? m.validityStartDate
@@ -836,11 +920,27 @@ export class PayToService {
       mandateId: m.id,
       dueDate: due,
       paymentDateTime: isoUtc(new Date(Math.max(new Date(`${due}T00:00:00.000Z`).getTime(), now.getTime() + DUE_PAYMENT_LEAD_MS))),
+      announce: m.paymentTerms.type === 'USAGE_BASED' || m.paymentTerms.type === 'VARIABLE',
       createdAt: isoUtc(now),
     }
     this.repo.insertSchedule(s)
-    this.ctx.events.emit('mandate.paymentDue', { mandate: m, schedule: s })
+    this.announceDue()
     return s
+  }
+
+  /**
+   * MANDATE_DUE_PAYMENT (webhook-matrix: USAGE_BASED / VARIABLE only, one lead time before the initiation)
+   * for the schedules of ACTIVE mandates entering that window; a SUSPENDED mandate's announcement waits.
+   */
+  private announceDue(): void {
+    const now = this.ctx.clock.now()
+    for (const s of this.repo.schedulesToAnnounce(isoUtc(new Date(now.getTime() + DUE_PAYMENT_LEAD_MS)))) {
+      const m = this.repo.mandateById(s.mandateId)
+      if (!m || m.status !== 'ACTIVE') continue
+      s.announcedAt = isoUtc(now)
+      this.repo.saveSchedule(s)
+      this.ctx.events.emit('mandate.paymentDue', { mandate: m, schedule: s })
+    }
   }
 
   private scheduledAmount(m: Mandate, s: ScheduledPayment): Money | undefined {
@@ -852,7 +952,7 @@ export class PayToService {
     return t.amount
   }
 
-  /** Time-driven work (scheduler tick): action expiry, validity expiry, due scheduled payments. */
+  /** Time-driven work (scheduler tick): action expiry, validity expiry, due-payment announcements, due scheduled payments. */
   tick(): void {
     const now = this.ctx.clock.now()
     for (const a of this.repo.expiredPendingActions(now.toISOString())) {
@@ -862,14 +962,15 @@ export class PayToService {
     for (const m of this.repo.expiredMandates(isoDate(now))) {
       this.transition(m, 'CANCELLED', { side: 'PLATFORM', change: 'CANCEL', reasonCode: 'CTEX', reasonDescription: 'Contract expired', actionOwner: 'PLATFORM' })
     }
+    this.announceDue()
     for (const s of this.repo.dueSchedules(isoUtc(now))) {
       const m = this.repo.mandateById(s.mandateId)
       if (!m || m.status === 'CANCELLED') { this.repo.deleteSchedule(s.mandateId); continue }
       if (m.status !== 'ACTIVE') continue // SUSPENDED: deferred until released
       const amount = this.scheduledAmount(m, s)
       const instruction = this.newInstruction(m, 'SCHEDULED', amount ?? { amountCents: 0, currency: 'AUD' }, m.creditor.partyReference ?? NOT_PROVIDED, m.description)
-      const outcome = amount ? this.executePayment(m, instruction, 'PLATFORM') : { status: 'REJECTED' as const, reasonCode: 'AM12' }
-      this.finish(m, instruction, outcome, 'PLATFORM')
+      if (amount) this.initiate(m, instruction, 'PLATFORM', parseTrajectory(m.description))
+      else this.finish(m, instruction, { status: 'REJECTED', reasonCode: 'AM12' }, 'PLATFORM')
       this.scheduleNext(m, s.dueDate)
     }
   }
@@ -878,7 +979,7 @@ export class PayToService {
 
   /**
    * Sends a MANDATE notification with `trigger` to one side of the mandate and applies the state the MMS
-   * would have reached (MCRC activates, MCRD/MCRX/MCRR cancel a CREATED mandate, MAMC applies a pending
+   * would have reached (MCRC activates, MCRD/PCRD/MCRX/MCRR cancel a CREATED mandate, MAMC applies a pending
    * amendment, MAMD/MAMX/MAMR resolve it). An unknown mandate is created from `details.mandateDetails`
    * when given (an external Initiator's mandate reaching a local Payer), otherwise 404.
    */
@@ -894,6 +995,7 @@ export class PayToService {
     const effect: Partial<Record<MandateTrigger, () => void>> = {
       MCRC: () => { const a = pending('CREATE'); if (a) action = this.resolvePending(m!, a, 'COMPLETED', actionOwner); else if (m!.status === 'CREATED') { this.setStatus(m!, 'ACTIVE', 'ACTIVE', 'PAYER'); this.scheduleNext(m!) } },
       MCRD: () => { const a = pending('CREATE'); if (a) action = this.resolvePending(m!, a, 'DECLINED', actionOwner); else if (m!.status === 'CREATED') this.setStatus(m!, 'CANCELLED', 'CANCELLED', 'PAYER') },
+      PCRD: () => effect.MCRD!(), // docs:payto-staging-testing-suite sends the Payer's decline to the Initiator mock as PCRD
       MCRX: () => { const a = pending('CREATE'); if (a) action = this.resolvePending(m!, a, 'TIMED_OUT', actionOwner); else if (m!.status === 'CREATED') this.setStatus(m!, 'CANCELLED', 'CANCELLED_AUTHORISATION_TIMED_OUT', 'PLATFORM') },
       MCRR: () => { const a = pending('CREATE'); if (a) action = this.resolvePending(m!, a, 'RECALLED', actionOwner); else if (m!.status === 'CREATED') this.setStatus(m!, 'CANCELLED', 'CANCELLED_BY_PAYMENT_INITIATOR', 'INITIATOR') },
       MAMC: () => { const a = pending('AMEND'); if (a) action = this.resolvePending(m!, a, 'COMPLETED', actionOwner) },
@@ -1013,6 +1115,32 @@ export class PayToService {
 
 // ---------------------------------------------------------------- helpers
 
+/** A staging payment trajectory: the status makeAdhocPayment answers and, when that is not final, the one it reaches later. */
+export interface Trajectory { initial: InstructionStatus; final?: InstructionStatus }
+
+const TRAJECTORY_RE = /paymentstatus:([a-z_]+)(?:&([a-z]+))?/i
+
+/**
+ * docs:payto-staging-testing-suite drives payment outcomes by a `paymentstatus:` hint in the mandate
+ * description: `paymentstatus:<mms>` (initial status, then settlement), `paymentstatus:<mms>&<mms>`
+ * (initial, then final) or `paymentstatus:timeout_rjct` (REJECTED AB01 at once); MMS codes RECV, UNDV,
+ * SENT, SAFD, ACCP, ACSP, ACSC, RJCT, any case. The first text carrying a valid hint wins (the payment
+ * description is consulted before the mandate's); unknown codes are ignored.
+ */
+export function parseTrajectory(...texts: (string | undefined)[]): Trajectory | undefined {
+  for (const text of texts) {
+    const hit = text ? TRAJECTORY_RE.exec(text) : null
+    if (!hit) continue
+    const code = hit[1]!.toUpperCase()
+    if (code === 'TIMEOUT_RJCT') return { initial: 'REJECTED' }
+    const initial = MMS_STATUS[code as MmsInstructionStatus] as InstructionStatus | undefined
+    if (!initial) continue
+    const final = hit[2] ? (MMS_STATUS[hit[2].toUpperCase() as MmsInstructionStatus] as InstructionStatus | undefined) : undefined
+    return final ? { initial, final } : { initial }
+  }
+  return undefined
+}
+
 const MMS_FREQUENCY: Record<string, Frequency> = { ADHO: 'ADHOC', DAIL: 'DAILY', FRTN: 'FORTNIGHTLY', INDA: 'INTRA_DAY', MIAN: 'SEMI_ANNUAL', MNTH: 'MONTHLY', QURT: 'QUARTERLY', WEEK: 'WEEKLY', YEAR: 'ANNUAL' }
 const MMS_AMOUNT_TYPE: Record<string, PaymentTerms['type']> = { BALN: 'BALLOON', FIXE: 'FIXED', USGB: 'USAGE_BASED', VARI: 'VARIABLE' }
 
@@ -1049,7 +1177,7 @@ export function parseTerms(t: CreatePaymentTermsDto): PaymentTerms {
   if (first?.date && last?.date && last.date < first.date) throw unprocessable('INVALID_ARGUMENT: paymentTerms.lastPayment.date must not precede firstPayment.date')
   if (t.countPerPeriod !== undefined && !/^\d+$/.test(t.countPerPeriod)) throw badRequest('BAD_REQUEST: paymentTerms.countPerPeriod must be a whole number')
   if (t.pointInTime !== undefined && !/^\d{2}$/.test(t.pointInTime)) throw badRequest('BAD_REQUEST: paymentTerms.pointInTime must be two digits')
-  return compact({
+  const terms: PaymentTerms = compact({
     frequency: t.frequency,
     type: t.type,
     amount: money(t.amount, 'paymentTerms.amount'),
@@ -1059,6 +1187,11 @@ export function parseTerms(t: CreatePaymentTermsDto): PaymentTerms {
     firstPayment: first ? compact({ amount: money(first.amount, 'paymentTerms.firstPayment.amount'), date: first.date }) : undefined,
     lastPayment: last ? compact({ amount: money(last.amount, 'paymentTerms.lastPayment.amount'), date: last.date }) : undefined,
   })
+  const max = terms.maximumAmount?.amountCents
+  for (const [field, m] of [['amount', terms.amount], ['firstPayment.amount', terms.firstPayment?.amount], ['lastPayment.amount', terms.lastPayment?.amount]] as const) {
+    if (max !== undefined && m !== undefined && m.amountCents > max) throw unprocessable(`INVALID_ARGUMENT: paymentTerms.${field} must not exceed paymentTerms.maximumAmount`)
+  }
+  return terms
 }
 
 export function moneyJson(m: Money | undefined): CurrencyAmount | undefined {

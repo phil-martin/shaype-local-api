@@ -80,6 +80,8 @@ CREATE TABLE IF NOT EXISTS mandate_schedules (
   due_date          TEXT NOT NULL,                 -- YYYY-MM-DD
   payment_date_time TEXT NOT NULL,                 -- isoUtc: when the PIR is initiated
   amount            INTEGER,                       -- cents set through setScheduledPaymentInitiationRequestAmount
+  announce          INTEGER NOT NULL DEFAULT 0,    -- 1: MANDATE_DUE_PAYMENT is sent (USAGE_BASED / VARIABLE terms)
+  announced_at      TEXT,                          -- when MANDATE_DUE_PAYMENT was sent
   created_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS mandate_schedules_due ON mandate_schedules(payment_date_time);

@@ -176,12 +176,17 @@ export interface ScheduledPayment {
   dueDate: string
   paymentDateTime: string
   amountCents?: Cents
+  /** whether MANDATE_DUE_PAYMENT announces it (USAGE_BASED / VARIABLE terms) */
+  announce: boolean
+  announcedAt?: string
   createdAt: string
 }
 
 export interface MandateFilter {
-  /** BSB + account number strings the debtor must match one of */
+  /** BSB + account number strings the debtor must match one of (OR-ed with debtorAccountIds) */
   debtorAccountNumbers?: string[]
+  /** local debtor account ids the debtor must match one of (OR-ed with debtorAccountNumbers) */
+  debtorAccountIds?: string[]
   statuses?: MandateStatus[]
 }
 
@@ -226,10 +231,15 @@ export class MandateRepo {
   searchMandates(filter: MandateFilter, page: { offset: number; limit: number }): { result: Mandate[]; totalCount: number } {
     const where: string[] = ['debtor_account_id IS NOT NULL']
     const args: unknown[] = []
-    if (filter.debtorAccountNumbers) {
-      if (!filter.debtorAccountNumbers.length) return { result: [], totalCount: 0 }
-      where.push(`debtor_account_number IN (${filter.debtorAccountNumbers.map(() => '?').join(', ')})`)
-      args.push(...filter.debtorAccountNumbers)
+    if (filter.debtorAccountNumbers || filter.debtorAccountIds) {
+      const numbers = filter.debtorAccountNumbers ?? []
+      const ids = filter.debtorAccountIds ?? []
+      if (!numbers.length && !ids.length) return { result: [], totalCount: 0 }
+      const any: string[] = []
+      if (numbers.length) any.push(`debtor_account_number IN (${numbers.map(() => '?').join(', ')})`)
+      if (ids.length) any.push(`debtor_account_id IN (${ids.map(() => '?').join(', ')})`)
+      where.push(`(${any.join(' OR ')})`)
+      args.push(...numbers, ...ids)
     }
     if (filter.statuses?.length) {
       where.push(`status IN (${filter.statuses.map(() => '?').join(', ')})`)
@@ -318,12 +328,19 @@ export class MandateRepo {
 
   insertSchedule(s: ScheduledPayment): void {
     this.db
-      .prepare('INSERT INTO mandate_schedules(notification_id, mandate_id, due_date, payment_date_time, amount, created_at) VALUES (?,?,?,?,?,?)')
-      .run(s.notificationId, s.mandateId, s.dueDate, s.paymentDateTime, s.amountCents ?? null, s.createdAt)
+      .prepare('INSERT INTO mandate_schedules(notification_id, mandate_id, due_date, payment_date_time, amount, announce, announced_at, created_at) VALUES (?,?,?,?,?,?,?,?)')
+      .run(s.notificationId, s.mandateId, s.dueDate, s.paymentDateTime, s.amountCents ?? null, s.announce ? 1 : 0, s.announcedAt ?? null, s.createdAt)
   }
 
   saveSchedule(s: ScheduledPayment): void {
-    this.db.prepare('UPDATE mandate_schedules SET due_date = ?, payment_date_time = ?, amount = ? WHERE notification_id = ?').run(s.dueDate, s.paymentDateTime, s.amountCents ?? null, s.notificationId)
+    this.db
+      .prepare('UPDATE mandate_schedules SET due_date = ?, payment_date_time = ?, amount = ?, announce = ?, announced_at = ? WHERE notification_id = ?')
+      .run(s.dueDate, s.paymentDateTime, s.amountCents ?? null, s.announce ? 1 : 0, s.announcedAt ?? null, s.notificationId)
+  }
+
+  /** Schedules to announce whose initiation time is at or before `untilIso` (isoUtc) and that were not announced yet. */
+  schedulesToAnnounce(untilIso: string): ScheduledPayment[] {
+    return (this.db.prepare('SELECT * FROM mandate_schedules WHERE announce = 1 AND announced_at IS NULL AND payment_date_time <= ? ORDER BY payment_date_time ASC').all(untilIso) as Row[]).map(scheduleFromRow)
   }
 
   scheduleById(notificationId: string): ScheduledPayment | undefined {
@@ -479,8 +496,10 @@ function scheduleFromRow(r: Row): ScheduledPayment {
     mandateId: r.mandate_id as string,
     dueDate: r.due_date as string,
     paymentDateTime: r.payment_date_time as string,
+    announce: r.announce === 1,
     createdAt: r.created_at as string,
   }
   if (r.amount != null) s.amountCents = r.amount as number
+  if (r.announced_at != null) s.announcedAt = r.announced_at as string
   return s
 }

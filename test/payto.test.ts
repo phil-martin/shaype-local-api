@@ -6,7 +6,7 @@ import { assertValidNotification } from './webhook-schema.js'
 import type { BuiltServer } from '../src/server.js'
 import { LOCAL_PRODUCT_ID } from '../src/domains/accounts/index.js'
 import { LOCAL_BSB } from '../src/lib/ids.js'
-import { ACCOUNT_DETAILS_INCORRECT, BIC, mmsId, normaliseMandateId, stepDate, type PayToService } from '../src/domains/payto/index.js'
+import { ACCOUNT_DETAILS_INCORRECT, BIC, mmsId, normaliseMandateId, parseTrajectory, stepDate, type PayToService } from '../src/domains/payto/index.js'
 import type { PaymentInstructionSummary } from '../src/domains/payto/service.js'
 
 type S = components['schemas']
@@ -183,20 +183,37 @@ describe('checkBsbIsSupportedByPayTo', () => {
 })
 
 describe('mandate ids', () => {
-  it('accepts both encodings at the service and serves the hyphenated v1 layout', async () => {
+  it('accepts both encodings (hyphenated and 32-hex MMS form) on every input and serves the hyphenated v1 layout', async () => {
     const creditor = await newAccount()
-    const id = await createMandate(creditor, { accountNumber: EXTERNAL_DEBTOR })
+    const debtor = await newAccount({ fund: 20 })
+    const id = await createMandate(creditor, { accountId: debtor.accountHayId! })
     expect(id).toMatch(UUID_V1_RE)
     expect(mmsId(id)).toMatch(/^[a-f0-9]{12}1[a-f0-9]{3}[89ab][a-f0-9]{15}$/)
     expect(normaliseMandateId(mmsId(id).toUpperCase())).toBe(id)
     expect(svc.get(mmsId(id)).id).toBe(id)
     expect(svc.get(id.toUpperCase()).id).toBe(id)
-    // the contract validates `format: uuid` path params before any handler runs
-    const res = await app.inject({ method: 'GET', url: `/v1/payto/mandates/${mmsId(id)}` })
-    expect(res.statusCode).toBe(400)
+    // path parameters: the 32-hex form reaches the domain although the contract declares `format: uuid`
+    for (const form of [mmsId(id), mmsId(id).toUpperCase(), id.toUpperCase()]) {
+      const res = await app.inject({ method: 'GET', url: `/v1/payto/mandates/${form}` })
+      expect(res.statusCode, form).toBe(200)
+      expect(res.json().mandateId).toBe(id)
+    }
+    expect((await patch(`/v1/payto/payer/mandates/${mmsId(id)}/resolve?resolution=ACCEPT`)).statusCode).toBe(200)
+    expect((await actions(mmsId(id), 'payer')).map((a) => a.mandateIdentification)).toEqual([id])
+    // body mandateId (makeAdhocPayment)
+    const paid = await adhoc(mmsId(id), { amount: AUD(2) })
+    expect(paid).toMatchObject({ mandateId: id, transactionStatus: 'ACCEPTED_AND_SETTLED' })
+    const status = await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${mmsId(id)}/instructions/${paid.instructionId}/status` })
+    expect(status.json()).toEqual({ transactionStatus: 'ACCEPTED_AND_SETTLED' })
+    // anything else is still a schema violation
+    for (const bad of ['not-a-mandate', `${mmsId(id)}0`, mmsId(id).slice(1)]) {
+      const res = await app.inject({ method: 'GET', url: `/v1/payto/mandates/${bad}` })
+      expect(res.statusCode, bad).toBe(400)
+    }
     const missing = await app.inject({ method: 'GET', url: `/v1/payto/mandates/${UNKNOWN_ID}` })
     expect(missing.statusCode).toBe(404)
     expect(missing.json().message).toBe(`NOT_FOUND: Mandate ${UNKNOWN_ID} not found`)
+    expect((await app.inject({ method: 'GET', url: `/v1/payto/mandates/${mmsId(UNKNOWN_ID)}` })).statusCode).toBe(404)
   })
 })
 
@@ -339,6 +356,57 @@ describe('createMandate', () => {
     }
   })
 
+  it('identifies a creditor by alias alone (PayID or the staging <bsb><account>@domain form) and debtors by the staging alias form', async () => {
+    const creditor = await newAccount()
+    const debtor = await newAccount()
+    const bodyWithCreditorAlias = (alias: string, type: 'EMAIL_ADDRESS' | 'PHONE_NUMBER' = 'EMAIL_ADDRESS') => {
+      const body = mandateBody(creditor, { accountId: debtor.accountHayId! })
+      return { ...body, creditorDetails: { accountAliasIdentification: alias, accountAliasType: type, partyType: 'ORGANISATION' as const } }
+    }
+    // staging form: the alias carries the BSB + account number
+    const staging = await app.inject({ method: 'POST', url: '/v1/payto/initiator/mandates', payload: bodyWithCreditorAlias(`${LOCAL_BSB}${creditor.accountNumber}@payto.example`) })
+    expect(staging.statusCode, staging.body).toBe(200)
+    expect((await getMandate(staging.json().mandateId)).creditorDetails).toEqual({ accountId: creditor.accountHayId, partyType: 'ORGANISATION' })
+    // a PayID registered on the creditor account
+    const payId = `acme-${randomUUID().slice(0, 8)}@example.com`
+    const reg = await app.inject({ method: 'POST', url: `/v1/accounts/${creditor.accountHayId}/payids/${encodeURIComponent(payId)}/register`, payload: { ownerName: 'ACME', payIdName: 'Main', payIdType: 'EMAIL' } })
+    expect(reg.statusCode, reg.body).toBe(200)
+    const byPayId = await app.inject({ method: 'POST', url: '/v1/payto/initiator/mandates', payload: bodyWithCreditorAlias(payId) })
+    expect(byPayId.statusCode, byPayId.body).toBe(200)
+    expect(svc.mandateIdsForCreditorAccount(creditor.accountHayId!)).toEqual([staging.json().mandateId, byPayId.json().mandateId])
+    // unresolvable aliases are the documented creditor rejection; a lone alias field is still a schema violation
+    for (const alias of ['nobody@example.com', `08201612345678@payto.example`, `${LOCAL_BSB}99999999@payto.example`]) {
+      const res = await app.inject({ method: 'POST', url: '/v1/payto/initiator/mandates', payload: bodyWithCreditorAlias(alias) })
+      expect(res.statusCode, alias).toBe(422)
+      expect(res.json().message).toBe(ACCOUNT_DETAILS_INCORRECT('Creditor'))
+    }
+    const lone = await app.inject({ method: 'POST', url: '/v1/payto/initiator/mandates', payload: { ...mandateBody(creditor, { accountId: debtor.accountHayId! }), creditorDetails: { accountAliasIdentification: payId } } })
+    expect(lone.statusCode).toBe(400)
+
+    // debtor aliases: the staging form resolves a local account, a foreign BSB stays an external debtor
+    const local = await getMandate(await createMandate(creditor, { accountAliasIdentification: `${LOCAL_BSB}${debtor.accountNumber}@payto.example`, accountAliasType: 'EMAIL_ADDRESS' }))
+    expect(local.debtorDetails).toMatchObject({ accountId: debtor.accountHayId, accountNumber: `${LOCAL_BSB}${debtor.accountNumber}` })
+    const foreign = await getMandate(await createMandate(creditor, { accountAliasIdentification: `${EXTERNAL_DEBTOR}@payto.example`, accountAliasType: 'EMAIL_ADDRESS' }))
+    expect(foreign.debtorDetails).toEqual({ accountNumber: EXTERNAL_DEBTOR, partyName: 'JOHN MAXIMILLIAN DOE', partyType: 'PERSON' })
+  })
+
+  it('refuses a debtor account equal to the creditor account and amounts above maximumAmount', async () => {
+    const creditor = await newAccount()
+    const same = await app.inject({ method: 'POST', url: '/v1/payto/initiator/mandates', payload: mandateBody(creditor, { accountId: creditor.accountHayId! }) })
+    expect(same.statusCode).toBe(422)
+    expect(same.json().message).toBe('INVALID_ARGUMENT: the debtor account must differ from the creditor account')
+    for (const [terms, field] of [
+      [{ frequency: 'ADHOC', type: 'FIXED', amount: AUD(10.01), maximumAmount: AUD(10) }, 'amount'],
+      [{ frequency: 'MONTHLY', type: 'BALLOON', amount: AUD(5), maximumAmount: AUD(10), lastPayment: { amount: AUD(50), date: '2031-01-01' } }, 'lastPayment.amount'],
+      [{ frequency: 'MONTHLY', type: 'FIXED', maximumAmount: AUD(10), firstPayment: { amount: AUD(11), date: '2030-01-01' } }, 'firstPayment.amount'],
+    ] as const) {
+      const res = await app.inject({ method: 'POST', url: '/v1/payto/initiator/mandates', payload: mandateBody(creditor, { accountNumber: EXTERNAL_DEBTOR }, { paymentTerms: terms as CreateMandateBody['paymentTerms'] }) })
+      expect(res.statusCode, field).toBe(422)
+      expect(res.json().message).toBe(`INVALID_ARGUMENT: paymentTerms.${field} must not exceed paymentTerms.maximumAmount`)
+    }
+    expect(svc.mandateIdsForCreditorAccount(creditor.accountHayId!)).toEqual([])
+  })
+
   it('getMandateIdsByInitiator lists every status in creation order and is 404 for an unknown account', async () => {
     const creditor = await newAccount()
     const a = await createMandate(creditor, { accountNumber: EXTERNAL_DEBTOR })
@@ -380,6 +448,15 @@ describe('getMandates', () => {
     expect(active.json()).toEqual({ totalCount: 1, result: [expect.objectContaining({ mandateId: ids[1] })] })
     const comma = await app.inject({ method: 'GET', url: `/v1/payto/mandates?accountIds=${number},${LOCAL_BSB}${other.accountNumber}&pageNumber=1&pageSize=50` })
     expect(comma.json().totalCount).toBe(4)
+    // a platform account id is matched against the debtor account too
+    const byId = await app.inject({ method: 'GET', url: `/v1/payto/mandates?accountIds=${debtor.accountHayId}&accountIds=${LOCAL_BSB}${other.accountNumber}&statuses=CREATED&statuses=ACTIVE&pageNumber=1&pageSize=50` })
+    expect(byId.json().totalCount).toBe(4)
+    const cancelled = await app.inject({ method: 'GET', url: `/v1/payto/mandates?accountIds=${debtor.accountHayId}&statuses=CANCELLED&pageNumber=1&pageSize=50` })
+    expect(cancelled.json()).toEqual({ totalCount: 0, result: [] })
+    const beyond = await app.inject({ method: 'GET', url: `/v1/payto/mandates?accountIds=${number}&pageNumber=3&pageSize=2` })
+    expect(beyond.json()).toEqual({ totalCount: 3, result: [] })
+    expect((await app.inject({ method: 'GET', url: `/v1/payto/mandates?accountIds=${number}&statuses=PAUSED&pageNumber=1&pageSize=5` })).statusCode).toBe(400)
+    expect((await app.inject({ method: 'GET', url: '/v1/payto/mandates?pageNumber=1&pageSize=5' })).statusCode).toBe(400)
     // external debtors are never the client's Payer side
     await createMandate(creditor, { accountNumber: EXTERNAL_DEBTOR })
     const external = await app.inject({ method: 'GET', url: `/v1/payto/mandates?accountIds=${EXTERNAL_DEBTOR}&pageNumber=1&pageSize=50` })
@@ -829,10 +906,17 @@ describe('makeAdhocPayment', () => {
     expect((await adhoc(blockedMandate)).transactionStatus).toBe('REJECTED')
     expect(svc.instructions(blockedMandate)[0]!.reasonCode).toBe('AC06')
 
+    expect((await adhoc(id, { amount: { currency: 'NZD', amount: 1 } })).transactionStatus).toBe('REJECTED')
+    expect(svc.instructions(id)[0]!.reasonCode).toBe('AM03')
+    expect((await adhoc(id, { amount: AUD(0) })).transactionStatus).toBe('REJECTED')
+    expect(svc.instructions(id)[0]!.reasonCode).toBe('AM01')
+
     expect((await app.inject({ method: 'POST', url: '/v1/payto/payments/adhoc', payload: { idempotencyKey: randomUUID(), mandateId: UNKNOWN_ID, amount: AUD(1) } })).statusCode).toBe(404)
-    expect((await app.inject({ method: 'POST', url: '/v1/payto/payments/adhoc', payload: { idempotencyKey: randomUUID(), mandateId: id, amount: AUD(1.005) } })).statusCode).toBe(400)
-    expect((await app.inject({ method: 'POST', url: '/v1/payto/payments/adhoc', payload: { idempotencyKey: randomUUID(), mandateId: id, amount: { currency: 'NZD', amount: 1 } } })).statusCode).toBe(422)
-    expect((await app.inject({ method: 'POST', url: '/v1/payto/payments/adhoc', payload: { idempotencyKey: randomUUID(), mandateId: id, endToEndId: '' } })).statusCode).toBe(400)
+    for (const payload of [{ amount: AUD(1.005) }, { amount: AUD(-1) }, { endToEndId: '' }, { endToEndId: 'x'.repeat(36) }, { mandateId: 'nope' }, { idempotencyKey: undefined }]) {
+      const res = await app.inject({ method: 'POST', url: '/v1/payto/payments/adhoc', payload: { idempotencyKey: randomUUID(), mandateId: id, amount: AUD(1), ...payload } })
+      expect(res.statusCode, JSON.stringify(payload)).toBe(400)
+      expect(res.json().message).toMatch(/^BAD_REQUEST:/)
+    }
     const missing = await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${id}/instructions/${staging.instructionId}/status` })
     expect(missing.statusCode).toBe(404)
     expect(missing.json().message).toBe(`NOT_FOUND: Payment instruction ${staging.instructionId} not found for mandate ${id}`)
@@ -843,6 +927,103 @@ describe('makeAdhocPayment', () => {
     const { id } = await activeMandate({ debtor })
     expect((await adhoc(id, { amount: AUD(1) })).transactionStatus).toBe('REJECTED')
     expect(svc.instructions(id)[0]!.reasonCode).toBe('AG07')
+  })
+})
+
+describe('staging payment trajectories (paymentstatus: hints)', () => {
+  async function status(mandateId: string, instructionId: string) {
+    const res = await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${mandateId}/instructions/${instructionId}/status` })
+    expect(res.statusCode, res.body).toBe(200)
+    return res.json()
+  }
+
+  it('parseTrajectory reads paymentstatus:<initial>[&<final>] and timeout_rjct from the first text carrying one', () => {
+    expect(parseTrajectory('Electricity')).toBeUndefined()
+    expect(parseTrajectory(undefined, 'paymentstatus:sent&undv')).toEqual({ initial: 'SENT', final: 'UNDELIVERED' })
+    expect(parseTrajectory('bill paymentstatus:SAFD please')).toEqual({ initial: 'STORE_AND_FORWARD' })
+    expect(parseTrajectory('paymentstatus:recv&rjct')).toEqual({ initial: 'RECEIVED', final: 'REJECTED' })
+    expect(parseTrajectory('paymentstatus:timeout_rjct')).toEqual({ initial: 'REJECTED' })
+    expect(parseTrajectory('paymentstatus:acsc')).toEqual({ initial: 'ACCEPTED_AND_SETTLED' })
+    expect(parseTrajectory('paymentstatus:nope', 'paymentstatus:accp&zzzz')).toEqual({ initial: 'ACCEPTED_FOR_CLEARANCE' })
+    expect(parseTrajectory('paymentstatus:undv', 'paymentstatus:sent')).toEqual({ initial: 'UNDELIVERED' })
+  })
+
+  it('a non-final initial status is answered at once (no MANDATE_PAYMENT), then reaches its final status asynchronously', async () => {
+    const debtor = await newAccount({ fund: 50 })
+    const { id, creditor } = await activeMandate({ debtor, overrides: { description: 'Utility paymentstatus:sent&undv' } })
+    await clearNotifications()
+    svc.paymentProgressDelayMs = DAY_MS
+    try {
+      const res = await app.inject({ method: 'POST', url: '/v1/payto/payments/adhoc', payload: { idempotencyKey: randomUUID(), mandateId: id, amount: AUD(5) } })
+      expect(res.json()).toMatchObject({ transactionStatus: 'SENT', transactionStatusDisplay: 'Sent', statusIsFinal: false, message: 'Adhoc payment executed successfully.' })
+      const { instructionId } = res.json() as AdhocResponse
+      expect(await status(id, instructionId)).toEqual({ transactionStatus: 'SENT' })
+      expect((await app.inject({ method: 'GET', url: `/v1/payto/initiator/mandates/${id}/search` })).json().paymentInstructions[0]).toMatchObject({ id: instructionId, transactionStatus: 'SENT' })
+      await advanceClock(DAY_MS)
+      expect(await status(id, instructionId)).toEqual({ transactionStatus: 'UNDELIVERED' })
+      const events = await paymentEvents(id)
+      expect(events).toEqual([{ customerHayId: creditor.accountHolderId, idempotencyKey: expect.any(String), type: 'MANDATE_PAYMENT', actionOwner: 'PLATFORM', mandatePaymentEventDto: { instructionId, mandateId: id, paymentStatus: 'MANDATE_PAYMENT_UNDELIVERED', isFinal: true, originId: id, originType: 'MANDATE_PAYMENT' } }])
+      assertValidNotification(events[0], 'v0')
+      expect((await getAccount(debtor.accountHayId!)).availableBalance).toBe(50)
+    } finally {
+      svc.paymentProgressDelayMs = undefined
+      await app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
+    }
+  })
+
+  it('a single non-final hint settles afterwards; a hint on the payment description overrides the mandate\'s; recv&rjct rejects with AB01', async () => {
+    const debtor = await newAccount({ fund: 50 })
+    const { id } = await activeMandate({ debtor, overrides: { description: 'paymentstatus:safd' } })
+    await clearNotifications()
+    svc.paymentProgressDelayMs = DAY_MS
+    try {
+      const safd = await app.inject({ method: 'POST', url: '/v1/payto/payments/adhoc', payload: { idempotencyKey: randomUUID(), mandateId: id, amount: AUD(5) } })
+      expect(safd.json()).toMatchObject({ transactionStatus: 'STORE_AND_FORWARD', transactionStatusDisplay: 'Store & Forward', statusIsFinal: false })
+      expect((await getAccount(debtor.accountHayId!)).availableBalance).toBe(50)
+      await advanceClock(DAY_MS)
+      expect(await status(id, safd.json().instructionId)).toEqual({ transactionStatus: 'ACCEPTED_AND_SETTLED' })
+      expect((await getAccount(debtor.accountHayId!)).availableBalance).toBe(45)
+      const settled = (await allPayloads()).filter((p) => p.type === 'TRANSACTION' || p.type === 'MANDATE_PAYMENT')
+      expect(settled.map((p) => [p.type, p.actionOwner])).toEqual([['TRANSACTION', 'PLATFORM'], ['TRANSACTION', 'PLATFORM'], ['MANDATE_PAYMENT', 'PLATFORM']])
+
+      const recv = await app.inject({ method: 'POST', url: '/v1/payto/payments/adhoc', payload: { idempotencyKey: randomUUID(), mandateId: id, amount: AUD(5), description: 'paymentstatus:recv&rjct' } })
+      expect(recv.json()).toMatchObject({ transactionStatus: 'RECEIVED', transactionStatusDisplay: 'Received', statusIsFinal: false })
+      await advanceClock(DAY_MS)
+      expect(await status(id, recv.json().instructionId)).toEqual({ transactionStatus: 'REJECTED', transactionStatusReasonCode: 'AB01' })
+      expect((await paymentEvents(id)).at(-1).mandatePaymentEventDto).toMatchObject({ instructionId: recv.json().instructionId, paymentStatus: 'MANDATE_PAYMENT_REJECTED', reasonCode: 'AB01' })
+      expect((await getAccount(debtor.accountHayId!)).availableBalance).toBe(45)
+
+      const timeout = await adhoc(id, { amount: AUD(5), description: 'paymentstatus:timeout_rjct' })
+      expect(timeout).toMatchObject({ transactionStatus: 'REJECTED', statusIsFinal: true })
+      expect(await status(id, timeout.instructionId)).toEqual({ transactionStatus: 'REJECTED', transactionStatusReasonCode: 'AB01' })
+      // the agreement checks run first: a hint does not rescue a payment above maximumAmount
+      const tooMuch = await adhoc(id, { amount: AUD(1000), description: 'paymentstatus:sent&acsc' })
+      expect(tooMuch).toMatchObject({ transactionStatus: 'REJECTED', statusIsFinal: true })
+      expect(svc.instructions(id)[0]!.reasonCode).toBe('AM21')
+      // a settlement the ledger refuses after the hint is still a rejection with the ledger's reason
+      const poor = await app.inject({ method: 'POST', url: '/v1/payto/payments/adhoc', payload: { idempotencyKey: randomUUID(), mandateId: id, amount: AUD(100), description: 'paymentstatus:accp' } })
+      expect(poor.json().transactionStatus).toBe('ACCEPTED_FOR_CLEARANCE')
+      await advanceClock(DAY_MS)
+      expect(await status(id, poor.json().instructionId)).toEqual({ transactionStatus: 'REJECTED', transactionStatusReasonCode: 'AM04' })
+    } finally {
+      svc.paymentProgressDelayMs = undefined
+      await app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
+    }
+  })
+
+  it('an external debtor rejects with AB01 by default (the staging RJCT) but follows a hint that does not settle', async () => {
+    const creditor = await newAccount()
+    const external = await createMandate(creditor, { accountNumber: EXTERNAL_DEBTOR })
+    svc.emitMandateNotification('INITIATOR', external, 'MCRC')
+    const plain = await adhoc(external, { amount: AUD(1) })
+    expect(plain).toMatchObject({ transactionStatus: 'REJECTED', statusIsFinal: true })
+    const undelivered = await adhoc(external, { amount: AUD(1), description: 'paymentstatus:undv' })
+    expect(undelivered).toMatchObject({ transactionStatus: 'UNDELIVERED', transactionStatusDisplay: 'Undelivered', statusIsFinal: true })
+    const pending = await adhoc(external, { amount: AUD(1), description: 'paymentstatus:acsp&recv' })
+    expect(pending).toMatchObject({ transactionStatus: 'SETTLEMENT_ABORTED', statusIsFinal: false })
+    await flush()
+    expect(await status(external, pending.instructionId)).toEqual({ transactionStatus: 'RECEIVED' })
+    expect((await paymentEvents(external)).map((e) => e.mandatePaymentEventDto.paymentStatus)).toEqual(['MANDATE_PAYMENT_REJECTED', 'MANDATE_PAYMENT_UNDELIVERED'])
   })
 })
 
@@ -896,18 +1077,24 @@ describe('receivePaymentInstruction (RAPAIN, for utilities)', () => {
 // ---------------------------------------------------------------- scheduled payments
 
 describe('scheduled payments and setScheduledPaymentInitiationRequestAmount', () => {
-  it('a VARIABLE monthly mandate gets MANDATE_DUE_PAYMENT on activation; the amount is set by notificationId and initiated when the clock reaches the due time', async () => {
+  it('a VARIABLE monthly mandate: MANDATE_DUE_PAYMENT one day before the initiation, the amount is set by notificationId and initiated when the clock reaches the due time', async () => {
     const now = await today()
     const debtor = await newAccount({ fund: 500 })
     const creditor = await newAccount()
     const id = await createMandate(creditor, { accountId: debtor.accountHayId! }, { paymentTerms: { frequency: 'MONTHLY', type: 'VARIABLE', maximumAmount: AUD(100) }, validityStartDate: plusDays(now, 3) })
     await clearNotifications()
     expect((await patch(`/v1/payto/payer/mandates/${id}/resolve?resolution=ACCEPT`)).statusCode).toBe(200)
+    const scheduled = svc.schedule(id)!
+    expect(scheduled).toMatchObject({ dueDate: plusDays(now, 3), paymentDateTime: `${plusDays(now, 3)}T00:00:00.000000Z`, announce: true })
+    expect(scheduled.announcedAt).toBeUndefined()
+    expect((await allPayloads()).filter((p) => p.type === 'MANDATE_DUE_PAYMENT')).toEqual([])
+
+    await advanceClock(2 * DAY_MS)
     const due = (await allPayloads()).filter((p) => p.type === 'MANDATE_DUE_PAYMENT')
-    expect(due).toEqual([{ customerHayId: creditor.accountHolderId, idempotencyKey: expect.any(String), type: 'MANDATE_DUE_PAYMENT', actionOwner: 'PLATFORM', mandateDuePaymentEventDto: { mandateId: id, notificationId: expect.any(String), paymentDateTimeUtc: `${plusDays(now, 3)}T00:00:00.000000Z` } }])
+    expect(due).toEqual([{ customerHayId: creditor.accountHolderId, idempotencyKey: expect.any(String), type: 'MANDATE_DUE_PAYMENT', actionOwner: 'PLATFORM', mandateDuePaymentEventDto: { mandateId: id, notificationId: scheduled.notificationId, paymentDateTimeUtc: `${plusDays(now, 3)}T00:00:00.000000Z` } }])
     assertValidNotification(due[0], 'v0')
     const { notificationId } = due[0].mandateDuePaymentEventDto
-    expect(svc.schedule(id)).toMatchObject({ notificationId, dueDate: plusDays(now, 3) })
+    expect(svc.instructions(id)).toEqual([])
 
     const wrongMandate = await patch(`/v1/payto/initiator/mandates/${UNKNOWN_ID}/payments/amount`, { amount: AUD(40), notificationId })
     expect(wrongMandate.statusCode).toBe(404)
@@ -917,35 +1104,45 @@ describe('scheduled payments and setScheduledPaymentInitiationRequestAmount', ()
     const tooMuch = await patch(`/v1/payto/initiator/mandates/${id}/payments/amount`, { amount: AUD(140), notificationId })
     expect(tooMuch.statusCode).toBe(422)
     expect(tooMuch.json().message).toMatch(/^INVALID_AMOUNT:/)
+    for (const payload of [{ amount: AUD(40) }, { notificationId }, { amount: AUD(40.001), notificationId }, { amount: AUD(40), notificationId: 'x' }]) {
+      expect((await patch(`/v1/payto/initiator/mandates/${id}/payments/amount`, payload)).statusCode, JSON.stringify(payload)).toBe(400)
+    }
     const set = await patch(`/v1/payto/initiator/mandates/${id}/payments/amount`, { amount: AUD(40), notificationId })
     expect(set.statusCode, set.body).toBe(200)
     expect(set.json()).toEqual({ message: 'Scheduled payment amount set successfully.' })
+    expect(svc.schedule(id)?.amountCents).toBe(4000)
 
     await clearNotifications()
-    await advanceClock(2 * DAY_MS)
-    expect(svc.instructions(id)).toEqual([])
     await advanceClock(2 * DAY_MS)
     const [instruction] = svc.instructions(id)
     expect(instruction).toMatchObject({ origin: 'SCHEDULED', amountCents: 4000, status: 'ACCEPTED_AND_SETTLED', endToEndId: 'NET-1724' })
     expect((await getAccount(debtor.accountHayId!)).availableBalance).toBe(460)
     const payloads = await allPayloads()
-    // the creditor account's first posting also flips it APPROVED -> ACTIVE (accounts domain)
-    expect(payloads.map((p) => p.type)).toEqual(['TRANSACTION', 'ACCOUNT_STATUS_CHANGE', 'TRANSACTION', 'MANDATE_PAYMENT', 'MANDATE_DUE_PAYMENT'])
+    // the creditor account's first posting also flips it APPROVED -> ACTIVE (accounts domain); the next payment is a month away
+    expect(payloads.map((p) => p.type)).toEqual(['TRANSACTION', 'ACCOUNT_STATUS_CHANGE', 'TRANSACTION', 'MANDATE_PAYMENT'])
     expect(payloads[1]).toMatchObject({ customerHayId: creditor.accountHolderId, accountStatusChangeEvent: { accountStatus: 'ACTIVE' } })
+    expect(payloads[0].transactionEvent).toMatchObject({ transactionType: 'INTERBANK_TRANSFER_OUT', currencyAmount: AUD(-40), originType: 'MANDATE_PAYMENT', mandatePaymentDetails: { mandateId: id, instructionId: instruction!.id } })
     expect(payloads[3]).toMatchObject({ actionOwner: 'PLATFORM', mandatePaymentEventDto: { instructionId: instruction!.id, paymentStatus: 'MANDATE_PAYMENT_ACCEPTED', isFinal: true } })
-    expect(payloads[4].mandateDuePaymentEventDto).toMatchObject({ mandateId: id, paymentDateTimeUtc: `${stepDate(plusDays(now, 3), 'MONTHLY')}T00:00:00.000000Z` })
-    expect(payloads[4].mandateDuePaymentEventDto.notificationId).not.toBe(notificationId)
     for (const p of payloads) assertValidNotification(p, 'v0')
-
-    // without an amount the next scheduled PIR is rejected with AM12; a suspended mandate defers
     const next = svc.schedule(id)!
+    expect(next).toMatchObject({ dueDate: stepDate(plusDays(now, 3), 'MONTHLY'), paymentDateTime: `${stepDate(plusDays(now, 3), 'MONTHLY')}T00:00:00.000000Z` })
+    expect(next.notificationId).not.toBe(notificationId)
+
+    // a suspended mandate defers both the announcement and the payment; on release both happen, and without an amount the PIR is rejected with AM12
     expect((await patch(`/v1/payto/initiator/mandates/${id}/suspend`, {})).statusCode).toBe(200)
     await advanceClock(32 * DAY_MS)
     expect(svc.instructions(id)).toHaveLength(1)
-    expect(svc.schedule(id)?.notificationId).toBe(next.notificationId)
+    expect(svc.schedule(id)).toMatchObject({ notificationId: next.notificationId })
+    expect(svc.schedule(id)!.announcedAt).toBeUndefined()
+    await clearNotifications()
     expect((await patch(`/v1/payto/initiator/mandates/${id}/release`)).statusCode).toBe(200)
     await flush()
     expect(svc.instructions(id)[0]).toMatchObject({ origin: 'SCHEDULED', status: 'REJECTED', reasonCode: 'AM12' })
+    const afterRelease = await allPayloads()
+    expect(afterRelease.map((p) => p.type)).toEqual(['MANDATE', 'MANDATE', 'MANDATE_DUE_PAYMENT', 'MANDATE_PAYMENT'])
+    expect(afterRelease[2].mandateDuePaymentEventDto.notificationId).toBe(next.notificationId)
+    expect(afterRelease[3].mandatePaymentEventDto).toMatchObject({ paymentStatus: 'MANDATE_PAYMENT_REJECTED', reasonCode: 'AM12' })
+    expect(afterRelease[3].mandatePaymentEventDto.transactionHayId).toBeUndefined()
     expect(svc.schedule(id)?.notificationId).not.toBe(next.notificationId)
     // cancellation drops the schedule
     expect((await patch(`/v1/payto/payer/mandates/${id}/cancel`, {})).statusCode).toBe(200)
@@ -953,11 +1150,13 @@ describe('scheduled payments and setScheduledPaymentInitiationRequestAmount', ()
     await app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
   })
 
-  it('FIXED terms take the amount from paymentTerms / firstPayment / lastPayment and stop after lastPayment.date; the amount cannot be set', async () => {
+  it('FIXED terms take the amount from paymentTerms / firstPayment / lastPayment and stop after lastPayment.date; no MANDATE_DUE_PAYMENT, the amount cannot be set', async () => {
     const now = await today()
     const debtor = await newAccount({ fund: 500 })
     const first = plusDays(now, 2)
+    await clearNotifications()
     const { id } = await activeMandate({ debtor, terms: { frequency: 'WEEKLY', type: 'FIXED', amount: AUD(10), firstPayment: { amount: AUD(15), date: first }, lastPayment: { amount: AUD(5), date: plusDays(first, 7) } } })
+    expect(svc.schedule(id)).toMatchObject({ dueDate: first, announce: false })
     const set = await patch(`/v1/payto/initiator/mandates/${id}/payments/amount`, { amount: AUD(40), notificationId: svc.schedule(id)!.notificationId })
     expect(set.statusCode).toBe(422)
     expect(set.json().message).toMatch(/FIXED payment terms/)
@@ -967,6 +1166,7 @@ describe('scheduled payments and setScheduledPaymentInitiationRequestAmount', ()
     expect(svc.instructions(id).map((i) => i.amountCents)).toEqual([500, 1500])
     expect(svc.schedule(id)).toBeUndefined()
     expect((await getAccount(debtor.accountHayId!)).availableBalance).toBe(480)
+    expect((await allPayloads()).filter((p) => p.type === 'MANDATE_DUE_PAYMENT')).toEqual([])
     await app.inject({ method: 'POST', url: '/_admin/clock', payload: { reset: true } })
   })
 
@@ -1072,6 +1272,36 @@ describe('emitMandateNotification (mock generators)', () => {
     expect(() => svc.emitMandateNotification('PAYER', 'not-an-id', 'MCRT')).toThrow(expect.objectContaining({ status: 404 }))
   })
 
+  it('applies the MMS state of each trigger: PCRD declines like MCRD, MCRX times out, MAMC / MAMD / MAMX / MAMR resolve a pending amendment, others only notify', async () => {
+    const creditor = await newAccount()
+    const debtor = await newAccount()
+    const declined = await createMandate(creditor, { accountId: debtor.accountHayId! })
+    await clearNotifications()
+    svc.emitMandateNotification('INITIATOR', declined, 'PCRD')
+    expect(svc.get(declined)).toMatchObject({ status: 'CANCELLED', cxStatus: 'CANCELLED' })
+    expect((await actions(declined))[0]).toMatchObject({ type: 'CREATE', status: 'DECLINED' })
+    expect((await mandateEvents(declined)).map((e) => [e.customerHayId, e.mandateEventDto.trigger, e.actionOwner])).toEqual([[creditor.accountHolderId, 'MCRD', 'PLATFORM'], [creditor.accountHolderId, 'PCRD', 'PLATFORM']])
+
+    const expired = await createMandate(creditor, { accountId: debtor.accountHayId! })
+    svc.emitMandateNotification('PAYER', expired, 'MCRX')
+    expect(svc.get(expired)).toMatchObject({ status: 'CANCELLED', cxStatus: 'CANCELLED_AUTHORISATION_TIMED_OUT' })
+    expect((await actions(expired))[0]).toMatchObject({ status: 'TIMED_OUT' })
+
+    const terms: CreateMandateBody['paymentTerms'] = { frequency: 'MONTHLY', type: 'VARIABLE', maximumAmount: AUD(10), firstPayment: { date: '2035-01-10' } }
+    const { id } = await activeMandate({ creditor, debtor, terms })
+    for (const [trigger, outcome, max] of [['MAMC', 'COMPLETED', AUD(20)], ['MAMD', 'DECLINED', AUD(20)], ['MAMX', 'TIMED_OUT', AUD(20)], ['MAMR', 'RECALLED', AUD(20)]] as const) {
+      expect((await patch(`/v1/payto/initiator/mandates/${id}/payment_terms`, { paymentTerms: { ...terms, maximumAmount: AUD(max.amount + (outcome === 'COMPLETED' ? 0 : 5)) } })).statusCode).toBe(200)
+      svc.emitMandateNotification('INITIATOR', id, trigger)
+      expect((await actions(id)).at(-1), trigger).toMatchObject({ type: 'AMEND', status: outcome })
+      expect(svc.get(id).status).toBe('ACTIVE')
+    }
+    expect((await getMandate(id)).paymentTerms.maximumAmount).toEqual(AUD(20))
+    await clearNotifications()
+    for (const trigger of ['MSCH', 'MAMN', 'MPOF', 'MCRT'] as const) svc.emitMandateNotification('PAYER', id, trigger)
+    expect(svc.get(id).status).toBe('ACTIVE')
+    expect((await mandateEvents(id)).map((e) => [e.customerHayId, e.mandateEventDto.trigger])).toEqual(['MSCH', 'MAMN', 'MPOF', 'MCRT'].map((t) => [debtor.accountHolderId, t]))
+  })
+
   it('creates an unknown mandate from the mock mandateDetails (an external Initiator reaching a local Payer)', async () => {
     const debtor = await newAccount({ fund: 40 })
     const id = mmsId('1212c423-262b-11ee-844d-95ee6a0c000c')
@@ -1092,11 +1322,33 @@ describe('emitMandateNotification (mock generators)', () => {
     const read = await getMandate(m.id)
     expect(read.creditorDetails).toBeUndefined()
     expect(read).toMatchObject({ status: 'CREATED', description: 'From the MMS', validityStartDate: '2025-01-01', paymentTerms: { frequency: 'MONTHLY', type: 'FIXED', amount: AUD(25) } })
-    // the local Payer resolves it like any other, the Initiator side has nobody to notify
+    // the local Payer resolves it like any other; the Initiator side has nobody to notify and its
+    // payments arrive as inbound instructions (RAPAIN), so nothing is scheduled locally
     await clearNotifications()
     expect((await patch(`/v1/payto/payer/mandates/${m.id}/resolve?resolution=ACCEPT`)).statusCode).toBe(200)
     expect(svc.get(m.id).status).toBe('ACTIVE')
-    expect((await allPayloads()).map((p) => p.type)).toEqual(['MANDATE_DUE_PAYMENT'])
+    expect(await allPayloads()).toEqual([])
+    expect(svc.schedule(m.id)).toBeUndefined()
+    // the client is only the Payer here: every Initiator-only operation is refused with 403
+    const initiatorOps: [string, string, object | undefined][] = [
+      ['PUT', `/v1/payto/initiator/mandates/${m.id}`, { creditorAccountId: debtor.accountHayId }],
+      ['GET', `/v1/payto/initiator/mandates/${m.id}/actions`, undefined],
+      ['PATCH', `/v1/payto/initiator/mandates/${m.id}/cancel`, {}],
+      ['GET', `/v1/payto/initiator/mandates/${m.id}/instructions/${BIC}I20230801000000000079280/status`, undefined],
+      ['PATCH', `/v1/payto/initiator/mandates/${m.id}/payment_terms`, { validityEndDate: '2041-01-01' }],
+      ['PATCH', `/v1/payto/initiator/mandates/${m.id}/payments/amount`, { amount: AUD(1), notificationId: UNKNOWN_ID }],
+      ['PATCH', `/v1/payto/initiator/mandates/${m.id}/release`, undefined],
+      ['PATCH', `/v1/payto/initiator/mandates/${m.id}/resolve`, undefined],
+      ['GET', `/v1/payto/initiator/mandates/${m.id}/search`, undefined],
+      ['PATCH', `/v1/payto/initiator/mandates/${m.id}/suspend`, {}],
+      ['POST', '/v1/payto/payments/adhoc', { idempotencyKey: randomUUID(), mandateId: m.id, amount: AUD(1) }],
+    ]
+    for (const [method, url, payload] of initiatorOps) {
+      const res = await app.inject({ method: method as 'GET', url, ...(payload ? { payload } : {}) })
+      expect(res.statusCode, `${method} ${url}`).toBe(403)
+      expect(res.json().message).toBe(`FORBIDDEN: the client is not the Initiator of mandate ${m.id}`)
+    }
+    expect((await getMandate(m.id)).status).toBe('ACTIVE')
     const search = await app.inject({ method: 'GET', url: `/v1/payto/mandates?accountIds=${LOCAL_BSB}${debtor.accountNumber}&pageNumber=1&pageSize=10` })
     expect(search.json().result.map((r: { mandateId: string }) => r.mandateId)).toEqual([m.id])
     // an inbound RAPAIN on it settles the debtor leg only
@@ -1117,7 +1369,8 @@ describe('webhook contract', () => {
     await patch(`/v1/payto/initiator/mandates/${id}/suspend`, { reasonCode: 'MD17' })
     await patch(`/v1/payto/initiator/mandates/${id}/release`)
     await patch(`/v1/payto/initiator/mandates/${id}/cancel`, {})
-    const monthly = await activeMandate({ debtor, terms: { frequency: 'MONTHLY', type: 'VARIABLE', firstPayment: { date: '2035-01-10' } } })
+    // due today: initiated one lead time from now, so MANDATE_DUE_PAYMENT goes out at once
+    const monthly = await activeMandate({ debtor, terms: { frequency: 'MONTHLY', type: 'VARIABLE' }, overrides: { validityStartDate: await today() } })
     await patch(`/v1/payto/initiator/mandates/${monthly.id}/payment_terms`, { validityEndDate: '2040-01-01' })
     await patch(`/v1/payto/payer/mandates/${monthly.id}/resolve?resolution=REJECT`)
     await flush()
