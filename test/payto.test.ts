@@ -823,6 +823,18 @@ describe('amendMandatePaymentTerms', () => {
     expect((await mandateEvents(id)).at(-1)).toMatchObject({ customerHayId: creditor.accountHolderId, mandateEventDto: { trigger: 'MAMC', description: 'Mandate amend confirmed' } })
   })
 
+  it('an accepted amendment replaces the payment terms (the request carries full terms): fields it leaves out are gone', async () => {
+    const debtor = await newAccount({ fund: 2000 })
+    const { id } = await activeMandate({ debtor })
+    expect((await getMandate(id)).paymentTerms).toEqual({ frequency: 'ADHOC', type: 'VARIABLE', maximumAmount: AUD(900) })
+    expect((await patch(`/v1/payto/initiator/mandates/${id}/payment_terms`, { paymentTerms: { frequency: 'ADHOC', type: 'VARIABLE', amount: AUD(1000) } })).statusCode).toBe(200)
+    expect((await patch(`/v1/payto/payer/mandates/${id}/resolve?resolution=ACCEPT`)).statusCode).toBe(200)
+    expect((await getMandate(id)).paymentTerms).toEqual({ frequency: 'ADHOC', type: 'VARIABLE', amount: AUD(1000) })
+    // the agreed amount is payable: no stale maximumAmount below it
+    expect((await adhoc(id, { amount: undefined })).transactionStatus).toBe('ACCEPTED_AND_SETTLED')
+    expect((await getAccount(debtor.accountHayId!)).availableBalance).toBe(1000)
+  })
+
   it('REJECT declines the amendment (MAMD) and a recall withdraws it (MAMR to the Payer); validation of the proposal', async () => {
     const { id, creditor, debtor } = await activeMandate({ terms })
     expect((await patch(`/v1/payto/initiator/mandates/${id}/payment_terms`, { paymentTerms: { ...terms, maximumAmount: AUD(150) } })).statusCode).toBe(200)

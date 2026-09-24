@@ -40,7 +40,7 @@
  *   MANDATE_ACTION_EXPIRATION is emitted (webhook-matrix C12).
  * - amendMandatePaymentTerms needs ACTIVE / SUSPENDED, a body with paymentTerms or validityEndDate (400),
  *   immutable frequency / type (422) and no other pending action (422); the proposal is visible only in the
- *   action's details until the Payer accepts (MAMC applies it and re-schedules the next payment).
+ *   action's details until the Payer accepts (MAMC applies it — the proposed paymentTerms replace the old ones as a whole, fields left out are dropped — and re-schedules the next payment).
  *   amendMandateByInitiator / amendMandateByPayer need ACTIVE / SUSPENDED and a replacement account that
  *   exists (404), is ACTIVE (422 INVALID_ACCOUNT_STATUS) and has the same holder (422 PERMISSION_DENIED);
  *   the counterparty receives MAMN.

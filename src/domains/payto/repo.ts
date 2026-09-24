@@ -130,9 +130,9 @@ export interface ActionDetails {
   statusChange?: { change: StatusChange; reasonCode?: string; reasonDescription?: string }
 }
 
-/** Internal record of what a pending bilateral AMEND proposes; applied on acceptance. */
+/** Internal record of what a pending bilateral AMEND proposes; applied on acceptance (paymentTerms replace the agreement's). */
 export interface AmendProposal {
-  paymentTerms?: Partial<PaymentTerms>
+  paymentTerms?: PaymentTerms
   validityEndDate?: string
 }
 

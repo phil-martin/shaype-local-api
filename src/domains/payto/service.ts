@@ -531,7 +531,7 @@ export class PayToService {
     }
     const action = this.addAction(m, {
       type: 'AMEND', status: 'PENDING', bilateral: true, partyRole: 'PAYMENT_INITIATOR', expires: true, resolutionRequestedBy: body.resolutionRequestedBy, proposal,
-      details: { amendment: compact({ paymentInformation: proposal.paymentTerms ? paymentInformation(proposal.paymentTerms as PaymentTerms) : undefined, validityEndDate: proposal.validityEndDate, resolutionRequestedBy: body.resolutionRequestedBy }) },
+      details: { amendment: compact({ paymentInformation: proposal.paymentTerms ? paymentInformation(proposal.paymentTerms) : undefined, validityEndDate: proposal.validityEndDate, resolutionRequestedBy: body.resolutionRequestedBy }) },
       cxEventNameCreation: 'Updated payment terms received',
     })
     this.notify(m, 'PAYER', 'MAMP', action, 'CLIENT')
@@ -589,8 +589,9 @@ export class PayToService {
     return action
   }
 
+  /** The proposal's paymentTerms replace the agreement's (the request carries a full CreatePaymentTermsDto, validated as a whole by parseTerms). */
   private applyProposal(m: Mandate, p: AmendProposal): void {
-    if (p.paymentTerms) m.paymentTerms = { ...m.paymentTerms, ...p.paymentTerms } as PaymentTerms
+    if (p.paymentTerms) m.paymentTerms = p.paymentTerms
     if (p.validityEndDate !== undefined) m.validityEndDate = p.validityEndDate
     m.updatedAt = isoUtc(this.ctx.clock.now())
     this.repo.saveMandate(m)
