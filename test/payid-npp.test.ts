@@ -190,9 +190,30 @@ describe('postPayIdRegister', () => {
       ['not-an-email', 'EMAIL'], ['two words@example.com', 'EMAIL'], ['@example.com', 'EMAIL'], ['a@b@example.com', 'EMAIL'],
       ['12345678', 'INDIVIDUAL_AUSTRALIAN_BUSINESS'], ['123456789012', 'INDIVIDUAL_AUSTRALIAN_BUSINESS'], ['ABN601428737', 'INDIVIDUAL_AUSTRALIAN_BUSINESS'],
       ['   ', 'ORGANISATION'],
+      [`${'a'.repeat(245)}@example.com`, 'EMAIL'], ['o'.repeat(257), 'ORGANISATION'],
     ]
     for (const [payId, payIdType] of cases) expectError(await register(account.accountHayId!, payId, { payIdType }), 422, /^INVALID_PAY_ID/)
     expect(await listForAccount(account.accountHayId!)).toEqual([])
+  })
+
+  it('long values (over 100 and up to 256 characters) round-trip on every {payId} route', async () => {
+    const account = await newAccount()
+    for (const len of [122, 256]) {
+      const suffix = `${++n}@example.com`
+      const payId = `${'l'.repeat(len - suffix.length)}${suffix}`
+      expect(payId).toHaveLength(len)
+      const res = await register(account.accountHayId!, payId)
+      expect(res.statusCode, res.body).toBe(200)
+      expect((await details(payId)).payIdDetails).toMatchObject({ payIdValue: payId, status: 'ACTIVE' })
+      expect((await availability(payId, 'EMAIL')).json()).toMatchObject({ availability: false })
+      expect((await resolve(payId)).json()).toMatchObject({ payIdValue: payId })
+      expect((await updateDetails(payId, { payIdName: 'Long' })).statusCode).toBe(200)
+      await mustSetStatus(payId, { payIdStatus: 'DEREGISTERED', reason: 'CUST' })
+      expect(await history(payId)).toEqual([expect.objectContaining({ payIdName: 'Long', reason: 'CUST' })])
+    }
+    const org = 'o'.repeat(256)
+    expect((await register(account.accountHayId!, org, { payIdType: 'ORGANISATION' })).statusCode).toBe(200)
+    expect((await details(org, 'ORGANISATION')).payIdDetails).toMatchObject({ payIdValue: org })
   })
 
   it('validates the request: missing / empty body fields and a non-uuid account are 400', async () => {
