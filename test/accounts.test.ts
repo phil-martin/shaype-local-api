@@ -894,6 +894,18 @@ describe('closeAccount', () => {
     }
   })
 
+  it('an unused overdraft limit does not block closure, and a CLOSED account reports nothing spendable (limit 0)', async () => {
+    const a = await newLowRiskAccount()
+    const id = a.accountHayId!
+    expect((await app.inject({ method: 'PATCH', url: `/v0/accounts/${id}/overdraft`, payload: { overdraftLimit: 100 } })).statusCode).toBe(200)
+    expect((await app.inject({ method: 'POST', url: `/v0/accounts/${id}/close`, payload: { reason: 'CUSTOMER' } })).statusCode).toBe(202)
+    await flush()
+    expect(await getAccount(id)).toMatchObject({
+      status: 'CLOSED', totalBalance: 0, availableBalance: 0, overdraftLimit: 0, overdraftBalance: 0,
+      homeCurrencyBalanceEquivalent: { totalBalance: 0, availableBalance: 0, heldBalance: 0 },
+    })
+  })
+
   it('closes a LOCKED account (LOCKED -> CLOSED, CLIENT) and the customer that block put in BLOCKED ends INACTIVE with the reason', async () => {
     const holder = await newCustomer()
     const a = await newAccount(holder)

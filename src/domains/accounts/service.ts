@@ -615,7 +615,8 @@ export class AccountsService {
   /**
    * Generic status change (other domains / admin). Same status -> no-op. Leaving CLOSED, or moving to
    * PENDING_APPROVAL (never produced: accounts created through this API are always APPROVED) -> 422
-   * INVALID_STATE. Sets blockedBy on LOCKED (cleared otherwise), closedDateTimeUtc on CLOSED. Emits
+   * INVALID_STATE. Sets blockedBy on LOCKED (cleared otherwise), closedDateTimeUtc on CLOSED (and the
+   * overdraft limit to 0, so a CLOSED account reports nothing spendable). Emits
    * account.statusChanged.
    */
   setStatus(id: string, status: AccountStatus, opts: StatusOptions): Account {
@@ -635,6 +636,8 @@ export class AccountsService {
     if (to === 'CLOSED') {
       a.closedAt = now
       if (opts.closeReason) a.closeReason = opts.closeReason
+      // an unused limit does not block closure (00-balance C10), but a CLOSED account has nothing to spend
+      a.overdraftLimit = 0
     }
     this.repo.save(a)
     this.ctx.events.emit('account.statusChanged', { account: structuredClone(a), previousStatus: from, actionOwner: opts.actionOwner })
