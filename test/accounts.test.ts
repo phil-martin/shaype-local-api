@@ -722,6 +722,21 @@ describe('blockAccount / unblockAccount', () => {
     expect(await customerStatus(holder)).toBe('BLOCKED')
   })
 
+  it('a customer unblocked directly is no longer held by the LOCKED account: a later blockCustomer survives unblockAccount', async () => {
+    const holder = await newCustomer()
+    const id = (await newAccount(holder)).accountHayId!
+    await app.inject({ method: 'POST', url: `/v0/accounts/${id}/block`, payload: { note: 'x' } })
+    expect(await customerStatus(holder)).toBe('BLOCKED')
+    expect((await app.inject({ method: 'POST', url: `/v0/customers/${holder}/unblock`, payload: { note: 'ok' } })).statusCode).toBe(200)
+    expect((await getAccount(id)).status).toBe('LOCKED')
+    expect(svc.get(id).blockedCustomerIds ?? []).toEqual([])
+    expect((await app.inject({ method: 'POST', url: `/v0/customers/${holder}/block`, payload: { note: 'kyc' } })).statusCode).toBe(200)
+    expect((await app.inject({ method: 'POST', url: `/v0/accounts/${id}/unblock`, payload: { note: 'ok' } })).statusCode).toBe(200)
+    expect((await getAccount(id)).status).toBe('ACTIVE')
+    expect(await customerStatus(holder)).toBe('BLOCKED')
+    expect((await customerEvents(holder, 'CUSTOMER_STATUS_UPDATED')).map((e) => e.customerStatusUpdatedEvent.customerStatus)).toEqual(['ACTIVE', 'BLOCKED', 'ACTIVE', 'BLOCKED'])
+  })
+
   it('unblock lands on ACTIVE_IN_ARREARS when the account is technically overdrawn', async () => {
     const a = await newLowRiskAccount()
     const id = a.accountHayId!

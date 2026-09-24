@@ -36,4 +36,7 @@ export function registerEvents(ctx: AppContext, svc: AccountsService): void {
   }
   ctx.events.on('account.created', ({ account }) => emit(account, 'PLATFORM'))
   ctx.events.on('account.statusChanged', ({ account, actionOwner }) => emit(account, actionOwner))
+  ctx.events.on('customer.statusChanged', ({ customer, previousStatus }) => {
+    if (previousStatus === 'BLOCKED' && customer.status !== 'BLOCKED') svc.releaseCustomerHolds(customer.id)
+  })
 }

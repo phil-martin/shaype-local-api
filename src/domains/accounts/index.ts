@@ -14,7 +14,8 @@
  * - unblockAccount lands on ACTIVE_IN_ARREARS instead of ACTIVE when the account is technically overdrawn
  *   and also unblocks child accounts. Customers blocked through blockAccount are released only when the
  *   last LOCKED account holding them is unblocked (each default-style block records the customers it
- *   holds); customers blocked independently through blockCustomer stay BLOCKED.
+ *   holds); customers blocked independently through blockCustomer stay BLOCKED, and a customer that
+ *   leaves BLOCKED by any other route is dropped from every account's holds (a later blockCustomer is its own).
  * - blockAccount never touches cards (spec §5.2 lists no card cascade); child FX accounts are blocked too.
  *   A default-style block on an already LOCKED account still blocks the customer (it widens an earlier
  *   ACCOUNT_ONLY block); blockedBy follows the caller (CLIENT from the API, PLATFORM for platform blocks).

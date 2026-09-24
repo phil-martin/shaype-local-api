@@ -724,6 +724,20 @@ export class AccountsService {
     })()
   }
 
+  /**
+   * A customer left BLOCKED by another route (unblockCustomer, changeHayCustomerStatus, the closure
+   * cascade): no LOCKED account holds it any more, so a later independent blockCustomer is never lifted by
+   * unblockAccount (00-open-questions S3).
+   */
+  releaseCustomerHolds(customerId: string): void {
+    for (const a of this.repo.lockedBlockersOf(customerId)) {
+      const rest = (a.blockedCustomerIds ?? []).filter((cid) => cid !== customerId)
+      if (rest.length) a.blockedCustomerIds = rest
+      else delete a.blockedCustomerIds
+      this.repo.save(a)
+    }
+  }
+
   addClosureChecker(fn: ClosureChecker): void {
     this.closureCheckers.push(fn)
   }
